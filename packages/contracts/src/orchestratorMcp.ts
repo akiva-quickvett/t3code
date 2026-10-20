@@ -169,7 +169,19 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   isolation: Schema.optional(
     Schema.Literals(["shared", "worktree"]).annotate({
       description:
-        "Defaults to shared: use the parent's checkout. Worktree creates a separate checkout from the parent's current local commit before starting the child. Uncommitted edits are not copied.",
+        "Defaults to shared: use the parent's checkout. Worktree creates a separate checkout from the parent's current local commit, or from baseRef, before starting the child. Uncommitted edits are not copied.",
+    }),
+  ),
+  branch: Schema.optional(
+    TrimmedNonEmptyString.annotate({
+      description:
+        'Isolation "worktree" only: the new branch the child\'s checkout is created on. It must be a valid Git branch name that does not exist yet. Omitted, the branch is named automatically.',
+    }),
+  ),
+  baseRef: Schema.optional(
+    TrimmedNonEmptyString.annotate({
+      description:
+        "Isolation \"worktree\" only: the branch, tag, or commit in the project's repository the child's branch is cut from. An origin/<branch> ref is fetched first, so it starts from the latest remote state. Omitted, the parent's current local commit.",
     }),
   ),
   mode: Schema.optional(

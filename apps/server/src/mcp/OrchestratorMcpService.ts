@@ -60,6 +60,7 @@ import {
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
+import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import {
   normalizeThreadPullRequestKey,
@@ -949,6 +950,182 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+
+  const resolveParentCommit = (
+    project: Effect.Success<ReturnType<typeof requireProject>>,
+    parentWorktreePath: string | null,
+  ) =>
+    Effect.gen(function* () {
+      const base = yield* gitDriver
+        .resolveCommit({ cwd: parentWorktreePath ?? project.workspaceRoot, revision: "HEAD" })
+        .pipe(
+          Effect.mapError(() =>
+            failure("invalid_request", "Unable to resolve the parent checkout commit."),
+          ),
+        );
+      // Launch preparation creates the worktree from the project root, so a
+      // parent checkout in another repository (such as a Git folder inside
+      // Scratch) would hand it a commit it cannot find.
+      if (parentWorktreePath !== null) {
+        yield* gitDriver
+          .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
+          .pipe(
+            Effect.mapError(() =>
+              failure(
+                "invalid_request",
+                `Isolation "worktree" creates the child checkout in project "${project.title}" (${project.workspaceRoot}), which does not contain the parent checkout's commit. Use isolation "shared" to work in the parent's checkout.`,
+              ),
+            ),
+          );
+      }
+      return base.commitSha;
+    });
+
+  const runProjectGit = (
+    project: Effect.Success<ReturnType<typeof requireProject>>,
+    operation: string,
+    args: ReadonlyArray<string>,
+  ) =>
+    gitDriver
+      .execute({ operation, cwd: project.workspaceRoot, args, allowNonZeroExit: true })
+      .pipe(
+        Effect.mapError(() =>
+          failure("orchestration_error", `Unable to run Git in project "${project.title}".`),
+        ),
+      );
+
+  // Git's branch-name rule, as pull request review guides apply it. The output
+  // must echo the name: `--branch` expands `@{-1}` to another branch.
+  const isValidBranchName = (
+    project: Effect.Success<ReturnType<typeof requireProject>>,
+    branch: string,
+  ) =>
+    runProjectGit(project, "OrchestratorMcpService.checkBranchName", [
+      "check-ref-format",
+      "--branch",
+      branch,
+    ]).pipe(Effect.map((result) => result.exitCode === 0 && result.stdout.trim() === branch));
+
+  // A base is checked before the task is accepted, so a ref that cannot resolve
+  // is refused while the agent can still act on it. The strategy keeps the ref's
+  // name, as t3_thread_launch does, so the new branch records it as its pull
+  // request base.
+  const resolveDelegatedBase = (
+    project: Effect.Success<ReturnType<typeof requireProject>>,
+    baseRef: string,
+  ) =>
+    Effect.gen(function* () {
+      const originBranch = baseRef.startsWith("origin/") ? baseRef.slice("origin/".length) : null;
+      if (
+        originBranch !== null &&
+        (yield* gitDriver
+          .remoteExists({ cwd: project.workspaceRoot, remoteName: "origin" })
+          .pipe(Effect.orElseSucceed(() => false)))
+      ) {
+        if (!(yield* isValidBranchName(project, originBranch))) {
+          return yield* failure(
+            "invalid_request",
+            `"${baseRef}" does not name a branch on origin. No task was created.`,
+          );
+        }
+        // Scoped, unlike GitVcsDriver.fetchRemote, which falls back to a full
+        // fetch without prune and so would accept a branch deleted on origin.
+        const fetched = yield* runProjectGit(project, "OrchestratorMcpService.fetchBaseRef", [
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          "--",
+          "origin",
+          `+refs/heads/${originBranch}:refs/remotes/origin/${originBranch}`,
+        ]);
+        if (fetched.exitCode !== 0) {
+          return yield* failure(
+            "invalid_request",
+            fetched.stderr.includes("couldn't find remote ref")
+              ? `Branch "${originBranch}" does not exist on origin. No task was created.`
+              : `Unable to fetch "${baseRef}" from origin, so its latest state is unknown. Try again, or pass a local ref. No task was created.`,
+          );
+        }
+        // Preparation fetches it again and starts from the remote-tracking
+        // commit, so the child's branch does not track the base branch.
+        return { baseRef: originBranch, startFromOrigin: true };
+      }
+      const base = yield* gitDriver
+        .resolveCommit({ cwd: project.workspaceRoot, revision: baseRef })
+        .pipe(
+          Effect.mapError(() =>
+            failure(
+              "invalid_request",
+              `Base ref "${baseRef}" does not resolve to a commit in project "${project.title}" (${project.workspaceRoot}). No task was created. Pass a branch, tag, or commit that exists there, or origin/<branch> for a branch on origin.`,
+            ),
+          ),
+        );
+      // `git worktree add -b` from another remote-tracking ref would make the
+      // child's branch track it, and a later push land on that remote branch.
+      const symbolic = yield* runProjectGit(project, "OrchestratorMcpService.classifyBaseRef", [
+        "rev-parse",
+        "--symbolic-full-name",
+        "--verify",
+        "--end-of-options",
+        baseRef,
+      ]);
+      return {
+        baseRef: symbolic.stdout.trim().startsWith("refs/remotes/") ? base.commitSha : baseRef,
+        startFromOrigin: false,
+      };
+    });
+
+  // `git worktree add -b` refuses these only after the task is accepted, so they
+  // are checked here, where the agent can still pick another name.
+  const assertNewBranchName = (
+    project: Effect.Success<ReturnType<typeof requireProject>>,
+    branch: string,
+  ) =>
+    Effect.gen(function* () {
+      if (!(yield* isValidBranchName(project, branch))) {
+        return yield* failure(
+          "invalid_request",
+          `"${branch}" is not a valid Git branch name. No task was created.`,
+        );
+      }
+      // Launch preparation renames these to a generated name.
+      if (isTemporaryWorktreeBranch(branch)) {
+        return yield* failure(
+          "invalid_request",
+          `"${branch}" is reserved for automatically named worktree branches; pass another name. No task was created.`,
+        );
+      }
+      // Git stores refs as paths: `a/b` cannot exist beside `a` or `a/b/c`. A
+      // pattern matches its ref and the refs below it, so only exact matches of
+      // the leading segments count.
+      const segments = branch.split("/");
+      const ancestors = segments
+        .slice(1)
+        .map((_, index) => `refs/heads/${segments.slice(0, index + 1).join("/")}`);
+      const self = `refs/heads/${branch}`;
+      const listed = yield* runProjectGit(project, "OrchestratorMcpService.checkBranchExists", [
+        "for-each-ref",
+        "--format=%(refname)",
+        "--",
+        self,
+        ...ancestors,
+      ]);
+      const conflict = listed.stdout
+        .split("\n")
+        .find((ref) => ref === self || ref.startsWith(`${self}/`) || ancestors.includes(ref));
+      if (conflict === self) {
+        return yield* failure(
+          "invalid_request",
+          `Branch "${branch}" already exists in project "${project.title}" (${project.workspaceRoot}). A delegated worktree creates a new branch; pass another name. No task was created.`,
+        );
+      }
+      if (conflict !== undefined) {
+        return yield* failure(
+          "invalid_request",
+          `Branch "${branch}" cannot be created beside the existing branch "${conflict.slice("refs/heads/".length)}" in project "${project.title}"; pass another name. No task was created.`,
+        );
+      }
+    });
 
   const projectDefaultModelSelection = (
     project: Effect.Success<ReturnType<typeof requireProject>>,
@@ -1966,6 +2143,15 @@ const make = Effect.gen(function* () {
     delegateTask: (callerScope, input) =>
       Effect.gen(function* () {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
+        if (
+          input.isolation !== "worktree" &&
+          (input.branch !== undefined || input.baseRef !== undefined)
+        ) {
+          return yield* failure(
+            "invalid_request",
+            'branch and baseRef choose where a new checkout starts, so they require isolation "worktree". Set isolation "worktree", or omit them to share the parent\'s checkout.',
+          );
+        }
         const parentRun = parent.runs
           .filter(ThreadManagementService.isActiveRun)
           .toSorted((left, right) => right.ordinal - left.ordinal)[0];
@@ -2005,32 +2191,20 @@ const make = Effect.gen(function* () {
         let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
         if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
           const project = yield* requireProject(parent.thread.projectId);
-          const base = yield* gitDriver
-            .resolveCommit({
-              cwd: parent.thread.worktreePath ?? project.workspaceRoot,
-              revision: "HEAD",
-            })
-            .pipe(
-              Effect.mapError(() =>
-                failure("invalid_request", "Unable to resolve the parent checkout commit."),
-              ),
-            );
-          // Launch preparation creates the worktree from the project root, so a
-          // parent checkout in another repository (such as a Git folder inside
-          // Scratch) would hand it a commit it cannot find.
-          if (parent.thread.worktreePath !== null) {
-            yield* gitDriver
-              .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
-              .pipe(
-                Effect.mapError(() =>
-                  failure(
-                    "invalid_request",
-                    `Isolation "worktree" creates the child checkout in project "${project.title}" (${project.workspaceRoot}), which does not contain the parent checkout's commit. Use isolation "shared" to work in the parent's checkout.`,
-                  ),
-                ),
-              );
-          }
-          workspaceStrategy = { type: "worktree", baseRef: base.commitSha, startFromOrigin: false };
+          if (input.branch !== undefined) yield* assertNewBranchName(project, input.branch);
+          const base =
+            input.baseRef === undefined
+              ? {
+                  baseRef: yield* resolveParentCommit(project, parent.thread.worktreePath),
+                  startFromOrigin: false,
+                }
+              : yield* resolveDelegatedBase(project, input.baseRef);
+          workspaceStrategy = {
+            type: "worktree",
+            baseRef: base.baseRef,
+            ...(input.branch === undefined ? {} : { branch: input.branch }),
+            startFromOrigin: base.startFromOrigin,
+          };
         }
         // ThreadManagementService.dispatch is the chokepoint for this command
         // type's own enablement check, using the same command id and its

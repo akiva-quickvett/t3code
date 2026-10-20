@@ -23,6 +23,9 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   OrchestrationV2ThreadProjectionJson,
+  type OrchestratorMcpDelegateTaskInput,
+  type OrchestratorMcpDelegateTaskResult,
+  type OrchestratorMcpFailure,
   ScheduledTaskId,
   type ServerProvider,
   ThreadId,
@@ -129,6 +132,7 @@ interface HarnessOptions {
   readonly serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly git?: Partial<GitWorkflow.GitWorkflowService["Service"]>;
+  readonly workspaceRoot?: string;
 }
 
 function makeHarness(options: HarnessOptions = {}) {
@@ -183,7 +187,10 @@ function makeHarness(options: HarnessOptions = {}) {
       getById: (id) =>
         Effect.succeed(
           id === projectId
-            ? Option.some(project)
+            ? Option.some({
+                ...project,
+                workspaceRoot: options.workspaceRoot ?? project.workspaceRoot,
+              })
             : id === otherProjectId
               ? Option.some(otherProject)
               : Option.none(),
@@ -3270,4 +3277,406 @@ it.effect.each(
         }
       }).pipe(Effect.provide(Layer.merge(harness.layer, layerService)));
     }),
+);
+
+// A real clone of a real origin, so base refs, fetches and branch names follow
+// Git; only worktree creation and removal are recorded instead of run.
+const withDelegatedWorktreeRepo = <A, E>(
+  body: (context: {
+    readonly origin: string;
+    readonly repo: string;
+    readonly git: (
+      cwd: string,
+      args: ReadonlyArray<string>,
+    ) => Effect.Effect<string, GitCommandError>;
+    readonly commit: (cwd: string, message: string) => Effect.Effect<string, GitCommandError>;
+    readonly harness: ReturnType<typeof makeHarness>;
+    readonly threads: ThreadManagement.ThreadManagementService["Service"];
+    readonly parentThreadId: ThreadId;
+    readonly delegate: (
+      input: Omit<OrchestratorMcpDelegateTaskInput, "task" | "target">,
+    ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
+    readonly cancel: (
+      taskId: OrchestratorMcpDelegateTaskResult["taskId"],
+    ) => Effect.Effect<unknown, OrchestratorMcpFailure>;
+    readonly childStatus: (
+      childThreadId: ThreadId,
+      status: "starting" | "failed",
+    ) => Effect.Effect<unknown>;
+  }) => Effect.Effect<A, E>,
+  options: Pick<HarnessOptions, "runSetup"> = {},
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const gitDriver = yield* GitVcsDriver.GitVcsDriver;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "delegated-worktree-" });
+    const origin = `${directory}/origin`;
+    const repo = `${directory}/repo`;
+    const git = (cwd: string, args: ReadonlyArray<string>) =>
+      gitDriver
+        .execute({ operation: "delegated-worktree-test", cwd, args })
+        .pipe(Effect.map((result) => result.stdout.trim()));
+    const commit = (cwd: string, message: string) =>
+      git(cwd, [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        message,
+      ]);
+    yield* fs.makeDirectory(origin);
+    yield* git(origin, ["init", "-b", "main"]);
+    yield* commit(origin, "initial");
+    yield* git(origin, ["checkout", "-b", "slice"]);
+    yield* commit(origin, "slice work");
+    yield* git(origin, ["checkout", "main"]);
+    yield* git(directory, ["clone", "--quiet", origin, repo]);
+    const driver = ProviderDriverKind.make("codex");
+    const childInstanceId = ProviderInstanceId.make("child-codex");
+    const harness = makeHarness({
+      workspaceRoot: repo,
+      git: {
+        fetchRemote: gitDriver.fetchRemote,
+        remoteExists: gitDriver.remoteExists,
+        remoteBranchExists: gitDriver.remoteBranchExists,
+        resolveRemoteTrackingCommit: gitDriver.resolveRemoteTrackingCommit,
+      },
+      adapters: [adapter, { ...adapter, instanceId: childInstanceId, driver }],
+      serverSettings: { providerInstances: { [childInstanceId]: { driver, config: {} } } },
+      providers: [
+        {
+          instanceId: childInstanceId,
+          driver,
+          enabled: true,
+          installed: true,
+          version: "test",
+          checkedAt: "2026-10-20T00:00:00.000Z",
+          slashCommands: [],
+          skills: [],
+          status: "ready",
+          auth: { status: "authenticated" },
+          models: [{ slug: "child-model", name: "Child", isCustom: true, capabilities: null }],
+        },
+      ],
+      ...options,
+    });
+    const layerService = OrchestratorMcpService.layer.pipe(
+      Layer.provide(NodeCrypto.layer),
+      Layer.provide(harness.layer),
+      Layer.provide(Layer.succeed(GitVcsDriver.GitVcsDriver, gitDriver)),
+      Layer.provide(Layer.mock(ScheduledTasks.ScheduledTaskService)({})),
+      Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+    );
+    return yield* Effect.gen(function* () {
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const parentThreadId = ThreadId.make("thread:delegated-branch-parent");
+      yield* threads.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-branch-parent"),
+        threadId: parentThreadId,
+        projectId,
+        title: "Parent",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: "main",
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* threads.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("start-branch-parent"),
+        threadId: parentThreadId,
+        messageId: MessageId.make("branch-parent-message"),
+        text: "Delegate work",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const scope = {
+        environmentId: EnvironmentId.make("delegated-branch-test"),
+        requestNamespace: "parent-session",
+        thread: {
+          threadId: parentThreadId,
+          providerSessionId: "parent-session",
+          providerInstanceId: modelSelection.instanceId,
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"] as const),
+        issuedAt: 1,
+      };
+      return yield* body({
+        origin,
+        repo,
+        git,
+        commit,
+        harness,
+        threads,
+        parentThreadId,
+        delegate: (input) =>
+          service.delegateTask(scope, {
+            task: "Build the feature",
+            target: { providerInstanceId: childInstanceId, model: "child-model" },
+            ...input,
+          }),
+        cancel: (taskId) => service.cancelTask(scope, { taskId }),
+        childStatus: (childThreadId, status) =>
+          threads
+            .streamStoredEventsFrom({ threadId: childThreadId, eventType: "run.updated" })
+            .pipe(
+              Stream.filter(
+                (stored) =>
+                  stored.event.type === "run.updated" && stored.event.payload.status === status,
+              ),
+              Stream.runHead,
+              Effect.orDie,
+            ),
+      });
+    }).pipe(Effect.provide(Layer.merge(harness.layer, layerService)));
+  }).pipe(
+    Effect.provide(
+      GitVcsDriver.layer.pipe(
+        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "delegated-git-" })),
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
+  );
+
+// `start` is the commit the checkout starts from; `prepared` the base the
+// strategy names, which preparation records as the new branch's PR base.
+it.effect.each([
+  { case: "omitted", input: {}, start: "parent", prepared: "start", fromOrigin: false },
+  {
+    case: "branch only",
+    input: { branch: "pod/goal-feature" },
+    start: "parent",
+    prepared: "start",
+    fromOrigin: false,
+  },
+  {
+    case: "an origin baseRef only",
+    input: { baseRef: "origin/slice" },
+    start: "origin slice",
+    prepared: "slice",
+    fromOrigin: true,
+  },
+  {
+    case: "branch and an origin baseRef",
+    input: { branch: "pod/goal-feature", baseRef: "origin/slice" },
+    start: "origin slice",
+    prepared: "slice",
+    fromOrigin: true,
+  },
+  {
+    case: "a local branch baseRef",
+    input: { baseRef: "main" },
+    start: "main",
+    prepared: "main",
+    fromOrigin: false,
+  },
+  // Not fetched, and pinned so the child's branch does not track it.
+  {
+    case: "a spelled-out remote-tracking baseRef",
+    input: { baseRef: "refs/remotes/origin/slice" },
+    start: "cloned slice",
+    prepared: "start",
+    fromOrigin: false,
+  },
+] as const)("cuts a delegated worktree with $case", ({ input, start, prepared, fromOrigin }) =>
+  withDelegatedWorktreeRepo(
+    ({ origin, repo, git, commit, harness, threads, delegate, childStatus }) =>
+      Effect.gen(function* () {
+        const clonedSlice = yield* git(repo, ["rev-parse", "origin/slice"]);
+        // Origin moves after the clone, so only a fetch sees the latest slice.
+        yield* git(origin, ["checkout", "slice"]);
+        yield* commit(origin, "later slice work");
+        const startCommit =
+          start === "parent"
+            ? yield* git(repo, ["rev-parse", "HEAD"])
+            : start === "origin slice"
+              ? yield* git(origin, ["rev-parse", "slice"])
+              : start === "cloned slice"
+                ? clonedSlice
+                : "main";
+        const preparedBase = prepared === "start" ? startCommit : prepared;
+        const branch = "branch" in input ? input.branch : undefined;
+        const delegated = yield* delegate({
+          isolation: "worktree",
+          clientRequestId: "cut",
+          ...input,
+        });
+        yield* childStatus(delegated.childThreadId, "starting");
+        const child = yield* threads.getThreadProjection(delegated.childThreadId);
+        assert.deepEqual(child.runs[0]?.workspacePreparation, {
+          type: "worktree",
+          baseRef: preparedBase,
+          ...(branch === undefined ? {} : { branch }),
+          startFromOrigin: fromOrigin,
+        });
+        const created = harness.createWorktree.mock.calls[0]?.[0];
+        assert.equal(created?.cwd, repo);
+        assert.equal(created?.refName, startCommit);
+        // createWorktree writes this as the branch's gh-merge-base.
+        assert.equal(created?.baseRefName, preparedBase);
+        if (branch === undefined) {
+          assert.match(created?.newRefName ?? "", /^t3\/[0-9a-f]{8}$/);
+        } else {
+          assert.equal(created?.newRefName, branch);
+          assert.equal(child.thread.branch, branch);
+        }
+      }),
+  ),
+);
+
+it.effect("refuses delegated worktree branch and base inputs it cannot honor", () =>
+  withDelegatedWorktreeRepo(({ origin, repo, git, harness, threads, parentThreadId, delegate }) =>
+    Effect.gen(function* () {
+      // Gives `@{-1}` a branch to expand to.
+      yield* git(repo, ["checkout", "-b", "previous"]);
+      yield* git(repo, ["checkout", "main"]);
+      yield* git(repo, ["branch", "pod/existing"]);
+      // Leaves a stale origin/gone behind, as a branch deleted on origin does.
+      yield* git(origin, ["branch", "gone"]);
+      yield* git(repo, ["fetch", "--quiet", "origin"]);
+      yield* git(origin, ["branch", "-D", "gone"]);
+      const refusals = [
+        {
+          input: { isolation: "shared" as const, branch: "pod/x" },
+          message: 'require isolation "worktree"',
+        },
+        { input: { baseRef: "origin/slice" }, message: 'require isolation "worktree"' },
+        {
+          input: { isolation: "worktree" as const, branch: "bad..name" },
+          message: "not a valid Git branch name",
+        },
+        {
+          input: { isolation: "worktree" as const, branch: "@{-1}" },
+          message: "not a valid Git branch name",
+        },
+        {
+          input: { isolation: "worktree" as const, branch: "main" },
+          message: 'Branch "main" already exists',
+        },
+        {
+          input: { isolation: "worktree" as const, baseRef: "no-such-ref" },
+          message: 'Base ref "no-such-ref" does not resolve',
+        },
+        {
+          input: { isolation: "worktree" as const, branch: "t3/deadbeef" },
+          message: "reserved for automatically named",
+        },
+        {
+          input: { isolation: "worktree" as const, branch: "pod" },
+          message: 'beside the existing branch "pod/existing"',
+        },
+        {
+          input: { isolation: "worktree" as const, branch: "main/x" },
+          message: 'beside the existing branch "main"',
+        },
+        {
+          input: { isolation: "worktree" as const, baseRef: "origin/gone" },
+          message: 'Branch "gone" does not exist on origin',
+        },
+        {
+          input: { isolation: "worktree" as const, baseRef: "origin/a..b" },
+          message: "does not name a branch on origin",
+        },
+      ];
+      for (const [index, refusal] of refusals.entries()) {
+        const error = yield* delegate({
+          ...refusal.input,
+          clientRequestId: `refused-${index}`,
+        }).pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.include(error.message, refusal.message);
+      }
+      assert.isEmpty((yield* threads.getThreadProjection(parentThreadId)).subagents);
+      assert.equal(harness.createWorktree.mock.calls.length, 0);
+    }),
+  ),
+);
+
+it.effect("replays a delegated worktree retry without creating a second branch", () =>
+  withDelegatedWorktreeRepo(({ repo, git, harness, delegate, childStatus }) =>
+    Effect.gen(function* () {
+      const input = {
+        isolation: "worktree" as const,
+        branch: "pod/goal-retry",
+        baseRef: "origin/slice",
+        clientRequestId: "retried",
+      };
+      const first = yield* delegate(input);
+      yield* childStatus(first.childThreadId, "starting");
+      // What `git worktree add -b` left behind: the retry must not trip over it.
+      yield* git(repo, ["branch", "pod/goal-retry", "origin/slice"]);
+      const retry = yield* delegate(input);
+      assert.equal(retry.taskId, first.taskId);
+      assert.equal(retry.childThreadId, first.childThreadId);
+      assert.equal(harness.createWorktree.mock.calls.length, 1);
+      const fresh = yield* delegate({ ...input, clientRequestId: "another-round" }).pipe(
+        Effect.flip,
+      );
+      assert.include(fresh.message, 'Branch "pod/goal-retry" already exists');
+      assert.equal(harness.createWorktree.mock.calls.length, 1);
+    }),
+  ),
+);
+
+it.effect("removes a cancelled delegated branch worktree through WorktreeLifecycle", () =>
+  Effect.gen(function* () {
+    const setupEntered = yield* Deferred.make<void>();
+    yield* withDelegatedWorktreeRepo(
+      ({ repo, harness, threads, delegate, cancel }) =>
+        Effect.gen(function* () {
+          const delegated = yield* delegate({
+            isolation: "worktree",
+            branch: "pod/goal-cancel",
+            baseRef: "origin/slice",
+          });
+          yield* Deferred.await(setupEntered);
+          yield* cancel(delegated.taskId);
+          yield* threads.streamStoredEventsFrom({ threadId: delegated.childThreadId }).pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "thread.metadata-updated" &&
+                stored.event.payload.worktreePath === null,
+            ),
+            Stream.runHead,
+          );
+          assert.deepEqual(
+            harness.removeWorktree.mock.calls.map(([input]) => input),
+            [
+              {
+                projectRoot: repo,
+                worktreePath: "/repo-worktrees/feature",
+                force: true,
+                projectId,
+                threadId: delegated.childThreadId,
+              },
+            ],
+          );
+        }),
+      {
+        runSetup: () =>
+          Effect.succeed({
+            status: "started" as const,
+            async: false,
+            scriptId: "setup",
+            scriptName: "Setup",
+            scriptCommand: "setup",
+            terminalId: "setup",
+            cwd: "/repo-worktrees/feature",
+            completion: Deferred.succeed(setupEntered, undefined).pipe(
+              Effect.andThen(Effect.never),
+            ),
+          }),
+      },
+    );
+  }),
 );

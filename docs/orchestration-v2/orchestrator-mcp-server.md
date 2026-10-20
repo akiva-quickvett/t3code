@@ -222,6 +222,9 @@ type DelegateTaskInput = {
   };
   title?: string;
   role?: "implementation" | "research" | "review" | "design" | "test" | "general";
+  isolation?: "shared" | "worktree";
+  branch?: string; // worktree only
+  baseRef?: string; // worktree only
   mode?: "async" | "wait";
   timeoutMs?: number;
   clientRequestId?: string;
@@ -243,6 +246,21 @@ lists `runtimeModes` only for a provider that offers some of the modes, and
 omits it for a provider that offers all of them. When the target lists
 `runtimeModes`, an explicit `runtimeMode` outside that list is refused, and an
 inherited mode steps down to the broadest mode the target offers.
+
+`isolation: "worktree"` gives the child its own checkout, prepared like a
+`t3_thread_launch` worktree before the child starts. Without `baseRef` it starts
+from the parent checkout's `HEAD` commit. `baseRef` is checked before the task
+is accepted and kept by name, so the new branch records it as its pull request
+base: `origin/<branch>` must exist on origin and is fetched (again in
+preparation, as `startFromOrigin` does); any other ref must resolve in the
+project's repository, and a remote-tracking ref is pinned to its commit so the
+new branch never tracks it. `branch` names the new branch. A name
+`git check-ref-format --branch` rejects, a reserved temporary worktree name, an
+existing branch, or one that clashes with a branch path (`a` beside `a/b`) is
+refused rather than reused. Without `branch` the branch gets a temporary name
+that is renamed from the task, as for any new worktree thread. Both fields are
+refused for shared isolation. A retry with the same `clientRequestId` replays
+the accepted task without fetching, validating, or creating anything again.
 
 Each delegated review round uses a new `delegate_task` call with the original brief,
 prior findings, responses, and unresolved objections. Track each round by its own `taskId` and use
