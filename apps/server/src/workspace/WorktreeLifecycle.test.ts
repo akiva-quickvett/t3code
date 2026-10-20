@@ -306,21 +306,26 @@ describe("WorktreeLifecycle.remove", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
-  it.effect("runs the script once when two removals of one worktree race", () =>
-    Effect.gen(function* () {
-      const t = yield* fixture((out) => [teardown(`echo ran >> ${quote(`${out}/runs`)}`)]);
-      const input = {
-        projectRoot: t.repo,
-        worktreePath: t.worktree,
-        force: true,
-        projectId: PROJECT_ID,
-      };
-      yield* Effect.all([t.lifecycle.remove(input), t.lifecycle.remove(input)], {
-        concurrency: "unbounded",
-      });
-      assert.strictEqual(yield* t.readOut("runs"), "ran\n");
-      assert.isFalse(yield* t.fs.exists(t.worktree));
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  it.effect.each([false, true])(
+    "runs the script once when two removals of one worktree race (via a symlink: %s)",
+    (viaSymlink) =>
+      Effect.gen(function* () {
+        const t = yield* fixture((out) => [teardown(`echo ran >> ${quote(`${out}/runs`)}`)]);
+        const link = `${t.out}/worktrees-link`;
+        yield* t.fs.symlink(t.worktree.slice(0, t.worktree.lastIndexOf("/")), link);
+        const input = {
+          projectRoot: t.repo,
+          worktreePath: t.worktree,
+          force: true,
+          projectId: PROJECT_ID,
+        };
+        const other = viaSymlink ? { ...input, worktreePath: `${link}/feature` } : input;
+        yield* Effect.all([t.lifecycle.remove(input), t.lifecycle.remove(other)], {
+          concurrency: "unbounded",
+        });
+        assert.strictEqual(yield* t.readOut("runs"), "ran\n");
+        assert.isFalse(yield* t.fs.exists(t.worktree));
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
   it.effect("cleans untracked files and refuses tracked edits on a storage cleanup removal", () =>

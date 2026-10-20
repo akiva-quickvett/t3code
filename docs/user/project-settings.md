@@ -182,8 +182,9 @@ started, turn on **Run before worktree removal** for one of the project's action
 `"runOnWorktreeRemove": true` on a `t3.json` script. It runs in the worktree whenever T3 Code
 removes one, including cleanup and deleting a thread with its worktree. Removal waits up to two
 minutes for it and goes ahead even if it fails. It can run again if a removal is interrupted,
-so make it safe to repeat. During cleanup, new files it leaves in the
-worktree keep the worktree unless the policy is **Edited tracked files**.
+so make it safe to repeat. During cleanup, untracked files in the worktree after it runs are
+deleted with the worktree, including any written there from outside T3 Code while it ran. A
+tracked file it edits keeps the worktree.
 
 Choose **Delete now** to run the enabled rules immediately. The latest results show which
 worktrees were removed or kept and why, plus any failures.

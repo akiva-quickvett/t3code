@@ -1490,28 +1490,43 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
-  it.live("runs the project's teardown script in the worktree before removing it", () =>
-    runCleanupTest(
-      Effect.gen(function* () {
-        const fixture = yield* cleanupFixture();
-        const out = yield* fixture.fs.makeTempDirectoryScoped({ prefix: "cleanup-teardown-" });
-        fixture.setPolicy("tracked-changes");
-        fixture.setProjectScripts([
-          {
-            id: "teardown",
-            name: "Teardown",
-            command: `cat tracked.txt > '${out}/seen' && echo log > teardown.log`,
-            icon: "play",
-            runOnWorktreeCreate: false,
-            runOnWorktreeRemove: true,
-          },
-        ]);
-        const report = yield* fixture.service.runNow;
-        expect(report.entries[0]).toMatchObject({ outcome: "removed", threadId: "thread-1" });
-        expect(yield* fixture.fs.readFileString(`${out}/seen`)).toBe("original\n");
-        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
-      }),
-    ),
+  it.live.each([
+    ["tracked-changes", "echo log > teardown.log", null, "removed"],
+    ["uncommitted-changes", "echo log > teardown.log", null, "removed"],
+    ["any-local-files", "echo log > teardown.log", null, "removed"],
+    ["uncommitted-changes", "echo edited > tracked.txt", null, "failed"],
+    ["uncommitted-changes", "true", "notes.txt", "kept"],
+  ] as const)(
+    "runs the teardown script before removing under %s: `%s` with %s present",
+    ([policy, script, presentFile, outcome]) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          const out = yield* fixture.fs.makeTempDirectoryScoped({ prefix: "cleanup-teardown-" });
+          fixture.setPolicy(policy);
+          if (presentFile !== null)
+            yield* fixture.fs.writeFileString(`${fixture.worktree}/${presentFile}`, "local\n");
+          fixture.setProjectScripts([
+            {
+              id: "teardown",
+              name: "Teardown",
+              command: `cat tracked.txt > '${out}/seen' && ${script}`,
+              icon: "play",
+              runOnWorktreeCreate: false,
+              runOnWorktreeRemove: true,
+            },
+          ]);
+          const report = yield* fixture.service.runNow;
+          expect(report.entries[0]).toMatchObject({ outcome, threadId: "thread-1" });
+          // The script saw the checkout as it was, and runs only once removal is decided.
+          expect(
+            yield* fixture.fs.readFileString(`${out}/seen`).pipe(Effect.orElseSucceed(() => null)),
+          ).toBe(outcome === "kept" ? null : "original\n");
+          expect(yield* fixture.fs.exists(fixture.worktree)).toBe(outcome !== "removed");
+          if (outcome === "failed")
+            expect(report.entries[0]?.reason).toContain("contains modified or untracked files");
+        }),
+      ),
   );
   it.live("streams the current report and subsequent runs", () =>
     runCleanupTest(

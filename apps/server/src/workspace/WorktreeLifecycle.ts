@@ -136,19 +136,27 @@ const make = Effect.gen(function* () {
   /**
    * A child process rather than a ProjectSetupScriptRunner terminal: opening a
    * terminal takes the worktree's workspace lease, which storage cleanup holds
-   * while it removes, so a terminal here would deadlock the sweep. The spawner
-   * kills the script's whole process group when it exits or times out, so
-   * nothing it started keeps running in the deleted directory.
+   * while it removes, so a terminal here would deadlock the sweep. On POSIX the
+   * spawner kills the script's whole process group when it exits or times out,
+   * so nothing it started keeps running in the deleted directory. On Windows
+   * only a timeout kills the tree; children of a script that exits on its own
+   * keep running.
    */
   const runTeardown = Effect.fn("WorktreeLifecycle.runTeardown")(function* (
     input: WorktreeRemoveInput,
     worktreePath: string,
   ) {
     const project = Option.getOrUndefined(yield* resolveProject(input));
-    if (project === undefined) return;
+    if (project === undefined) {
+      yield* Effect.logInfo("no teardown: no project matches the worktree's checkout", {
+        threadId: input.threadId ?? null,
+        worktreePath,
+      });
+      return false;
+    }
     const settings = yield* serverSettings.getSettings;
     const script = teardownProjectScript(resolveProjectScripts(settings, project));
-    if (script === null || !(yield* fileSystem.exists(worktreePath))) return;
+    if (script === null || !(yield* fileSystem.exists(worktreePath))) return false;
     const logContext = {
       threadId: input.threadId ?? null,
       worktreePath,
@@ -156,10 +164,11 @@ const make = Effect.gen(function* () {
       scriptId: script.id,
     };
     if (!(yield* isLinkedWorktreeOf(input.projectRoot, worktreePath))) {
-      return yield* Effect.logWarning(
+      yield* Effect.logWarning(
         "skipped worktree teardown: path is not a linked worktree of the project",
         logContext,
       );
+      return false;
     }
     const options = {
       cwd: worktreePath,
@@ -230,6 +239,7 @@ const make = Effect.gen(function* () {
     } else if (outcome.exitCode !== 0) {
       yield* Effect.logWarning("worktree teardown script failed; removing anyway", outcome);
     }
+    return true;
   });
 
   const sweepGit = Effect.fn("WorktreeLifecycle.sweepGit")(function* (
@@ -253,7 +263,11 @@ const make = Effect.gen(function* () {
       });
   });
 
-  const removeCheckout = (input: WorktreeRemoveInput, worktreePath: string) =>
+  const removeCheckout = (
+    input: WorktreeRemoveInput,
+    worktreePath: string,
+    teardownRan: boolean,
+  ) =>
     input.sweep === undefined
       ? gitWorkflow.removeWorktree({
           cwd: input.projectRoot,
@@ -268,6 +282,10 @@ const make = Effect.gen(function* () {
           if (!exists) return;
           if (input.sweep?.cleanUntrackedFiles)
             yield* sweepGit(worktreePath, ["clean", "-ffdx"], "git clean");
+          // The sweep's final check, under the same workspace lease, found no
+          // untracked files its policy protects, so any now are the script's.
+          // Ignored files never block removal; a tracked edit still does.
+          else if (teardownRan) yield* sweepGit(worktreePath, ["clean", "-fd"], "git clean");
           yield* sweepGit(
             input.projectRoot,
             ["-c", "status.showUntrackedFiles=normal", "worktree", "remove", "--", worktreePath],
@@ -278,8 +296,12 @@ const make = Effect.gen(function* () {
   const remove: WorktreeLifecycle["Service"]["remove"] = Effect.fn("WorktreeLifecycle.remove")(
     function* (input) {
       const worktreePath = path.resolve(input.worktreePath);
+      // Keyed on the real path, so two spellings of one worktree share a lock.
+      const lockKey = yield* fileSystem
+        .realPath(worktreePath)
+        .pipe(Effect.orElseSucceed(() => worktreePath));
       yield* withRemovalLock(
-        worktreePath,
+        lockKey,
         runTeardown(input, worktreePath).pipe(
           Effect.catchCause((cause) =>
             Cause.hasInterruptsOnly(cause)
@@ -287,11 +309,12 @@ const make = Effect.gen(function* () {
               : Effect.logWarning("worktree teardown failed; removing anyway", {
                   threadId: input.threadId ?? null,
                   worktreePath,
+                  projectId: input.projectId ?? null,
                   // Platform errors quote the script's command line, so only the tag.
                   error: failureTag(Cause.squash(cause)),
-                }),
+                }).pipe(Effect.as(false)),
           ),
-          Effect.andThen(removeCheckout(input, worktreePath)),
+          Effect.flatMap((teardownRan) => removeCheckout(input, worktreePath, teardownRan)),
         ),
       );
     },
