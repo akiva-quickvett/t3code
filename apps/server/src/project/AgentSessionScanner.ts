@@ -1076,7 +1076,11 @@ export const make = Effect.gen(function* () {
           homePath = layout.sharedHomePath;
         }
 
-        const homeKey = `${source}\0${yield* directoryIdentity(homePath)}`;
+        // Config dirs sharing transcripts link `projects` to one directory, so
+        // its identity, not the home's, keeps each session listed once.
+        const homeKey = `${source}\0${yield* directoryIdentity(
+          source === "claudeAgent" ? path.join(homePath, "projects") : homePath,
+        )}`;
         if (seenHomes.has(homeKey)) continue;
         seenHomes.add(homeKey);
         homes.push({ homePath, providerInstanceId: instanceId });

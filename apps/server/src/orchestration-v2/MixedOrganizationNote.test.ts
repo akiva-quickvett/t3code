@@ -11,6 +11,7 @@ import {
   crossesOrganization,
   handoffSourceInstanceIds,
   handoffsSinceAcceptedTurn,
+  nativeResumeSource,
 } from "./MixedOrganizationNote.ts";
 
 const claudeWork = ProviderInstanceId.make("claude_work");
@@ -130,6 +131,67 @@ describe("handoffsSinceAcceptedTurn", () => {
     assert.deepStrictEqual(
       handoffsSinceAcceptedTurn({ ...input, providerThreadId: personalThread }),
       [],
+    );
+  });
+});
+
+describe("nativeResumeSource", () => {
+  const nativeThreadRef = {
+    driver: ProviderDriverKind.make("claudeAgent"),
+    nativeId: "session-1",
+    strength: "strong" as const,
+  };
+  const sharedThread = { id: ProviderThreadId.make("provider-thread:shared"), nativeThreadRef };
+  const run = (ordinal: number, providerInstanceId: ProviderInstanceId) => ({
+    id: RunId.make(`run:${ordinal}`),
+    ordinal,
+    providerThreadId: sharedThread.id,
+    activeAttemptId: RunAttemptId.make(`attempt:${ordinal}`),
+    providerInstanceId,
+  });
+  const accepted = (...ordinals: ReadonlyArray<number>) =>
+    ordinals.map((ordinal) => ({ runAttemptId: RunAttemptId.make(`attempt:${ordinal}`) }));
+  const source = (
+    runs: ReadonlyArray<ReturnType<typeof run>>,
+    acceptedOrdinals: ReadonlyArray<number>,
+    providerThread: Parameters<typeof nativeResumeSource>[0]["providerThread"] = sharedThread,
+  ) =>
+    nativeResumeSource({
+      providerThread,
+      providerInstanceId: claudePersonal,
+      providerThreads: [sharedThread],
+      runs,
+      providerTurns: accepted(...acceptedOrdinals),
+    });
+
+  it("names the instance that last ran the conversation and the run that switched", () => {
+    assert.deepStrictEqual(
+      source([run(1, claudeWork), run(2, claudePersonal), run(3, claudePersonal)], [1]),
+      { instanceId: claudeWork, switchRunId: RunId.make("run:2") },
+    );
+  });
+
+  it("finds the conversation through another provider thread resuming the same session", () => {
+    const queuedThread = { id: ProviderThreadId.make("provider-thread:queued"), nativeThreadRef };
+    assert.deepStrictEqual(
+      source(
+        [run(1, claudeWork), { ...run(2, claudePersonal), providerThreadId: queuedThread.id }],
+        [1],
+        queuedThread,
+      ),
+      { instanceId: claudeWork, switchRunId: RunId.make("run:2") },
+    );
+  });
+
+  it("is nothing once the resuming instance had a turn accepted, or without a switch", () => {
+    assert.isUndefined(source([run(1, claudeWork), run(2, claudePersonal)], [1, 2]));
+    assert.isUndefined(source([run(1, claudePersonal), run(2, claudePersonal)], [1]));
+    assert.isUndefined(source([run(1, claudeWork)], []));
+    assert.isUndefined(
+      source([run(1, claudeWork), run(2, claudePersonal)], [1], {
+        id: sharedThread.id,
+        nativeThreadRef: null,
+      }),
     );
   });
 });

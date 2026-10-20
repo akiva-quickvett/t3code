@@ -96,6 +96,10 @@ type ProviderInstanceLockTarget = Pick<
 const HANDOFF_SWITCH_LABEL_BY_DRIVER: Partial<Record<ProviderDriverKind, string>> = {
   [ProviderDriverKind.make("claudeAgent")]: "Starts a new Claude session with a context handoff",
 };
+// Instances sharing one Claude config dir resume natively; only another organization costs anything.
+const RESUME_SWITCH_LABEL_BY_DRIVER: Partial<Record<ProviderDriverKind, string>> = {
+  [ProviderDriverKind.make("claudeAgent")]: "Resumes the same Claude session",
+};
 
 export function resolveProviderInstanceLock(input: {
   readonly entries: ReadonlyArray<ProviderInstanceLockTarget>;
@@ -161,23 +165,32 @@ export interface ProviderInstanceSwitchNote {
   readonly organizationWarning: string | null;
 }
 
-/** What moving a started thread from `current` to `target` costs, when it is a handoff. */
+/**
+ * What moving a started thread from `current` to `target` costs: a handoff, or a native resume
+ * under another organization.
+ */
 export function resolveProviderInstanceSwitchNote(
   current: ProviderInstanceEntry | undefined,
   target: ProviderInstanceEntry,
 ): ProviderInstanceSwitchNote | null {
-  const label = HANDOFF_SWITCH_LABEL_BY_DRIVER[target.driverKind];
-  if (label === undefined || current === undefined) return null;
+  if (current === undefined || target.instanceId === current.instanceId) return null;
   const lock = {
     driverKind: current.driverKind,
     instanceId: current.instanceId,
     continuationGroupKey: current.continuationGroupKey ?? null,
   };
-  if (providerInstanceLockAccess(lock, target) !== "handoff") return null;
+  const access = providerInstanceLockAccess(lock, target);
   const crossOrganization =
     current.organizationKey !== undefined &&
     target.organizationKey !== undefined &&
     current.organizationKey !== target.organizationKey;
+  const label =
+    access === "handoff"
+      ? HANDOFF_SWITCH_LABEL_BY_DRIVER[target.driverKind]
+      : access === "resume" && crossOrganization
+        ? RESUME_SWITCH_LABEL_BY_DRIVER[target.driverKind]
+        : undefined;
+  if (label === undefined) return null;
   return {
     label,
     organizationWarning: crossOrganization

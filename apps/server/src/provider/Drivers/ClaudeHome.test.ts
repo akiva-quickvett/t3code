@@ -65,6 +65,28 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
       }),
     );
 
+    it.effect("groups instances sharing a config dir under that dir's continuation key", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const defaultKey = yield* makeClaudeContinuationGroupKey({ homePath: "" }, {});
+        const sharingDefault = { homePath: "~/.claude-work", sharedConfigPath: "~/.claude/" };
+
+        expect(yield* makeClaudeContinuationGroupKey(sharingDefault, {})).toBe(defaultKey);
+        expect(
+          yield* makeClaudeContinuationGroupKey(
+            { homePath: "~/.claude-other", sharedConfigPath: "/srv/claude-shared" },
+            {},
+          ),
+        ).toBe(`claude:home:${path.resolve("/srv/claude-shared")}`);
+        expect(
+          yield* makeClaudeContinuationGroupKey({
+            homePath: "~/.claude-work",
+            sharedConfigPath: "",
+          }),
+        ).toBe(`claude:home:${path.resolve(NodeOS.homedir(), ".claude-work")}`);
+      }),
+    );
+
     it("points the signed-out hint at the configured Claude home", () => {
       expect(claudeSignedOutMessage({ configDir: undefined, cwd: "/synthetic" })).toContain(
         "run `claude auth login`",

@@ -838,6 +838,7 @@ export function ProviderInstanceCard({
       <span className={cn("size-1.5 shrink-0 rounded-full", statusStyle.dot)} aria-hidden />
     ) : null;
   const needsAttention = statusKey === "warning" || statusKey === "error";
+  const hasCopiedLogin = enabled && liveProvider?.copiedLogin === true;
   const statusDiagnostic = hasCompatibilityWarning && needsAttention ? summary.detail : null;
   const inlineStatusDetail = hasCompatibilityWarning
     ? compatibility?.status === "broken"
@@ -1027,6 +1028,7 @@ export function ProviderInstanceCard({
                     <>
                       {summary.headline}
                       {needsAttention && inlineStatusDetail ? ` · ${inlineStatusDetail}` : null}
+                      {hasCopiedLogin ? " · Copied login" : null}
                     </>
                   )}
                 </span>
@@ -1126,6 +1128,13 @@ export function ProviderInstanceCard({
                   {editorStatusNode}
                 </div>
               </ProviderStatusDiagnostic>
+              {hasCopiedLogin ? (
+                <p className="flex max-w-xl items-start gap-1.5 pt-1 text-xs text-warning-foreground">
+                  <AlertTriangleIcon className="mt-0.5 size-3 shrink-0" aria-hidden />
+                  Another enabled instance uses a copy of this login. Whichever refreshes it first
+                  signs the other out, so sign in to each instance separately.
+                </p>
+              ) : null}
               {urlAuthAction && onAcceptUrlAuth ? (
                 <div className="grid max-w-xl gap-1.5 pt-1 text-xs">
                   <p>{urlAuthAction.message}</p>

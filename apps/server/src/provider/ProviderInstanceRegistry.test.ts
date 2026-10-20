@@ -18,6 +18,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import type { GrokSettings } from "@t3tools/provider-grok/settings";
 import type { CursorSettings } from "@t3tools/provider-cursor/settings";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -103,6 +104,7 @@ const makeClaudeConfig = (overrides: Partial<ClaudeSettings>): ClaudeSettings =>
   enabled: false,
   binaryPath: "claude",
   homePath: "",
+  sharedConfigPath: "",
   customModels: [],
   launchArgs: "",
   autoCompactWindow: "",
@@ -750,6 +752,54 @@ describe("ProviderInstanceRegistry — all drivers slice", () => {
   const layerBase = ProviderHostLive.layer.pipe(Layer.provideMerge(layerBaseDeps));
   const layerTest = ProviderOrchestrationAdapterInfrastructure.layer.pipe(
     Layer.provideMerge(layerBase),
+  );
+
+  it.live.skipIf(!symlinksSupported)(
+    "links a Claude instance to its shared config dir and groups it there",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3code-claude-shared-" });
+        const sharedConfigPath = path.join(root, "shared");
+        const homePath = path.join(root, "personal");
+        yield* fileSystem.makeDirectory(sharedConfigPath);
+        yield* fileSystem.writeFileString(path.join(sharedConfigPath, "settings.json"), "{}");
+        const claudeDriverKind = ProviderDriverKind.make("claudeAgent");
+        const sharingId = ProviderInstanceId.make("claude_sharing");
+        const missingId = ProviderInstanceId.make("claude_missing_shared");
+
+        const { registry } = yield* makeProviderInstanceRegistry<ClaudeDriverEnv>({
+          drivers: [ClaudeDriver],
+          configMap: {
+            [sharingId]: {
+              driver: claudeDriverKind,
+              enabled: false,
+              config: makeClaudeConfig({ homePath, sharedConfigPath }),
+            },
+            [missingId]: {
+              driver: claudeDriverKind,
+              enabled: false,
+              config: makeClaudeConfig({
+                homePath: path.join(root, "other"),
+                sharedConfigPath: path.join(root, "missing"),
+              }),
+            },
+          },
+        });
+
+        const [sharing] = yield* registry.listInstances;
+        expect(sharing?.instanceId).toBe(sharingId);
+        expect(sharing?.continuationIdentity.continuationKey).toBe(
+          `claude:home:${sharedConfigPath}`,
+        );
+        expect(yield* fileSystem.readLink(path.join(homePath, "projects"))).toBe(
+          path.join(sharedConfigPath, "projects"),
+        );
+        const [missing] = yield* registry.listUnavailable;
+        expect(missing?.instanceId).toBe(missingId);
+        expect(missing?.unavailableReason).toContain("is not an existing directory");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.live("boots one instance of every shipped driver from a single config map", () =>
