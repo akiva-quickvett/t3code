@@ -417,6 +417,8 @@ export interface ProviderAdapterV2Role {
   readonly presetId: string;
   readonly label: string;
   readonly instructions: string;
+  readonly skills?: ReadonlyArray<string>;
+  readonly allowedChildRoles?: ReadonlyArray<string>;
   /** Claude only; other adapters ignore it. */
   readonly contextWindow?: "200k" | "1m";
 }

@@ -204,7 +204,8 @@ Returns:
 - registered provider instances and advertised models;
 - whether each provider can run a child task;
 - the role presets in effect for the caller's project: id, label, model target,
-  `runsIn`, and why one cannot start here. Instructions stay on the server; and
+  `runsIn`, the roles it may delegate to (advisory), and why one cannot start
+  here. Instructions stay on the server; and
 - feature flags for polling, cancellation, and batch thread creation.
 
 Unavailable providers include model-visible constraints such as missing V2
@@ -253,8 +254,8 @@ model does not offer are dropped rather than refused. A preset's modes never
 exceed the caller's: a broader one runs at the caller's mode, while an explicit
 mode is checked as before. An unknown id is `invalid_request` and lists the known
 ids; a preset whose provider or model is unavailable fails as an explicit target
-would. The child records the preset id and a label snapshot. Its instructions are
-read when each turn starts: Claude gets them in its system prompt, Codex as turn
+would. The child records the preset id and a label snapshot. Its instructions,
+skills and allowed child roles are read when each turn starts: Claude gets them in its system prompt, Codex as turn
 context, and other providers as a prefix to the provider's prompt on the first
 turn of a provider thread and again after the role changes. None of these appear
 in the timeline. `contextWindow` applies to Claude only.

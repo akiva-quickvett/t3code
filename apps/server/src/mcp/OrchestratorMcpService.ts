@@ -2288,6 +2288,9 @@ const make = Effect.gen(function* () {
               model: preset.target.model,
             },
             ...(preset.runsIn === undefined ? {} : { runsIn: preset.runsIn }),
+            ...(preset.allowedChildRoles === undefined
+              ? {}
+              : { allowedChildRoles: preset.allowedChildRoles }),
             ...(preset.unavailable === null
               ? {}
               : { unavailableReason: preset.unavailable.reason }),

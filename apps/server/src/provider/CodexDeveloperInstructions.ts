@@ -249,13 +249,12 @@ function splitUtf8(text: string, maxBytes: number): ReadonlyArray<string> {
 export function buildCodexRoleContext(
   role: ProviderAdapterV2Role,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
-  if (role.instructions === "") return {};
+  const block = roleInstructionsBlock(role);
+  if (block === "") return {};
   return Object.fromEntries(
-    splitUtf8(roleInstructionsBlock(role), CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES).map(
-      (value, index) => [
-        `t3_code_role_${String(index + 1).padStart(2, "0")}`,
-        { kind: "application" as const, value },
-      ],
-    ),
+    splitUtf8(block, CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES).map((value, index) => [
+      `t3_code_role_${String(index + 1).padStart(2, "0")}`,
+      { kind: "application" as const, value },
+    ]),
   );
 }

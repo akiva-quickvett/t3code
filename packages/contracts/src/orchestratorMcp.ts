@@ -550,6 +550,8 @@ export const OrchestratorMcpRolePresetSummary = Schema.Struct({
     model: Schema.String,
   }),
   runsIn: Schema.optional(AgentRolePresetRunsIn),
+  /** Advisory: the roles this one may delegate to. The server does not enforce it. */
+  allowedChildRoles: Schema.optional(Schema.Array(Schema.String)),
   /** Set when no enabled instance can run the preset's target. */
   unavailableReason: Schema.optional(Schema.String),
 });

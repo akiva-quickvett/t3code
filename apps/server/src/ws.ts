@@ -99,6 +99,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  ServerSettings as ServerSettingsSchema,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import {
@@ -256,6 +257,20 @@ import {
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+
+const clientSettingsEqual = Schema.toEquivalence(ServerSettingsSchema);
+
+/** A role preset edit changes nothing clients see here; agentRoles.subscribe carries it. */
+export const clientSettingsUpdates = <E, R>(changes: Stream.Stream<ServerSettingsSchema, E, R>) =>
+  changes.pipe(
+    Stream.map((settings) => ServerSettings.redactServerSettingsForClient(settings)),
+    Stream.changesWith(clientSettingsEqual),
+    Stream.map((settings) => ({
+      version: 1 as const,
+      type: "settingsUpdated" as const,
+      payload: { settings },
+    })),
+  );
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
 const isProviderUploadFeedbackError = Schema.is(ProviderUploadFeedbackError);
@@ -2997,14 +3012,7 @@ const layerWsRpc = (
                       })),
                     )
                   : Stream.empty;
-              const settingsUpdates = serverSettings.streamChanges.pipe(
-                Stream.map((settings) => ServerSettings.redactServerSettingsForClient(settings)),
-                Stream.map((settings) => ({
-                  version: 1 as const,
-                  type: "settingsUpdated" as const,
-                  payload: { settings },
-                })),
-              );
+              const settingsUpdates = clientSettingsUpdates(serverSettings.streamChanges);
 
               const liveUpdates = Stream.merge(
                 keybindingsUpdates,

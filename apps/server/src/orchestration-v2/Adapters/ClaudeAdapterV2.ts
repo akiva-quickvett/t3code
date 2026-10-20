@@ -1132,6 +1132,7 @@ export function makeClaudeQueryOptions(input: {
 }): ClaudeAgentSdkQueryOptions {
   const compiledSelection = compileClaudeModelSelection(input.modelSelection);
   const environment = claudeRoleEnvironment(input.environment, input.role?.contextWindow);
+  const roleBlock = input.role === undefined ? "" : roleInstructionsBlock(input.role);
   const {
     "permission-mode": launchArgPermissionMode,
     "dangerously-skip-permissions": launchArgSkipPermissions,
@@ -1215,9 +1216,7 @@ export function makeClaudeQueryOptions(input: {
       append:
         buildRuntimeInstructions({ harness: "Claude Code" }) +
         (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS) +
-        (input.role === undefined || input.role.instructions === ""
-          ? ""
-          : `\n\n${roleInstructionsBlock(input.role)}`),
+        (roleBlock === "" ? "" : `\n\n${roleBlock}`),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };
@@ -8460,11 +8459,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides),
             ...(turnInput.role === undefined
               ? []
-              : [
-                  turnInput.role.presetId,
-                  turnInput.role.contextWindow ?? "",
-                  turnInput.role.instructions,
-                ]),
+              : [turnInput.role.contextWindow ?? "", roleInstructionsBlock(turnInput.role)]),
           ].join("\u0000");
           const compiledSelection = compileClaudeModelSelection(turnInput.modelSelection);
           const resumeSessionAt = yield* getNativeConversationHeadId(turnInput.providerThread);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { ROLE_CLEARED_NOTE, rolePromptNote } from "./RoleInstructions.ts";
+import { ROLE_CLEARED_NOTE, roleInstructionsBlock, rolePromptNote } from "./RoleInstructions.ts";
 
 const role = { presetId: "scout", label: "Scout", instructions: "Return distilled results." };
 
@@ -36,5 +36,28 @@ describe("rolePromptNote", () => {
     expect(
       rolePromptNote({ role: { ...role, instructions: "" }, deliveredKey: undefined }).note,
     ).toBe("");
+  });
+
+  it("tells the agent the role's skills and the roles it may delegate to", () => {
+    const withLists = { ...role, skills: ["t3-orchestration"], allowedChildRoles: ["research"] };
+    expect(roleInstructionsBlock(withLists)).toBe(
+      [
+        '<t3_role_instructions role="scout">',
+        "Return distilled results.",
+        "Skills for this role: t3-orchestration.",
+        "Roles you may delegate to: research.",
+        "</t3_role_instructions>",
+      ].join("\n"),
+    );
+    const first = rolePromptNote({ role, deliveredKey: undefined });
+    expect(rolePromptNote({ role: withLists, deliveredKey: first.key }).note).toContain(
+      "Skills for this role",
+    );
+    expect(
+      rolePromptNote({
+        role: { ...role, instructions: "", skills: ["aman-style"] },
+        deliveredKey: undefined,
+      }).note,
+    ).toContain("Skills for this role: aman-style.");
   });
 });

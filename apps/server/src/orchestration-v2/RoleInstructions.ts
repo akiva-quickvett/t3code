@@ -10,13 +10,31 @@ export function adapterRole(preset: AgentRolePreset): ProviderAdapterV2Role {
     presetId: preset.id,
     label: preset.label,
     instructions: preset.instructions,
+    ...(preset.skills === undefined ? {} : { skills: preset.skills }),
+    ...(preset.allowedChildRoles === undefined
+      ? {}
+      : { allowedChildRoles: preset.allowedChildRoles }),
     ...(preset.contextWindow === undefined ? {} : { contextWindow: preset.contextWindow }),
   };
 }
 
-/** Wrapped so the model cannot mistake the role for text the user wrote. */
+/**
+ * Everything the agent is told about its role, wrapped so the model cannot
+ * mistake it for text the user wrote. Empty when the role says nothing.
+ */
 export function roleInstructionsBlock(role: ProviderAdapterV2Role): string {
-  return `<t3_role_instructions role="${role.presetId}">\n${role.instructions}\n</t3_role_instructions>`;
+  const body = [
+    role.instructions,
+    role.skills?.length ? `Skills for this role: ${role.skills.join(", ")}.` : "",
+    role.allowedChildRoles?.length
+      ? `Roles you may delegate to: ${role.allowedChildRoles.join(", ")}.`
+      : "",
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+  return body === ""
+    ? ""
+    : `<t3_role_instructions role="${role.presetId}">\n${body}\n</t3_role_instructions>`;
 }
 
 /**
@@ -28,9 +46,8 @@ export function rolePromptNote(input: {
   readonly role: ProviderAdapterV2Role | undefined;
   readonly deliveredKey: string | undefined;
 }): { readonly note: string; readonly key: string | undefined } {
-  const role = input.role?.instructions === "" ? undefined : input.role;
-  const key = role === undefined ? undefined : `${role.presetId}:${Hash.string(role.instructions)}`;
+  const block = input.role === undefined ? "" : roleInstructionsBlock(input.role);
+  const key = block === "" ? undefined : String(Hash.string(block));
   if (key === input.deliveredKey) return { note: "", key };
-  if (role !== undefined) return { note: roleInstructionsBlock(role), key };
-  return { note: ROLE_CLEARED_NOTE, key };
+  return { note: block === "" ? ROLE_CLEARED_NOTE : block, key };
 }

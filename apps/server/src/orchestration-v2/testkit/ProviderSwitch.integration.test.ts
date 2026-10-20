@@ -3841,7 +3841,7 @@ describe("orchestration v2 provider switching", () => {
               : { readsRoleInstructions: input.readsRoleInstructions }),
           }),
         ]);
-        yield* Effect.gen(function* () {
+        const projection = yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
           const dispatch = (ordinal: number, text: string) =>
@@ -3895,6 +3895,7 @@ describe("orchestration v2 provider switching", () => {
           }
           yield* dispatch(2, "Second request");
           yield* completed(2);
+          return yield* orchestrator.getThreadProjection(threadId);
         }).pipe(
           Effect.provide(
             ProviderReplayHarness.layerWithRegistry(
@@ -3910,6 +3911,15 @@ describe("orchestration v2 provider switching", () => {
             ),
           ),
         );
+        // The role reaches the provider but never the timeline.
+        const projected = yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))({
+          messages: projection.messages,
+          turnItems: projection.turnItems,
+          visibleTurnItems: projection.visibleTurnItems,
+        });
+        assert.include(projected, "First request");
+        assert.notInclude(projected, "<t3_role_instructions");
+        assert.notInclude(projected, ROLE_CLEARED_NOTE);
         return yield* Ref.get(capturedTurns);
       });
 

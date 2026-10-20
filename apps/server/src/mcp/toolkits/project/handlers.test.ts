@@ -311,6 +311,7 @@ const clientLaunchHarness = (input: {
   readonly workspaceRoot?: string;
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
   readonly providers?: ReadonlyArray<ServerProvider>;
+  readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -318,7 +319,7 @@ const clientLaunchHarness = (input: {
     model: "claude-opus",
   };
   const layerDependencies = Layer.mergeAll(
-    ServerSettings.layerTest(),
+    ServerSettings.layerTest(input.settings),
     Layer.mock(ProviderRegistry.ProviderRegistry)({
       getProviders: Effect.succeed(input.providers ?? []),
     }),
@@ -515,22 +516,23 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
   }),
 );
 
+const launchClaude: ServerProvider = {
+  instanceId: ProviderInstanceId.make("claudeAgent"),
+  driver: ProviderDriverKind.make("claudeAgent"),
+  enabled: true,
+  installed: true,
+  version: "test",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-10-20T00:00:00.000Z",
+  models: [{ slug: "claude-opus-5-5", name: "Opus", isCustom: false, capabilities: null }],
+  slashCommands: [],
+  skills: [],
+};
+
 it.effect("a launch with a preset takes its model and records its role", () =>
   Effect.gen(function* () {
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
-    const claude: ServerProvider = {
-      instanceId: ProviderInstanceId.make("claudeAgent"),
-      driver: ProviderDriverKind.make("claudeAgent"),
-      enabled: true,
-      installed: true,
-      version: "test",
-      status: "ready",
-      auth: { status: "authenticated" },
-      checkedAt: "2026-10-20T00:00:00.000Z",
-      models: [{ slug: "claude-opus-5-5", name: "Opus", isCustom: false, capabilities: null }],
-      slashCommands: [],
-      skills: [],
-    };
     const toolkitFor = (providers: ReadonlyArray<ServerProvider>) =>
       Effect.gen(function* () {
         const { projectId, dependencies } = clientLaunchHarness({
@@ -552,7 +554,7 @@ it.effect("a launch with a preset takes its model and records its role", () =>
             .pipe(Effect.map((results) => results.at(-1)?.result));
         return handle;
       });
-    const withClaude = yield* toolkitFor([claude]);
+    const withClaude = yield* toolkitFor([launchClaude]);
     const withoutProviders = yield* toolkitFor([]);
 
     yield* withClaude("Ticket");
@@ -568,6 +570,53 @@ it.effect("a launch with a preset takes its model and records its role", () =>
 
     expect(yield* withoutProviders("ticket")).toMatchObject({ code: "provider_unavailable" });
     expect(yield* withClaude("tickets")).toMatchObject({ code: "invalid_request" });
+    expect(launched).toHaveLength(1);
+  }),
+);
+
+it.effect("a preset's broader modes stay under the launch ceiling; explicit ones are refused", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched,
+      providers: [launchClaude],
+      settings: {
+        agentRolePresets: {
+          environment: {
+            overrides: {
+              wide: {
+                id: "wide",
+                label: "Wide",
+                target: {
+                  driverKind: ProviderDriverKind.make("claudeAgent"),
+                  model: "claude-opus-5-5",
+                },
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                instructions: "",
+              },
+            },
+          },
+        },
+      },
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const handle = (params: Parameters<typeof toolkit.handle<"t3_thread_launch">>[1]) =>
+      toolkit
+        .handle("t3_thread_launch", params)
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies))
+        .pipe(Effect.map((results) => results.at(-1)?.result));
+
+    yield* handle({ title: "Wide", projectId, preset: "wide" });
+    expect(launched[0]).toMatchObject({ runtimeMode: "auto", interactionMode: "default" });
+    expect(
+      yield* handle({ title: "Wide", projectId, preset: "wide", runtimeMode: "full-access" }),
+    ).toMatchObject({ code: "runtime_mode_escalation_denied" });
     expect(launched).toHaveLength(1);
   }),
 );

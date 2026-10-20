@@ -25,6 +25,14 @@ export function useStartTicketThread() {
       return;
     }
     const opened = await handleNewThread(projectRef);
-    if (opened !== null) applyRolePresetToDraft(opened.draftId, preset);
+    if (opened === null) return;
+    applyRolePresetToDraft(opened.draftId, preset);
+    if (preset.unavailable !== null) {
+      toastManager.add({
+        type: "warning",
+        title: "Ticket started on your current model",
+        description: `The ticket role's model can't run here: ${preset.unavailable.reason}`,
+      });
+    }
   };
 }
