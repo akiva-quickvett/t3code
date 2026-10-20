@@ -315,6 +315,52 @@ it.layer(NodeServices.layer)("ClaudeConfigLayout", (it) => {
         }).pipe(Effect.scoped),
     );
 
+    it.effect.skipIf(!symlinksSupported)(
+      "stops on a torn record instead of forgetting the links it lists",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const layout = yield* makeLayout();
+          yield* materializeClaudeSharedConfig(layout);
+          const recordPath = path.join(layout.configDir, ".t3code-shared-config");
+          yield* fileSystem.writeFileString(recordPath, '{"sharedConfigDir":');
+          const before = yield* listing(layout.configDir);
+
+          const error = yield* Effect.flip(materializeClaudeSharedConfig(layout));
+          yield* unshareClaudeConfig(layout.configDir);
+
+          expect(error._tag).toBe("ClaudeSharedConfigRecordUnreadableError");
+          expect(yield* listing(layout.configDir)).toEqual(before);
+          expect(yield* fileSystem.readFileString(recordPath)).toBe('{"sharedConfigDir":');
+        }).pipe(Effect.scoped),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "never writes the record through a link planted at its temporary path",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const layout = yield* makeLayout();
+          const login = path.join(layout.root, "login", ".credentials.json");
+          yield* fileSystem.makeDirectory(path.dirname(login), { recursive: true });
+          yield* fileSystem.writeFileString(login, "secret");
+          yield* fileSystem.makeDirectory(layout.configDir);
+          yield* fileSystem.symlink(
+            login,
+            path.join(layout.configDir, ".t3code-shared-config.tmp"),
+          );
+
+          yield* materializeClaudeSharedConfig(layout);
+
+          expect(yield* fileSystem.readFileString(login)).toBe("secret");
+          expect((yield* readRecord(layout.configDir))?.sharedConfigDir).toBe(
+            layout.sharedConfigDir,
+          );
+        }).pipe(Effect.scoped),
+    );
+
     it.effect.skipIf(!symlinksSupported)("refuses a record that is a symlink", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;

@@ -99,8 +99,10 @@ export class ClaudeSharedConfigFileSystemError extends Schema.TaggedError<Claude
     operation: Schema.Literals([
       "stat",
       "readLink",
+      "readFile",
       "makeDirectory",
       "writeFile",
+      "rename",
       "remove",
       "symlink",
     ]),
@@ -158,6 +160,15 @@ export class ClaudeSharedConfigOwnFileSymlinkError extends Schema.TaggedError<Cl
   }
 }
 
+export class ClaudeSharedConfigRecordUnreadableError extends Schema.TaggedError<ClaudeSharedConfigRecordUnreadableError>()(
+  "ClaudeSharedConfigRecordUnreadableError",
+  { path: Schema.String },
+) {
+  override get message(): string {
+    return `T3 Code's record of its shared config links '${this.path}' is unreadable. Delete it and check that the config directory's links point where you expect.`;
+  }
+}
+
 export class ClaudeSharedConfigEntryConflictError extends Schema.TaggedError<ClaudeSharedConfigEntryConflictError>()(
   "ClaudeSharedConfigEntryConflictError",
   {
@@ -179,6 +190,7 @@ export type ClaudeSharedConfigError =
   | ClaudeSharedConfigPathConflictError
   | ClaudeSharedConfigPrivateEntryError
   | ClaudeSharedConfigOwnFileSymlinkError
+  | ClaudeSharedConfigRecordUnreadableError
   | ClaudeSharedConfigEntryConflictError;
 
 type LinkState =
@@ -271,12 +283,25 @@ const readSharedConfigRecord = Effect.fn("ClaudeConfigLayout.readSharedConfigRec
   const path = yield* Path.Path;
   const markerPath = markerPathOf(path, configDir);
   yield* refuseSymlink(fileSystem, markerPath);
-  const text = yield* fileSystem.readFileString(markerPath).pipe(Effect.option);
-  const record = Option.flatMap(text, decodeSharedConfigRecord);
-  return Option.map(record, (value): SharedConfigRecord => ({
-    sharedConfigDir: value.sharedConfigDir,
-    linked: value.linked.filter((entryName) => MANAGED_ENTRY_NAMES.has(entryName)),
-  }));
+  const text = yield* fileSystem.readFileString(markerPath).pipe(
+    Effect.map(Option.some),
+    Effect.catchTags({
+      PlatformError: (cause) =>
+        cause.reason._tag === "NotFound"
+          ? Effect.succeed(Option.none<string>())
+          : Effect.fail(fileSystemError("readFile", markerPath)(cause)),
+    }),
+  );
+  if (Option.isNone(text)) return Option.none<SharedConfigRecord>();
+  // Treating a torn record as absent would forget links it lists, leaving them for good.
+  const record = decodeSharedConfigRecord(text.value);
+  if (Option.isNone(record)) {
+    return yield* new ClaudeSharedConfigRecordUnreadableError({ path: markerPath });
+  }
+  return Option.some<SharedConfigRecord>({
+    sharedConfigDir: record.value.sharedConfigDir,
+    linked: record.value.linked.filter((entryName) => MANAGED_ENTRY_NAMES.has(entryName)),
+  });
 });
 
 const writeSharedConfigRecord = Effect.fn("ClaudeConfigLayout.writeSharedConfigRecord")(function* (
@@ -286,11 +311,23 @@ const writeSharedConfigRecord = Effect.fn("ClaudeConfigLayout.writeSharedConfigR
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const markerPath = markerPathOf(path, configDir);
-  yield* (
-    record.linked.length === 0
-      ? fileSystem.remove(markerPath, { force: true })
-      : fileSystem.writeFileString(markerPath, `${encodeSharedConfigRecord(record)}\n`)
-  ).pipe(Effect.mapError(fileSystemError("writeFile", markerPath)));
+  if (record.linked.length === 0) {
+    return yield* fileSystem
+      .remove(markerPath, { force: true })
+      .pipe(Effect.mapError(fileSystemError("remove", markerPath)));
+  }
+  // A rename never leaves a torn record, and replaces a symlink instead of following it;
+  // `wx` refuses to write through anything planted at the temporary path.
+  const temporaryPath = `${markerPath}.tmp`;
+  yield* fileSystem
+    .remove(temporaryPath, { force: true })
+    .pipe(Effect.mapError(fileSystemError("remove", temporaryPath)));
+  yield* fileSystem
+    .writeFileString(temporaryPath, `${encodeSharedConfigRecord(record)}\n`, { flag: "wx" })
+    .pipe(Effect.mapError(fileSystemError("writeFile", temporaryPath)));
+  yield* fileSystem
+    .rename(temporaryPath, markerPath)
+    .pipe(Effect.mapError(fileSystemError("rename", markerPath)));
 });
 
 /** A recorded link into `sharedConfigDir`, as T3 Code made it. */
@@ -486,6 +523,7 @@ export const unshareClaudeConfig = Effect.fn("unshareClaudeConfig")(function* (
   const record = yield* readSharedConfigRecord(configDir).pipe(
     Effect.catchTags({
       ClaudeSharedConfigFileSystemError: () => Effect.succeed(Option.none()),
+      ClaudeSharedConfigRecordUnreadableError: () => Effect.succeed(Option.none()),
     }),
   );
   if (Option.isNone(record)) return;
