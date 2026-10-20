@@ -22,9 +22,16 @@ const Credentials = Schema.Struct({
 });
 const Config = Schema.Struct({
   oauthAccount: Schema.optional(
-    Schema.Struct({ organizationUuid: Schema.optional(Schema.String) }),
+    Schema.Struct({
+      organizationUuid: Schema.optional(Schema.String),
+      // Only a display label: an odd value must not make the account unreadable.
+      organizationName: Schema.optional(Schema.Unknown),
+    }),
   ),
 });
+const MAX_ORGANIZATION_LABEL_LENGTH = 120;
+// Personal organizations are named after the account's email address.
+const EMAIL_PATTERN = /\S@\S/;
 const Grant = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(GRANT_ID)),
   resets_left: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -171,9 +178,17 @@ export const readClaudeResetCredits = Effect.fn("readClaudeResetCredits")(
   Effect.orElseSucceed(() => undefined),
 );
 
-export const readClaudeOrganizationId = (accountConfigPath: string) =>
+/** Reads `.claude.json`, never `.credentials.json`; an unreadable file is no organization. */
+export const readClaudeOrganization = (accountConfigPath: string) =>
   readJson(Config, accountConfigPath).pipe(
-    Effect.map((config) => config.oauthAccount?.organizationUuid?.trim() || undefined),
+    Effect.map((config) => {
+      const id = config.oauthAccount?.organizationUuid?.trim();
+      if (!id) return undefined;
+      const name = config.oauthAccount?.organizationName;
+      const label =
+        typeof name === "string" ? name.trim().slice(0, MAX_ORGANIZATION_LABEL_LENGTH).trim() : "";
+      return label === "" || EMAIL_PATTERN.test(label) ? { id } : { id, label };
+    }),
     Effect.orElseSucceed(() => undefined),
   );
 

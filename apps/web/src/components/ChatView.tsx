@@ -287,6 +287,7 @@ import { getProviderModelCapabilities } from "../providerModels";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
+  isProviderInstanceAllowedByLock,
   NO_PROVIDER_MODEL_SELECTION,
   shouldShowInstanceBadge,
   sortProviderInstanceEntries,
@@ -2375,17 +2376,18 @@ export default function ChatView(props: ChatViewProps) {
     ),
   );
   const activeThreadModelInstanceId = activeThread?.modelSelection.instanceId;
-  const { selectedProviderEntry, requestedDriverKind } = resolveComposerProviderSelection({
-    entries: providerInstanceEntries,
-    candidateInstanceIds: [
-      selectedProviderByThreadId,
-      activeRuntime?.providerInstanceId,
-      activeThreadModelInstanceId,
-      activeProjectDefaultModelSelection?.instanceId,
-    ],
-    lockedProvider,
-    lockedInstanceId: activeRuntime?.providerInstanceId ?? activeThreadModelInstanceId,
-  });
+  const { selectedProviderEntry, requestedDriverKind, providerLock } =
+    resolveComposerProviderSelection({
+      entries: providerInstanceEntries,
+      candidateInstanceIds: [
+        selectedProviderByThreadId,
+        activeRuntime?.providerInstanceId,
+        activeThreadModelInstanceId,
+        activeProjectDefaultModelSelection?.instanceId,
+      ],
+      lockedProvider,
+      lockedInstanceId: activeRuntime?.providerInstanceId ?? activeThreadModelInstanceId,
+    });
   const selectedProvider = selectedProviderEntry?.driverKind ?? requestedDriverKind;
   const activeProviderInstanceId = selectedProviderEntry?.instanceId ?? null;
   const activeProviderStatus = selectedProviderEntry?.snapshot ?? null;
@@ -2949,9 +2951,7 @@ export default function ChatView(props: ChatViewProps) {
     providers: providerInstanceEntries,
     driverKind: selectedProvider,
     instanceId: activeProviderInstanceId,
-    lockedInstanceId: lockedProvider
-      ? (activeRuntime?.providerInstanceId ?? activeThread?.modelSelection.instanceId ?? null)
-      : null,
+    providerLock,
   });
   const [resumeCompactionPermanentlyDismissed, setResumeCompactionPermanentlyDismissed] =
     useLocalStorage(
@@ -7455,33 +7455,14 @@ export default function ChatView(props: ChatViewProps) {
     options?: { focusComposer?: boolean },
   ) => {
     if (!activeThread) return;
-    const entry = providerStatuses.find((snapshot) => snapshot.instanceId === instanceId);
-    const resolvedDriverKind = entry?.driver ?? null;
+    const entry = providerInstanceEntries.find((candidate) => candidate.instanceId === instanceId);
     if (
       !supportsProviderSwitchingViaHandoff &&
-      lockedProvider !== null &&
-      resolvedDriverKind !== null &&
-      resolvedDriverKind !== lockedProvider
+      entry !== undefined &&
+      !isProviderInstanceAllowedByLock(providerLock, entry)
     ) {
       if (options?.focusComposer !== false) scheduleComposerFocus();
       return;
-    }
-    if (
-      !supportsProviderSwitchingViaHandoff &&
-      lockedProvider !== null &&
-      activeRuntime?.providerInstanceId
-    ) {
-      const currentEntry = providerStatuses.find(
-        (snapshot) => snapshot.instanceId === activeRuntime.providerInstanceId,
-      );
-      if (
-        currentEntry?.continuation?.groupKey &&
-        entry?.continuation?.groupKey &&
-        currentEntry.continuation.groupKey !== entry.continuation.groupKey
-      ) {
-        if (options?.focusComposer !== false) scheduleComposerFocus();
-        return;
-      }
     }
     const resolvedModel = resolveAppModelSelectionForInstance(
       instanceId,

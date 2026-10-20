@@ -4,11 +4,15 @@ import {
   applyProviderInstanceSettings,
   deriveProviderEntriesByEnvironment,
   deriveProviderInstanceEntries,
+  filterProviderInstancesForLock,
   getDefaultProviderInstanceModel,
+  isProviderInstanceAllowedByLock,
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
   resolveDefaultProviderModelSelection,
   resolveProviderCatalogAvailability,
+  resolveProviderInstanceLock,
+  resolveProviderInstanceSwitchNote,
   resolveSelectableProviderInstance,
 } from "./providerInstances";
 
@@ -22,6 +26,8 @@ function provider(input: {
   status?: ServerProvider["status"];
   models?: ServerProvider["models"];
   supportsTextGeneration?: boolean;
+  continuation?: ServerProvider["continuation"];
+  workspace?: { readonly id: string; readonly label?: string };
 }): ServerProvider {
   return {
     instanceId: ProviderInstanceId.make(input.instanceId),
@@ -36,7 +42,12 @@ function provider(input: {
     version: null,
     status: input.status ?? "ready",
     ...(input.availability ? { availability: input.availability } : {}),
-    auth: { status: "authenticated" },
+    ...(input.continuation ? { continuation: input.continuation } : {}),
+    auth: {
+      status: "authenticated",
+      ...(input.workspace?.id ? { workspaceId: input.workspace.id } : {}),
+      ...(input.workspace?.label ? { workspaceLabel: input.workspace.label } : {}),
+    },
     checkedAt: "2026-01-01T00:00:00.000Z",
     models: input.models ?? [],
     slashCommands: [],
@@ -701,5 +712,192 @@ describe("provider icon metadata", () => {
     ]);
     expect(entry?.acpRegistryIconUrl).toBe(iconUrl);
     expect(entry?.driverKind).toBe("acpRegistry");
+  });
+});
+
+describe("provider instance lock", () => {
+  const claude = ProviderDriverKind.make("claudeAgent");
+  const codex = ProviderDriverKind.make("codex");
+  const antigravity = ProviderDriverKind.make("antigravity");
+
+  const entryOf = (
+    driver: ProviderDriverKind,
+    instanceId: string,
+    groupKey?: string,
+    workspace?: { readonly id: string; readonly label?: string },
+  ) =>
+    deriveProviderInstanceEntries([
+      provider({
+        provider: driver,
+        instanceId,
+        ...(groupKey ? { continuation: { groupKey } } : {}),
+        ...(workspace ? { workspace } : {}),
+      }),
+    ])[0]!;
+
+  const claudeWork = entryOf(claude, "claude_work", "claude:work", { id: "org-a", label: "Acme" });
+  const claudeWorkAlias = entryOf(claude, "claude_work_alias", "claude:work");
+  const claudePersonal = entryOf(claude, "claude_personal", "claude:personal", { id: "org-b" });
+  const claudeSide = entryOf(claude, "claude_side", "claude:side");
+  const codexWork = entryOf(codex, "codex_work", "codex:work");
+  const codexPersonal = entryOf(codex, "codex_personal", "codex:personal");
+  const entries = [
+    claudeWork,
+    claudeWorkAlias,
+    claudePersonal,
+    claudeSide,
+    codexWork,
+    codexPersonal,
+  ];
+
+  const lockOn = (locked: (typeof entries)[number], lockEntries = entries) =>
+    resolveProviderInstanceLock({
+      entries: lockEntries,
+      lockedProvider: locked.driverKind,
+      lockedInstanceId: locked.instanceId,
+    });
+
+  it("leaves an unlocked thread free to pick any instance", () => {
+    const lock = resolveProviderInstanceLock({
+      entries,
+      lockedProvider: null,
+      lockedInstanceId: claudeWork.instanceId,
+    });
+
+    expect(lock).toBeNull();
+    expect(entries.every((entry) => isProviderInstanceAllowedByLock(lock, entry))).toBe(true);
+    expect(filterProviderInstancesForLock(entries, lock, undefined)).toEqual(entries);
+  });
+
+  it("lets a Claude thread resume in its group and hand off to another Claude group", () => {
+    const lock = lockOn(claudeWork);
+
+    expect(lock?.continuationGroupKey).toBe("claude:work");
+    expect(
+      entries
+        .filter((entry) => isProviderInstanceAllowedByLock(lock, entry))
+        .map((e) => e.instanceId),
+    ).toEqual([
+      claudeWork.instanceId,
+      claudeWorkAlias.instanceId,
+      claudePersonal.instanceId,
+      claudeSide.instanceId,
+    ]);
+  });
+
+  it("keeps a Codex thread in its continuation group", () => {
+    const lock = lockOn(codexWork);
+
+    expect(isProviderInstanceAllowedByLock(lock, codexWork)).toBe(true);
+    expect(isProviderInstanceAllowedByLock(lock, codexPersonal)).toBe(false);
+    expect(isProviderInstanceAllowedByLock(lock, claudeWork)).toBe(false);
+  });
+
+  it("limits a group-less Antigravity thread to its exact instance", () => {
+    const googleWork = entryOf(antigravity, "google_work");
+    const googlePersonal = entryOf(antigravity, "google_personal");
+    const lock = lockOn(googleWork, [googleWork, googlePersonal]);
+
+    expect(lock?.continuationGroupKey).toBeNull();
+    expect(isProviderInstanceAllowedByLock(lock, googleWork)).toBe(true);
+    expect(isProviderInstanceAllowedByLock(lock, googlePersonal)).toBe(false);
+    expect(
+      filterProviderInstancesForLock([googleWork, googlePersonal], lock, googlePersonal.instanceId),
+    ).toEqual([googleWork]);
+  });
+
+  it("lets only the requested instance be a handoff target", () => {
+    const lock = lockOn(claudeWork);
+
+    expect(filterProviderInstancesForLock(entries, lock, claudePersonal.instanceId)).toEqual([
+      claudeWork,
+      claudeWorkAlias,
+      claudePersonal,
+    ]);
+    expect(filterProviderInstancesForLock(entries, lock, undefined)).toEqual([
+      claudeWork,
+      claudeWorkAlias,
+    ]);
+    expect(filterProviderInstancesForLock(entries, lock, codexPersonal.instanceId)).toEqual([
+      claudeWork,
+      claudeWorkAlias,
+    ]);
+  });
+
+  it("lets a Claude thread whose instance is missing move only by an explicit handoff", () => {
+    const lock = resolveProviderInstanceLock({
+      entries,
+      lockedProvider: claude,
+      lockedInstanceId: ProviderInstanceId.make("claude_deleted"),
+    });
+
+    expect(lock?.continuationGroupKey).toBeNull();
+    expect(isProviderInstanceAllowedByLock(lock, claudePersonal)).toBe(true);
+    expect(isProviderInstanceAllowedByLock(lock, codexWork)).toBe(false);
+    expect(filterProviderInstancesForLock(entries, lock, undefined)).toEqual([]);
+    expect(filterProviderInstancesForLock(entries, lock, claudePersonal.instanceId)).toEqual([
+      claudePersonal,
+    ]);
+  });
+
+  it("lets a group-less thread of a non-handoff driver resume in any instance of its driver", () => {
+    const lock = resolveProviderInstanceLock({
+      entries,
+      lockedProvider: codex,
+      lockedInstanceId: ProviderInstanceId.make("codex_deleted"),
+    });
+
+    expect(filterProviderInstancesForLock(entries, lock, undefined)).toEqual([
+      codexWork,
+      codexPersonal,
+    ]);
+  });
+
+  describe("resolveProviderInstanceSwitchNote", () => {
+    it("labels a move to another Claude group as a handoff", () => {
+      expect(resolveProviderInstanceSwitchNote(claudeWork, claudeSide)).toEqual({
+        label: "Starts a new Claude session with a context handoff",
+        organizationWarning: null,
+      });
+    });
+
+    it("says nothing for a resume in the same group, the same instance, or no current instance", () => {
+      expect(resolveProviderInstanceSwitchNote(claudeWork, claudeWorkAlias)).toBeNull();
+      expect(resolveProviderInstanceSwitchNote(claudeWork, claudeWork)).toBeNull();
+      expect(resolveProviderInstanceSwitchNote(undefined, claudePersonal)).toBeNull();
+    });
+
+    it("labels a move from a Claude instance without a group to another instance", () => {
+      expect(
+        resolveProviderInstanceSwitchNote(entryOf(claude, "claude_ungrouped"), claudePersonal)
+          ?.label,
+      ).toBe("Starts a new Claude session with a context handoff");
+    });
+
+    it("says nothing for drivers that never hand off", () => {
+      expect(resolveProviderInstanceSwitchNote(codexWork, codexPersonal)).toBeNull();
+      expect(resolveProviderInstanceSwitchNote(codexWork, claudePersonal)).toBeNull();
+    });
+
+    it("warns only when both organizations are known and differ", () => {
+      expect(
+        resolveProviderInstanceSwitchNote(claudePersonal, claudeWork)?.organizationWarning,
+      ).toBe("Acme: earlier reasoning won't carry over");
+      expect(
+        resolveProviderInstanceSwitchNote(claudeWork, claudePersonal)?.organizationWarning,
+      ).toBe("Another organization: earlier reasoning won't carry over");
+      expect(
+        resolveProviderInstanceSwitchNote(
+          claudeWork,
+          entryOf(claude, "claude_work_2", "claude:work-2", { id: "org-a" }),
+        )?.organizationWarning,
+      ).toBeNull();
+      expect(
+        resolveProviderInstanceSwitchNote(claudeWork, claudeSide)?.organizationWarning,
+      ).toBeNull();
+      expect(
+        resolveProviderInstanceSwitchNote(claudeSide, claudeWork)?.organizationWarning,
+      ).toBeNull();
+    });
   });
 });

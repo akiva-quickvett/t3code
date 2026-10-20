@@ -1,6 +1,9 @@
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { deriveProviderInstanceEntries } from "../../providerInstances";
+import {
+  deriveProviderInstanceEntries,
+  resolveProviderInstanceLock,
+} from "../../providerInstances";
 import {
   formatContextWindowCompactionMessage,
   hasAvailableCompactionProvider,
@@ -53,7 +56,11 @@ describe("hasAvailableCompactionProvider", () => {
         providers,
         driverKind: ProviderDriverKind.make("claudeAgent"),
         instanceId: originalInstanceId,
-        lockedInstanceId: originalInstanceId,
+        providerLock: resolveProviderInstanceLock({
+          entries: providers,
+          lockedProvider: ProviderDriverKind.make("claudeAgent"),
+          lockedInstanceId: originalInstanceId,
+        }),
       }),
     ).toBe(false);
   });
@@ -76,7 +83,39 @@ describe("hasAvailableCompactionProvider", () => {
         providers,
         driverKind: ProviderDriverKind.make("claudeAgent"),
         instanceId: originalInstanceId,
-        lockedInstanceId: originalInstanceId,
+        providerLock: resolveProviderInstanceLock({
+          entries: providers,
+          lockedProvider: ProviderDriverKind.make("claudeAgent"),
+          lockedInstanceId: originalInstanceId,
+        }),
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts the selected handoff target in another continuation group", () => {
+    const otherInstanceId = ProviderInstanceId.make("claude_other");
+    const providers = deriveProviderInstanceEntries([
+      claudeProvider({
+        instanceId: originalInstanceId,
+        continuationGroupKey: "claude:home:/original",
+        enabled: false,
+      }),
+      claudeProvider({
+        instanceId: otherInstanceId,
+        continuationGroupKey: "claude:home:/other",
+      }),
+    ]);
+
+    expect(
+      hasAvailableCompactionProvider({
+        providers,
+        driverKind: ProviderDriverKind.make("claudeAgent"),
+        instanceId: otherInstanceId,
+        providerLock: resolveProviderInstanceLock({
+          entries: providers,
+          lockedProvider: ProviderDriverKind.make("claudeAgent"),
+          lockedInstanceId: originalInstanceId,
+        }),
       }),
     ).toBe(true);
   });

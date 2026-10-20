@@ -4,7 +4,7 @@ import {
   resolveProjectProviderInstanceEnabled,
   type ModelSelection,
   type ProjectId,
-  type ProviderDriverKind,
+  ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
   type ServerProviderModel,
@@ -37,6 +37,8 @@ export interface ProviderInstanceEntry {
   readonly acpRegistryAgentId?: string | undefined;
   readonly acpRegistryIconUrl?: string | undefined;
   readonly continuationGroupKey?: string | undefined;
+  readonly organizationKey?: string | undefined;
+  readonly organizationLabel?: string | undefined;
   readonly enabled: boolean;
   readonly installed: boolean;
   readonly status: ServerProviderState;
@@ -75,6 +77,115 @@ export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): b
   return entry.enabled;
 }
 
+/**
+ * A started thread stays on its driver. Instances in its continuation group resume the native
+ * session; drivers listed in `HANDOFF_SWITCH_LABEL_BY_DRIVER` may also move to another group
+ * (another Claude config dir), which starts a new session with a context handoff.
+ */
+export interface ProviderInstanceLock {
+  readonly driverKind: ProviderDriverKind;
+  readonly instanceId: ProviderInstanceId | null;
+  readonly continuationGroupKey: string | null;
+}
+
+type ProviderInstanceLockTarget = Pick<
+  ProviderInstanceEntry,
+  "instanceId" | "driverKind" | "continuationGroupKey"
+>;
+
+const HANDOFF_SWITCH_LABEL_BY_DRIVER: Partial<Record<ProviderDriverKind, string>> = {
+  [ProviderDriverKind.make("claudeAgent")]: "Starts a new Claude session with a context handoff",
+};
+
+export function resolveProviderInstanceLock(input: {
+  readonly entries: ReadonlyArray<ProviderInstanceLockTarget>;
+  readonly lockedProvider: ProviderDriverKind | null;
+  readonly lockedInstanceId: ProviderInstanceId | null | undefined;
+}): ProviderInstanceLock | null {
+  if (input.lockedProvider === null) return null;
+  return {
+    driverKind: input.lockedProvider,
+    instanceId: input.lockedInstanceId ?? null,
+    continuationGroupKey:
+      input.entries.find((entry) => entry.instanceId === input.lockedInstanceId)
+        ?.continuationGroupKey ?? null,
+  };
+}
+
+function providerInstanceLockAccess(
+  lock: ProviderInstanceLock,
+  entry: ProviderInstanceLockTarget,
+): "resume" | "handoff" | "blocked" {
+  if (entry.driverKind !== lock.driverKind) return "blocked";
+  const handsOff = HANDOFF_SWITCH_LABEL_BY_DRIVER[lock.driverKind] !== undefined;
+  if (lock.continuationGroupKey === null) {
+    if (lock.instanceId === null || entry.instanceId === lock.instanceId) return "resume";
+    // Missing metadata must not move Antigravity history into another Google profile, nor let
+    // a fallback carry a Claude thread into another account.
+    if (lock.driverKind === "antigravity") return "blocked";
+    return handsOff ? "handoff" : "resume";
+  }
+  if (entry.continuationGroupKey === lock.continuationGroupKey) return "resume";
+  return handsOff ? "handoff" : "blocked";
+}
+
+/** Whether the user may move a started thread to `entry`, natively or by handoff. */
+export function isProviderInstanceAllowedByLock(
+  lock: ProviderInstanceLock | null,
+  entry: ProviderInstanceLockTarget,
+): boolean {
+  return lock === null || providerInstanceLockAccess(lock, entry) !== "blocked";
+}
+
+/**
+ * Entries a locked thread may resolve to. Only the requested instance may be a handoff target:
+ * a fallback must never move the thread to another account on its own.
+ */
+export function filterProviderInstancesForLock<Entry extends ProviderInstanceLockTarget>(
+  entries: ReadonlyArray<Entry>,
+  lock: ProviderInstanceLock | null,
+  requestedInstanceId: ProviderInstanceId | null | undefined,
+): ReadonlyArray<Entry> {
+  if (lock === null) return entries;
+  return entries.filter((entry) => {
+    const access = providerInstanceLockAccess(lock, entry);
+    return (
+      access === "resume" || (access === "handoff" && entry.instanceId === requestedInstanceId)
+    );
+  });
+}
+
+export interface ProviderInstanceSwitchNote {
+  readonly label: string;
+  /** Set when the target's login belongs to another organization than the thread's. */
+  readonly organizationWarning: string | null;
+}
+
+/** What moving a started thread from `current` to `target` costs, when it is a handoff. */
+export function resolveProviderInstanceSwitchNote(
+  current: ProviderInstanceEntry | undefined,
+  target: ProviderInstanceEntry,
+): ProviderInstanceSwitchNote | null {
+  const label = HANDOFF_SWITCH_LABEL_BY_DRIVER[target.driverKind];
+  if (label === undefined || current === undefined) return null;
+  const lock = {
+    driverKind: current.driverKind,
+    instanceId: current.instanceId,
+    continuationGroupKey: current.continuationGroupKey ?? null,
+  };
+  if (providerInstanceLockAccess(lock, target) !== "handoff") return null;
+  const crossOrganization =
+    current.organizationKey !== undefined &&
+    target.organizationKey !== undefined &&
+    current.organizationKey !== target.organizationKey;
+  return {
+    label,
+    organizationWarning: crossOrganization
+      ? `${target.organizationLabel ?? "Another organization"}: earlier reasoning won't carry over`
+      : null,
+  };
+}
+
 export function deriveProviderInstanceEntries(
   providers: ReadonlyArray<ServerProvider>,
 ): ReadonlyArray<ProviderInstanceEntry> {
@@ -92,6 +203,8 @@ export function deriveProviderInstanceEntries(
         ? { acpRegistryIconUrl: snapshot.iconUrl }
         : {}),
       continuationGroupKey: snapshot.continuation?.groupKey,
+      organizationKey: snapshot.auth.workspaceId,
+      organizationLabel: snapshot.auth.workspaceLabel,
       enabled: snapshot.enabled,
       installed: snapshot.installed,
       status: snapshot.status,

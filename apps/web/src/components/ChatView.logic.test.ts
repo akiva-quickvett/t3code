@@ -1657,6 +1657,100 @@ describe("resolveComposerProviderSelection", () => {
 
     expect(selection.selectedProviderEntry).toBeUndefined();
   });
+
+  describe("on a started Claude thread", () => {
+    const claudeWork = entry("claudeAgent", "claude_work", {
+      continuation: { groupKey: "claude:work" },
+    });
+    const claudeWorkAlias = entry("claudeAgent", "claude_work_alias", {
+      continuation: { groupKey: "claude:work" },
+    });
+    const claudePersonal = entry("claudeAgent", "claude_personal", {
+      continuation: { groupKey: "claude:personal" },
+    });
+    const codex = entry("codex", "codex", { continuation: { groupKey: "codex:default" } });
+    const entries = [claudeWork, claudeWorkAlias, claudePersonal, codex];
+
+    const select = (
+      candidateInstanceIds: ReadonlyArray<ProviderInstanceId>,
+      selectableEntries = entries,
+    ) =>
+      resolveComposerProviderSelection({
+        entries: selectableEntries,
+        candidateInstanceIds,
+        lockedProvider: ProviderDriverKind.make("claudeAgent"),
+        lockedInstanceId: claudeWork.instanceId,
+      });
+
+    it("reports the lock with the session's continuation group", () => {
+      expect(select([claudeWork.instanceId]).providerLock).toEqual({
+        driverKind: ProviderDriverKind.make("claudeAgent"),
+        instanceId: claudeWork.instanceId,
+        continuationGroupKey: "claude:work",
+      });
+    });
+
+    it("resumes in an instance of the same group", () => {
+      expect(
+        select([claudeWorkAlias.instanceId, claudeWork.instanceId]).selectedProviderEntry
+          ?.instanceId,
+      ).toBe(claudeWorkAlias.instanceId);
+    });
+
+    it("selects a requested Claude instance in another group as a handoff target", () => {
+      expect(
+        select([claudePersonal.instanceId, claudeWork.instanceId]).selectedProviderEntry
+          ?.instanceId,
+      ).toBe(claudePersonal.instanceId);
+    });
+
+    it("keeps the session's group when another driver is requested", () => {
+      expect(
+        select([codex.instanceId, claudeWork.instanceId]).selectedProviderEntry?.instanceId,
+      ).toBe(claudeWork.instanceId);
+    });
+
+    it("never falls back into another group on its own", () => {
+      const disabledWork = { ...claudeWork, enabled: false };
+      const selection = select([claudeWork.instanceId], [disabledWork, claudePersonal, codex]);
+
+      expect(selection.selectedProviderEntry).toBeUndefined();
+      expect(selection.unavailableProviderInstanceId).toBe(claudeWork.instanceId);
+    });
+
+    it("never falls back to another account when the session's instance is missing", () => {
+      const missingInstanceId = ProviderInstanceId.make("claude_deleted");
+      const lockedOnMissing = (candidateInstanceIds: ReadonlyArray<ProviderInstanceId>) =>
+        resolveComposerProviderSelection({
+          entries: [claudePersonal, claudeWorkAlias],
+          candidateInstanceIds,
+          lockedProvider: ProviderDriverKind.make("claudeAgent"),
+          lockedInstanceId: missingInstanceId,
+        });
+
+      const fallback = lockedOnMissing([missingInstanceId]);
+      expect(fallback.selectedProviderEntry).toBeUndefined();
+      expect(fallback.unavailableProviderInstanceId).toBe(missingInstanceId);
+      expect(
+        lockedOnMissing([claudePersonal.instanceId, missingInstanceId]).selectedProviderEntry
+          ?.instanceId,
+      ).toBe(claudePersonal.instanceId);
+    });
+
+    it("does not reach another group through a later candidate", () => {
+      const disabledPersonal = { ...claudePersonal, enabled: false };
+      const claudeSide = entry("claudeAgent", "claude_side", {
+        continuation: { groupKey: "claude:personal" },
+      });
+
+      expect(
+        select(
+          [disabledPersonal.instanceId, claudeSide.instanceId, claudeWork.instanceId],
+          [claudeWork, disabledPersonal, claudeSide],
+        ).selectedProviderEntry?.instanceId,
+      ).toBe(claudeWork.instanceId);
+    });
+  });
 });
 
 describe("resolveComposerInteractionMode", () => {
