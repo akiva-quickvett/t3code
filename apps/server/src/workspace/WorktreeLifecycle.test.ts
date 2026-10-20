@@ -177,8 +177,35 @@ describe("WorktreeLifecycle.remove", () => {
       assert.deepInclude(warning?.annotations, {
         threadId: THREAD_ID,
         worktreePath: t.worktree,
+        projectId: PROJECT_ID,
+        scriptId: "teardown",
         exitCode: 3,
-        outputTail: "compose down failed",
+        signal: null,
+        timedOut: false,
+        outputBytes: "compose down failed\n".length,
+      });
+      // Script output can carry credentials, so no log field holds it.
+      assert.notInclude(JSON.stringify(warnings), "compose down failed");
+    }).pipe(Effect.provide(Layer.merge(testLayer, layer)), Effect.scoped);
+  });
+
+  it.effect("logs the signal that killed a script and still removes the worktree", () => {
+    const { warnings, layer } = captureWarnings();
+    return Effect.gen(function* () {
+      const t = yield* fixture(() => [teardown("kill -TERM $$")]);
+      yield* t.lifecycle.remove({
+        projectRoot: t.repo,
+        worktreePath: t.worktree,
+        force: true,
+        projectId: PROJECT_ID,
+        threadId: THREAD_ID,
+      });
+      assert.isFalse(yield* t.fs.exists(t.worktree));
+      const warning = warnings.find((entry) => entry.message.includes("teardown script failed"));
+      assert.deepInclude(warning?.annotations, {
+        exitCode: null,
+        signal: "SIGTERM",
+        timedOut: false,
       });
     }).pipe(Effect.provide(Layer.merge(testLayer, layer)), Effect.scoped);
   });
@@ -204,8 +231,11 @@ describe("WorktreeLifecycle.remove", () => {
       assert.deepInclude(warning?.annotations, {
         threadId: THREAD_ID,
         timeoutMs: 200,
-        outputTail: "stuck",
+        timedOut: true,
+        exitCode: null,
+        outputBytes: "stuck\n".length,
       });
+      assert.isAtLeast(Number(warning?.annotations.durationMs), 200);
     }).pipe(Effect.provide(Layer.merge(testLayer, layer)), Effect.scoped);
   });
 

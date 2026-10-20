@@ -131,7 +131,7 @@ function completionSentinelPattern(token: string): RegExp {
   return new RegExp(`${COMPLETION_SENTINEL_PREFIX}_${token}:(-?\\d+)`);
 }
 
-export function stripTerminalControl(text: string): string {
+function stripTerminalControl(text: string): string {
   return (
     text
       .replace(

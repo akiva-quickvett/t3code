@@ -6,6 +6,7 @@ import {
   teardownProjectScript,
 } from "@t3tools/shared/projectScripts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -13,6 +14,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import type * as PlatformError from "effect/PlatformError";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -20,7 +22,6 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
-import { stripTerminalControl } from "../project/ProjectSetupScriptRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { terminalShellCandidates } from "../terminal/Manager.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -55,8 +56,18 @@ export class WorktreeLifecycle extends Context.Service<
 const TEARDOWN_KILL_GRACE = "5 seconds";
 // A child the script left running can hold its output open after it exits.
 const OUTPUT_DRAIN_GRACE = "1 second";
-const OUTPUT_TAIL_MAX_LENGTH = 2_000;
 const SWEEP_GIT_TIMEOUT_MS = 300_000;
+
+// The spawner reports a signal death only as its error's message.
+const terminatingSignal = (error: PlatformError.PlatformError) => {
+  const cause = error.reason.cause;
+  return cause instanceof Error
+    ? (/due to receipt of signal: '(SIG[A-Z0-9]+)'/.exec(cause.message)?.[1] ?? null)
+    : null;
+};
+
+const failureTag = (error: unknown) =>
+  typeof error === "object" && error !== null && "_tag" in error ? String(error._tag) : "Defect";
 
 const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
@@ -159,46 +170,55 @@ const make = Effect.gen(function* () {
       stdin: "ignore",
       forceKillAfter: TEARDOWN_KILL_GRACE,
     } satisfies ChildProcess.CommandOptions;
-    let outputTail = "";
-    const decoder = new TextDecoder();
     const timeoutMs = settings.worktreeRemovePolicy.timeoutMs;
-    const exitCode = yield* Effect.scoped(
+    const startedAt = yield* Clock.currentTimeMillis;
+    let outputBytes = 0;
+    const result = yield* Effect.scoped(
       Effect.gen(function* () {
         const handle = yield* Effect.firstSuccessOf(
           teardownShells.map((shell) =>
             spawner.spawn(ChildProcess.make(shell.shell, [...shell.args, script.command], options)),
           ),
         );
+        // Output is drained only so a chatty script never blocks on a full pipe;
+        // it can carry credentials, so only its size is logged.
         const drain = yield* handle.all.pipe(
           Stream.runForEach((chunk) =>
             Effect.sync(() => {
-              outputTail = (outputTail + decoder.decode(chunk, { stream: true })).slice(
-                -OUTPUT_TAIL_MAX_LENGTH,
-              );
+              outputBytes += chunk.byteLength;
             }),
           ),
           Effect.ignore,
           Effect.forkScoped,
         );
-        const code = yield* handle.exitCode;
+        const exit = yield* handle.exitCode.pipe(
+          Effect.map((exitCode) => ({ exitCode: exitCode as number | null, signal: null })),
+          Effect.catch((error) => {
+            const signal = terminatingSignal(error);
+            return signal === null
+              ? Effect.fail(error)
+              : Effect.succeed({ exitCode: null, signal });
+          }),
+        );
         yield* Fiber.join(drain).pipe(Effect.timeoutOption(OUTPUT_DRAIN_GRACE));
-        return code;
+        return exit;
       }),
     ).pipe(Effect.timeoutOption(timeoutMs));
-    const failure = {
+    const outcome = {
       ...logContext,
-      outputTail: stripTerminalControl(outputTail).trim(),
+      exitCode: Option.isSome(result) ? result.value.exitCode : null,
+      signal: Option.isSome(result) ? result.value.signal : null,
+      timedOut: Option.isNone(result),
+      durationMs: (yield* Clock.currentTimeMillis) - startedAt,
+      outputBytes,
     };
-    if (Option.isNone(exitCode)) {
+    if (outcome.timedOut) {
       yield* Effect.logWarning("worktree teardown script timed out; removing anyway", {
-        ...failure,
+        ...outcome,
         timeoutMs,
       });
-    } else if (exitCode.value !== 0) {
-      yield* Effect.logWarning("worktree teardown script failed; removing anyway", {
-        ...failure,
-        exitCode: exitCode.value,
-      });
+    } else if (outcome.exitCode !== 0) {
+      yield* Effect.logWarning("worktree teardown script failed; removing anyway", outcome);
     }
   });
 
@@ -252,7 +272,8 @@ const make = Effect.gen(function* () {
               : Effect.logWarning("worktree teardown failed; removing anyway", {
                   threadId: input.threadId ?? null,
                   worktreePath,
-                  cause: Cause.pretty(cause),
+                  // Platform errors quote the script's command line, so only the tag.
+                  error: failureTag(Cause.squash(cause)),
                 }),
           ),
           Effect.andThen(removeCheckout(input, worktreePath)),
