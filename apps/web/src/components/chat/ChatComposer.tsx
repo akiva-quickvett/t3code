@@ -100,6 +100,7 @@ import {
   readFileAsDataUrl,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
+  threadHasStarted,
   threadShellHasStarted,
 } from "../ChatView.logic";
 import {
@@ -2263,10 +2264,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     uploadsByImageId,
   ]);
 
+  const threadInstanceId =
+    activeThread?.runtime?.providerInstanceId ?? activeThreadModelSelection?.instanceId;
   const {
     providerInstanceEntries,
     selectedProviderEntry,
-    lockedContinuationGroupKey,
+    providerLock,
     unavailableProviderInstanceId,
     selectedInstanceId,
     selectedProvider,
@@ -2289,8 +2292,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       activeProjectDefaultModelSelection?.instanceId,
     ],
     lockedProvider,
-    lockedInstanceId:
-      activeThread?.runtime?.providerInstanceId ?? activeThreadModelSelection?.instanceId,
+    lockedInstanceId: threadInstanceId,
   });
   const noProviderAvailable =
     selectedProviderEntry === undefined && multipleModelSelections === null;
@@ -5156,8 +5158,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             ? (activeThreadModelSelection?.model ?? selectedModelForPickerWithCustomFallback)
             : selectedModelForPickerWithCustomFallback
         }
-        lockedProvider={lockedProvider}
-        lockedContinuationGroupKey={lockedContinuationGroupKey}
+        providerLock={providerLock}
+        threadInstanceId={threadHasStarted(activeThread) ? (threadInstanceId ?? null) : null}
         instanceEntries={providerInstanceEntries}
         keybindings={keybindings}
         modelOptionsByInstance={modelOptionsByInstance}

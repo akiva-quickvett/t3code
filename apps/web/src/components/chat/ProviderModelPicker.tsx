@@ -2,7 +2,6 @@ import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
   type EnvironmentId,
-  type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
 import { memo, useEffect, useState } from "react";
@@ -18,7 +17,11 @@ import {
   getTriggerDisplayModelLabel,
   getTriggerDisplayModelName,
 } from "./providerIconUtils";
-import { shouldShowInstanceBadge, type ProviderInstanceEntry } from "../../providerInstances";
+import {
+  shouldShowInstanceBadge,
+  type ProviderInstanceEntry,
+  type ProviderInstanceLock,
+} from "../../providerInstances";
 import {
   ComposerControl,
   ComposerControlChevron,
@@ -33,8 +36,9 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   model: string;
   selectedModels?: ReadonlyArray<{ instanceId: ProviderInstanceId; model: string }>;
   onToggleModel?: (instanceId: ProviderInstanceId, model: string) => void;
-  lockedProvider: ProviderDriverKind | null;
-  lockedContinuationGroupKey?: string | null;
+  providerLock: ProviderInstanceLock | null;
+  /** The instance a started thread's conversation lives on; picker rows describe switching away. */
+  threadInstanceId?: ProviderInstanceId | null;
   instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   keybindings?: ResolvedKeybindingsConfig;
   modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>;
@@ -292,8 +296,8 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
                 },
               }
             : {})}
-          lockedProvider={props.lockedProvider}
-          lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
+          providerLock={props.providerLock}
+          threadInstanceId={props.threadInstanceId ?? null}
           instanceEntries={props.instanceEntries}
           {...(props.keybindings ? { keybindings: props.keybindings } : {})}
           modelOptionsByInstance={props.modelOptionsByInstance}

@@ -57,9 +57,13 @@ import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
 import { TooltipProvider } from "../ui/tooltip";
 import { InlineButton } from "../ui/button";
 import {
+  isProviderInstanceAllowedByLock,
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
+  resolveProviderInstanceSwitchNote,
   type ProviderInstanceEntry,
+  type ProviderInstanceLock,
+  type ProviderInstanceSwitchNote,
 } from "../../providerInstances";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
 
@@ -188,11 +192,13 @@ function modelJumpLabelsByKey(
 
 function ModelPickerProviderNotices({
   setupEntries,
+  switchNote,
   updateRequiredNotices,
   onRequestClose,
   onOpenProviderSetup,
 }: {
   setupEntries: ReadonlyArray<ProviderInstanceEntry>;
+  switchNote: ProviderInstanceSwitchNote | undefined;
   updateRequiredNotices: ReadonlyArray<{ instanceId: ProviderInstanceId; notice: string }>;
   onRequestClose: (() => void) | undefined;
   onOpenProviderSetup: ((instanceId: ProviderInstanceId) => void) | undefined;
@@ -222,6 +228,14 @@ function ModelPickerProviderNotices({
       ) : (
         <ComboboxEmpty className="empty:h-0">No models found</ComboboxEmpty>
       )}
+      {switchNote ? (
+        <p className="shrink-0 border-t border-border/70 px-3 py-2 text-xs leading-snug text-muted-foreground">
+          {switchNote.label}
+          {switchNote.organizationWarning ? (
+            <span className="block text-warning">{switchNote.organizationWarning}</span>
+          ) : null}
+        </p>
+      ) : null}
       {updateRequiredNotices.map(({ instanceId, notice }) => (
         <p
           key={instanceId}
@@ -347,8 +361,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   model: string;
   selectedModels?: ReadonlyArray<{ instanceId: ProviderInstanceId; model: string }>;
   onToggleModel?: (instanceId: ProviderInstanceId, model: string) => void;
-  lockedProvider: ProviderDriverKind | null;
-  lockedContinuationGroupKey?: string | null;
+  providerLock: ProviderInstanceLock | null;
+  threadInstanceId: ProviderInstanceId | null;
   instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   keybindings?: ResolvedKeybindingsConfig;
   modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>;
@@ -420,7 +434,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | "favorites">(
     () => {
       if (
-        props.lockedProvider !== null ||
+        props.providerLock !== null ||
         activeInstanceHasSelectableUnavailableModel ||
         activeInstanceNeedsSetup
       ) {
@@ -512,22 +526,21 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     terminalOpen: props.terminalOpen,
     modelPickerOpen: true,
   } as const;
-  const lockedProvider = props.lockedProvider;
-  const lockedContinuationGroupKey = props.lockedContinuationGroupKey;
+  const providerLock = props.providerLock;
   const canOpenProviderSetup = onOpenProviderSetup !== undefined;
   const favoritesSet = (() => {
     return new Set(favorites.map((fav) => providerModelKey(fav.provider, fav.model)));
   })();
 
   const entryByInstanceId = new Map(instanceEntries.map((entry) => [entry.instanceId, entry]));
-  const matchesLockedProvider = (
-    entry: Pick<ProviderInstanceEntry, "driverKind" | "continuationGroupKey">,
-  ): boolean => {
-    if (lockedProvider === null) return true;
-    if (entry.driverKind !== lockedProvider) return false;
-    if (!lockedContinuationGroupKey) return true;
-    return entry.continuationGroupKey === lockedContinuationGroupKey;
-  };
+  const threadEntry =
+    props.threadInstanceId === null ? undefined : entryByInstanceId.get(props.threadInstanceId);
+  const switchNoteByInstanceId = new Map(
+    instanceEntries.flatMap((entry) => {
+      const note = resolveProviderInstanceSwitchNote(threadEntry, entry);
+      return note === null ? [] : [[entry.instanceId, note] as const];
+    }),
+  );
 
   const selectableUnavailableInstanceIds = (() => {
     const instanceIds = new Set<ProviderInstanceId>();
@@ -587,7 +600,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     return out;
   })();
 
-  const isLocked = lockedProvider !== null;
+  const isLocked = providerLock !== null;
   const isSearching = searchQuery.trim().length > 0;
   const lockedDisabledInstanceIds = (() => {
     if (!isLocked) {
@@ -595,7 +608,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     }
     const disabled = new Set<ProviderInstanceId>();
     for (const entry of instanceEntries) {
-      if (!matchesLockedProvider(entry)) {
+      if (!isProviderInstanceAllowedByLock(providerLock, entry)) {
         disabled.add(entry.instanceId);
       }
     }
@@ -609,7 +622,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     const available: ProviderInstanceEntry[] = [];
     const disabled: ProviderInstanceEntry[] = [];
     for (const entry of enabledEntries) {
-      if (matchesLockedProvider(entry)) {
+      if (isProviderInstanceAllowedByLock(providerLock, entry)) {
         available.push(entry);
       } else {
         disabled.push(entry);
@@ -624,8 +637,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     let result = flatModels;
 
     if (searchQuery.trim()) {
-      const candidates =
-        lockedProvider !== null ? result.filter((m) => matchesLockedProvider(m)) : result;
+      const candidates = isLocked
+        ? result.filter((m) => isProviderInstanceAllowedByLock(providerLock, m))
+        : result;
       return rankModelPickerSearch(candidates, searchQuery, (model) => ({
         name: model.name,
         ...(model.shortName ? { shortName: model.shortName } : {}),
@@ -636,8 +650,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       }));
     }
 
-    if (lockedProvider !== null) {
-      result = result.filter((m) => matchesLockedProvider(m));
+    if (isLocked) {
+      result = result.filter((m) => isProviderInstanceAllowedByLock(providerLock, m));
       if (selectedInstanceId === "favorites") {
         result = result.filter((m) => favoritesSet.has(providerModelKey(m.instanceId, m.slug)));
       } else {
@@ -685,11 +699,17 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   const selectedEntry =
     selectedInstanceId === "favorites" ? undefined : entryByInstanceId.get(selectedInstanceId);
+  // An instance's own list gets one note; search and favorites mix instances, so rows carry it.
+  const showRowSwitchNotes = isSearching || selectedEntry === undefined;
+  const listSwitchNote =
+    isSearching || selectedEntry === undefined
+      ? undefined
+      : switchNoteByInstanceId.get(selectedEntry.instanceId);
   const providerSetupEntries =
     !isSearching && canOpenProviderSetup
       ? instanceEntries.filter(
           (entry) =>
-            matchesLockedProvider(entry) &&
+            isProviderInstanceAllowedByLock(providerLock, entry) &&
             shouldOfferModelPickerSetup(
               entry,
               modelOptionsByInstance.get(entry.instanceId) ?? [],
@@ -702,7 +722,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   const updateRequiredNotices = instanceEntries.flatMap((entry) => {
     const shown = isSearching
-      ? matchesLockedProvider(entry)
+      ? isProviderInstanceAllowedByLock(providerLock, entry)
       : entry.instanceId === selectedEntry?.instanceId;
     const notice = shown ? formatProviderUpdateRequiredNotice(entry.snapshot, searchQuery) : null;
     return notice ? [{ instanceId: entry.instanceId, notice }] : [];
@@ -748,6 +768,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     modelJumpLabelByKey,
     activeModelKey,
     selectedModelKeySet,
+    switchNoteByInstanceId,
+    showRowSwitchNotes,
   };
 
   const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -961,6 +983,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                 }
                 const disabledReason =
                   getModelDisabledReason?.(model.instanceId, model.slug) ?? null;
+                const switchNote = showRowSwitchNotes
+                  ? switchNoteByInstanceId.get(model.instanceId)
+                  : undefined;
                 return (
                   <ModelListRow
                     key={modelKey}
@@ -989,6 +1014,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     unavailable={model.isUnavailable === true}
                     jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
                     disabledReason={disabledReason}
+                    switchNote={switchNote?.label ?? null}
+                    switchWarning={switchNote?.organizationWarning ?? null}
                     onToggleFavorite={toggleFavorite}
                   />
                 );
@@ -996,6 +1023,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             />
             <ModelPickerProviderNotices
               setupEntries={providerSetupEntries}
+              switchNote={listSwitchNote}
               updateRequiredNotices={updateRequiredNotices}
               onRequestClose={onRequestClose}
               onOpenProviderSetup={onOpenProviderSetup}

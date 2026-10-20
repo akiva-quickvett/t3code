@@ -247,6 +247,7 @@ function nonEmptyProbeString(value: string): string | undefined {
 export type ClaudeCapabilitiesProbe = {
   readonly email: string | undefined;
   readonly workspaceId?: string | undefined;
+  readonly workspaceLabel?: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
   readonly apiKeySource: string | undefined;
@@ -674,6 +675,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         status: "authenticated",
         ...(capabilities.email ? { email: capabilities.email } : {}),
         ...(capabilities.workspaceId ? { workspaceId: capabilities.workspaceId } : {}),
+        ...(capabilities.workspaceLabel ? { workspaceLabel: capabilities.workspaceLabel } : {}),
         ...(authMetadata ? authMetadata : {}),
       },
       ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),

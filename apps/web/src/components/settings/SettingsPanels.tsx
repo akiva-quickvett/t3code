@@ -3153,7 +3153,7 @@ export function GeneralSettingsPanel() {
                   environmentId={environmentId}
                   activeInstanceId={textGenInstanceId}
                   model={textGenModel}
-                  lockedProvider={null}
+                  providerLock={null}
                   instanceEntries={textGenerationModelInstanceEntries}
                   modelOptionsByInstance={textGenerationModelOptionsByInstance}
                   triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}

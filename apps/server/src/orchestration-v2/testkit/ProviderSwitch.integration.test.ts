@@ -53,6 +53,7 @@ import * as EffectOutbox from "../EffectOutbox.ts";
 import * as ProjectionMaintenance from "../ProjectionMaintenance.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
+import { MIXED_ORGANIZATION_NOTE, MIXED_ORGANIZATION_NOTICE } from "../MixedOrganizationNote.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   CLAUDE_MODEL_SELECTION,
@@ -3538,4 +3539,273 @@ describe("orchestration v2 provider switching", () => {
       }),
     ),
   );
+
+  describe("handoff between accounts of one provider", () => {
+    const PROVIDERS = {
+      claude: {
+        driver: CLAUDE_DRIVER,
+        capabilities: ClaudeProviderCapabilitiesV2,
+        modelSelection: CLAUDE_MODEL_SELECTION,
+      },
+      codex: {
+        driver: CODEX_DRIVER,
+        capabilities: CodexProviderCapabilitiesV2,
+        modelSelection: CODEX_MODEL_SELECTION,
+      },
+    } as const;
+
+    /** Runs one turn on the work account, then hands the thread to the personal account. */
+    const switchAccounts = (input: {
+      readonly name: string;
+      readonly provider?: keyof typeof PROVIDERS;
+      readonly workOrganizationKey: string | undefined;
+      readonly personalOrganizationKey: string | undefined;
+      /** Fails the first handoff turn once, before the prompt reaches the provider. */
+      readonly failFirstHandoff?: "start" | "injection";
+    }) =>
+      Effect.gen(function* () {
+        const provider = PROVIDERS[input.provider ?? "claude"];
+        const workSelection: ModelSelection = {
+          ...provider.modelSelection,
+          instanceId: ProviderInstanceId.make(`${provider.driver}_work`),
+        };
+        const personalSelection: ModelSelection = {
+          ...provider.modelSelection,
+          instanceId: ProviderInstanceId.make(`${provider.driver}_personal`),
+        };
+        const cwd = yield* checkpointWorkspace(input.name);
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const injectedHistory = yield* Ref.make<ReadonlyArray<unknown>>([]);
+        const failStartOnce = yield* Ref.make(input.failFirstHandoff === "start");
+        const failInjectionOnce = yield* Ref.make(input.failFirstHandoff === "injection");
+        const nativeThreadGeneration = yield* Ref.make(0);
+        const adapters = [
+          makeTestAdapter({
+            instanceId: workSelection.instanceId,
+            driver: provider.driver,
+            capabilities: provider.capabilities,
+            modelSelection: workSelection,
+            responseByRunOrdinal: { 1: "Work account answer" },
+            capturedTurns,
+          }),
+          makeTestAdapter({
+            instanceId: personalSelection.instanceId,
+            driver: provider.driver,
+            capabilities: provider.capabilities,
+            modelSelection: personalSelection,
+            responseByRunOrdinal: {},
+            capturedTurns,
+            injectedHistory,
+            failStartOnce,
+            failInjectionOnce,
+            nativeThreadGeneration,
+            getModelContextWindow: () => 32_000,
+          }),
+        ];
+        const organizationKeys = new Map([
+          [workSelection.instanceId, input.workOrganizationKey],
+          [personalSelection.instanceId, input.personalOrganizationKey],
+        ]);
+        const layerRegistry = Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) => {
+              const adapter = adapters.find((candidate) => candidate.instanceId === instanceId);
+              return adapter === undefined
+                ? Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  )
+                : Effect.succeed(adapter);
+            },
+            list: () => Effect.succeed(adapters.map((adapter) => adapter.instanceId)),
+            getMetadata: (instanceId) =>
+              organizationKeys.has(instanceId)
+                ? Effect.succeed({
+                    driver: provider.driver,
+                    continuationKey: `${provider.driver}:home:/${instanceId}`,
+                    organizationKey: organizationKeys.get(instanceId),
+                    enabled: true,
+                    capabilities: provider.capabilities,
+                  })
+                : Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  ),
+          }),
+        );
+        const projection = yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const dispatch = (ordinal: number, text: string, selection: ModelSelection) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`${input.name}:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`${input.name}:${ordinal}`),
+              createdBy: "user",
+              creationSource: "web",
+              text,
+              attachments: [],
+              modelSelection: selection,
+              dispatchMode: { type: "start_immediately" },
+            });
+          const wait = (ordinal: number, status: "failed" | "completed") =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.updated" &&
+                  event.payload.ordinal === ordinal &&
+                  (event.payload.status === "completed" || event.payload.status === "failed"),
+              ),
+              Stream.runHead,
+              Effect.andThen(worker.drain()),
+              Effect.andThen(
+                Effect.gen(function* () {
+                  assert.equal(
+                    (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)?.status,
+                    status,
+                  );
+                }),
+              ),
+            );
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${input.name}:create`),
+            threadId,
+            projectId,
+            createdBy: "user",
+            creationSource: "web",
+            title: "Claude account switch",
+            modelSelection: workSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          });
+          yield* dispatch(1, "Work account request", workSelection);
+          yield* wait(1, "completed");
+          yield* dispatch(2, "Personal account request", personalSelection);
+          if (input.failFirstHandoff !== undefined) {
+            yield* wait(2, "failed");
+            yield* dispatch(3, "Personal account retry", personalSelection);
+            yield* wait(3, "completed");
+          } else {
+            yield* wait(2, "completed");
+          }
+          return yield* orchestrator.getThreadProjection(threadId);
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: input.name,
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: { type: "readOnly" },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+        return {
+          projection,
+          mixedOrganizationNotices: projection.turnItems.filter(
+            (item) => item.type === "system_notice" && item.message === MIXED_ORGANIZATION_NOTICE,
+          ),
+          handoffTurnTexts: (yield* Ref.get(capturedTurns)).slice(1).map((turn) => turn.text),
+        };
+      });
+
+    it.live(
+      "notes a handoff into another organization once, on the timeline and to the agent",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const { projection, mixedOrganizationNotices, handoffTurnTexts } =
+              yield* switchAccounts({
+                name: "mixed-organization",
+                workOrganizationKey: "org-work",
+                personalOrganizationKey: "org-personal",
+              });
+
+            assert.equal(projection.contextHandoffs.at(-1)?.targetRunId, projection.runs[1]!.id);
+            assert.deepEqual(
+              mixedOrganizationNotices.map((item) => item.runId),
+              [projection.runs[1]!.id],
+            );
+            assert.lengthOf(handoffTurnTexts, 1);
+            assert.include(handoffTurnTexts[0], MIXED_ORGANIZATION_NOTE);
+            assert.include(handoffTurnTexts[0], "Personal account request");
+          }),
+        ),
+    );
+
+    it.live.each([
+      ["the same organization", "org-work", "org-work"],
+      ["an unknown source organization", undefined, "org-personal"],
+      ["an unknown target organization", "org-work", undefined],
+    ] as const)("adds no organization note for a handoff within %s", ([, work, personal]) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { projection, mixedOrganizationNotices, handoffTurnTexts } = yield* switchAccounts({
+            name: `same-organization-${work}-${personal}`,
+            workOrganizationKey: work,
+            personalOrganizationKey: personal,
+          });
+
+          assert.equal(projection.contextHandoffs.at(-1)?.targetRunId, projection.runs[1]!.id);
+          assert.lengthOf(mixedOrganizationNotices, 0);
+          assert.lengthOf(handoffTurnTexts, 1);
+          assert.notInclude(handoffTurnTexts[0], MIXED_ORGANIZATION_NOTE);
+        }),
+      ),
+    );
+
+    it.live.each(["start", "injection"] as const)(
+      "keeps one notice but tells the agent again when the handoff %s fails and is retried",
+      (failure) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const { projection, mixedOrganizationNotices, handoffTurnTexts } =
+              yield* switchAccounts({
+                name: `mixed-organization-retry-${failure}`,
+                workOrganizationKey: "org-work",
+                personalOrganizationKey: "org-personal",
+                failFirstHandoff: failure,
+              });
+
+            assert.deepEqual(
+              projection.runs.map((run) => run.status),
+              ["completed", "failed", "completed"],
+            );
+            assert.deepEqual(
+              mixedOrganizationNotices.map((item) => item.runId),
+              [projection.runs[1]!.id],
+            );
+            // The failed turn never reached the provider, so the retry is the agent's first prompt.
+            assert.lengthOf(handoffTurnTexts, 1);
+            assert.include(handoffTurnTexts[0], MIXED_ORGANIZATION_NOTE);
+            assert.include(handoffTurnTexts[0], "Personal account retry");
+          }),
+        ),
+    );
+
+    it.live("adds no organization note between Codex accounts", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { projection, mixedOrganizationNotices, handoffTurnTexts } = yield* switchAccounts({
+            name: "codex-organization",
+            provider: "codex",
+            workOrganizationKey: "org-work",
+            personalOrganizationKey: "org-personal",
+          });
+
+          assert.equal(projection.contextHandoffs.at(-1)?.targetRunId, projection.runs[1]!.id);
+          assert.lengthOf(mixedOrganizationNotices, 0);
+          assert.lengthOf(handoffTurnTexts, 1);
+          assert.notInclude(handoffTurnTexts[0], MIXED_ORGANIZATION_NOTE);
+        }),
+      ),
+    );
+  });
 });

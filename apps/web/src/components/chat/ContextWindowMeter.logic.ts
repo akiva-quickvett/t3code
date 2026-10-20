@@ -4,8 +4,10 @@ import {
   isClaudeResumeCompactionQuestion,
 } from "@t3tools/shared/claudeCompaction";
 import {
+  filterProviderInstancesForLock,
   resolveSelectableProviderInstanceEntry,
   type ProviderInstanceEntry,
+  type ProviderInstanceLock,
 } from "../../providerInstances";
 import { getTriggerDisplayModelName, type ModelEsque } from "./providerIconUtils";
 
@@ -23,20 +25,13 @@ export function hasAvailableCompactionProvider(input: {
   readonly providers: ReadonlyArray<ProviderInstanceEntry>;
   readonly driverKind: ProviderDriverKind;
   readonly instanceId: ProviderInstanceId | null;
-  readonly lockedInstanceId: ProviderInstanceId | null;
+  readonly providerLock: ProviderInstanceLock | null;
 }): boolean {
-  const driverProviders = input.providers.filter(
-    (provider) => provider.driverKind === input.driverKind,
+  const compatibleProviders = filterProviderInstancesForLock(
+    input.providers.filter((provider) => provider.driverKind === input.driverKind),
+    input.providerLock,
+    input.instanceId,
   );
-  const lockedContinuationGroupKey = input.lockedInstanceId
-    ? driverProviders.find((provider) => provider.instanceId === input.lockedInstanceId)
-        ?.continuationGroupKey
-    : undefined;
-  const compatibleProviders = lockedContinuationGroupKey
-    ? driverProviders.filter(
-        (provider) => provider.continuationGroupKey === lockedContinuationGroupKey,
-      )
-    : driverProviders;
 
   return providerSupportsManualCompaction(
     resolveSelectableProviderInstanceEntry(compatibleProviders, input.instanceId ?? undefined),
