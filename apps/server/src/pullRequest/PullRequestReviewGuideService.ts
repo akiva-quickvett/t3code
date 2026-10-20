@@ -280,6 +280,8 @@ const make = Effect.gen(function* () {
       args: ["worktree", "add", "--detach", "--quiet", path, resolvedHead.commitSha],
       timeoutMs: 5 * 60_000,
     });
+    // No setup script ran in this scratch checkout, so it skips
+    // WorktreeLifecycle and the project's teardown script.
     yield* Effect.addFinalizer(() =>
       git
         .removeWorktree({ cwd: workspaceRoot, path, force: true })

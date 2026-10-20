@@ -5,7 +5,9 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
+import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
@@ -15,6 +17,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import {
   DEFAULT_SERVER_SETTINGS,
   StorageCleanupReport,
+  type ProjectScript,
   type WorktreeKeepWhen,
   type StorageCleanupSettings,
 } from "@t3tools/contracts";
@@ -23,12 +26,15 @@ import * as ServerConfig from "./config.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as GitManager from "./git/GitManager.ts";
+import * as GitWorkflowService from "./git/GitWorkflowService.ts";
+import * as ProjectService from "./project/ProjectService.ts";
 import * as Settings from "./serverSettings.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as WorktreeLifecycle from "./workspace/WorktreeLifecycle.ts";
 import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ServerActivation } from "./serverActivation.ts";
 import { describe, expect, it } from "@effect/vitest";
@@ -270,11 +276,14 @@ const cleanupFixture = (
     let editBeforeRemoval = false;
     let openSessionCwd: string | null = null;
     let sessionLive = true;
+    let projectScripts: ReadonlyArray<ProjectScript> = [];
     let fullStatusCalls = 0;
     let snapshotReads = 0;
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     const activated = yield* Deferred.make<void>();
-    const context = yield* Layer.build(StorageCleanup.layer).pipe(
+    const context = yield* Layer.build(
+      StorageCleanup.layer.pipe(Layer.provide(WorktreeLifecycle.layer)),
+    ).pipe(
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
         ...git,
         execute: (input) =>
@@ -358,9 +367,20 @@ const cleanupFixture = (
         subscribeMetadata: () => Effect.succeed(() => {}),
       } as unknown as TerminalManager.TerminalManager["Service"]),
       Effect.provideService(ServerActivation, Deferred.await(activated)),
+      Effect.provideService(ProjectService.ProjectService, {
+        getById: (id: ProjectId) =>
+          Effect.sync(() => Option.some({ id, workspaceRoot: repo, scripts: projectScripts })),
+      } as unknown as ProjectService.ProjectService["Service"]),
+      Effect.provideService(
+        GitWorkflowService.GitWorkflowService,
+        {} as GitWorkflowService.GitWorkflowService["Service"],
+      ),
     );
     return {
       service: Context.get(context, StorageCleanup.StorageCleanup),
+      setProjectScripts: (scripts: ReadonlyArray<ProjectScript>) => {
+        projectScripts = scripts;
+      },
       repo,
       editBeforeRemoval: () => {
         editBeforeRemoval = true;
@@ -477,6 +497,7 @@ const runCleanupTest = <A, E>(
     | GitVcsDriver.GitVcsDriver
     | Path.Path
     | Scope.Scope
+    | ChildProcessSpawner.ChildProcessSpawner
   >,
 ) => effect.pipe(Effect.provide(cleanupTestLayer), Effect.scoped);
 
@@ -1468,6 +1489,44 @@ describe("storage cleanup reports and local file policies", () => {
         expect(yield* fixture.fs.exists(`${fixture.worktree}/notes.txt`)).toBe(false);
       }),
     ),
+  );
+  it.live.each([
+    ["tracked-changes", "echo log > teardown.log", null, "removed"],
+    ["uncommitted-changes", "echo log > teardown.log", null, "removed"],
+    ["any-local-files", "echo log > teardown.log", null, "removed"],
+    ["uncommitted-changes", "echo edited > tracked.txt", null, "failed"],
+    ["uncommitted-changes", "true", "notes.txt", "kept"],
+  ] as const)(
+    "runs the teardown script before removing under %s: `%s` with %s present",
+    ([policy, script, presentFile, outcome]) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          const out = yield* fixture.fs.makeTempDirectoryScoped({ prefix: "cleanup-teardown-" });
+          fixture.setPolicy(policy);
+          if (presentFile !== null)
+            yield* fixture.fs.writeFileString(`${fixture.worktree}/${presentFile}`, "local\n");
+          fixture.setProjectScripts([
+            {
+              id: "teardown",
+              name: "Teardown",
+              command: `cat tracked.txt > '${out}/seen' && ${script}`,
+              icon: "play",
+              runOnWorktreeCreate: false,
+              runOnWorktreeRemove: true,
+            },
+          ]);
+          const report = yield* fixture.service.runNow;
+          expect(report.entries[0]).toMatchObject({ outcome, threadId: "thread-1" });
+          // The script saw the checkout as it was, and runs only once removal is decided.
+          expect(
+            yield* fixture.fs.readFileString(`${out}/seen`).pipe(Effect.orElseSucceed(() => null)),
+          ).toBe(outcome === "kept" ? null : "original\n");
+          expect(yield* fixture.fs.exists(fixture.worktree)).toBe(outcome !== "removed");
+          if (outcome === "failed")
+            expect(report.entries[0]?.reason).toContain("contains modified or untracked files");
+        }),
+      ),
   );
   it.live("streams the current report and subsequent runs", () =>
     runCleanupTest(

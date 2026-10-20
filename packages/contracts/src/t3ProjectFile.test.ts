@@ -32,6 +32,20 @@ describe("T3ProjectFile", () => {
     expect(decoded.scripts?.[2]?.async).toBe(false);
   });
 
+  it("decodes the teardown role and leaves it absent on older scripts", () => {
+    const decoded = decode({
+      scripts: [
+        { name: "Down", command: "docker compose down", runOnWorktreeRemove: true },
+        { name: "Test", command: "pnpm test" },
+      ],
+    });
+    expect(decoded.scripts?.[0]?.runOnWorktreeRemove).toBe(true);
+    expect(decoded.scripts?.[1]).not.toHaveProperty("runOnWorktreeRemove");
+    expect(() =>
+      decode({ scripts: [{ name: "Down", command: "down", runOnWorktreeRemove: "yes" }] }),
+    ).toThrow();
+  });
+
   it("decodes an empty object and ignores unknown fields", () => {
     expect(decode({})).toEqual({});
     expect(decode({ futureField: true })).toEqual({});

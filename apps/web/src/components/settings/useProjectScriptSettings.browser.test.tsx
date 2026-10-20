@@ -73,6 +73,7 @@ const input = (keybinding: string | null): NewProjectScriptInput => ({
   runOnWorktreeCreate: false,
   waitForSetup: false,
   runOnSettle: false,
+  runOnWorktreeRemove: false,
   keybinding,
   previewUrl: null,
   autoOpenPreview: false,
