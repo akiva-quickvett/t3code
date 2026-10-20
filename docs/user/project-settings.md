@@ -181,7 +181,8 @@ To clean up after a worktree before it goes, such as stopping containers its set
 started, turn on **Run before worktree removal** for one of the project's actions, or set
 `"runOnWorktreeRemove": true` on a `t3.json` script. It runs in the worktree whenever T3 Code
 removes one, including cleanup and deleting a thread with its worktree. Removal waits up to two
-minutes for it and goes ahead even if it fails. During cleanup, new files it leaves in the
+minutes for it and goes ahead even if it fails. It can run again if a removal is interrupted,
+so make it safe to repeat. During cleanup, new files it leaves in the
 worktree keep the worktree unless the policy is **Edited tracked files**.
 
 Choose **Delete now** to run the enabled rules immediately. The latest results show which

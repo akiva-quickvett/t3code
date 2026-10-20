@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
+  type GitCommandError,
   ProjectId,
   ThreadId,
   type ProjectScript,
@@ -9,6 +10,7 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -79,14 +81,22 @@ const fixture = (scripts: (out: string) => ReadonlyArray<ProjectScript>, timeout
       Effect.provideService(GitWorkflowService.GitWorkflowService, {
         removeWorktree: git.removeWorktree,
       } as unknown as GitWorkflowService.GitWorkflowService["Service"]),
-      // A POSIX shell whatever the developer's own is, so the scripts below parse.
-      Effect.provideService(HostProcess.Environment, { ...process.env, SHELL: "/bin/sh" }),
+      // A POSIX shell whatever the developer's own is, plus server-only
+      // variables a script must never see.
+      Effect.provideService(HostProcess.Environment, {
+        ...process.env,
+        SHELL: "/bin/sh",
+        T3CODE_HOME: "/live/t3",
+        PORT: "3773",
+        ELECTRON_RUN_AS_NODE: "1",
+      }),
     );
     return {
       lifecycle: Context.get(context, WorktreeLifecycle.WorktreeLifecycle),
       fs,
       repo,
       worktree,
+      out,
       realWorktree: yield* fs.realPath(worktree),
       readOut: (name: string) =>
         fs.readFileString(`${out}/${name}`).pipe(Effect.orElseSucceed(() => null)),
@@ -113,12 +123,12 @@ const captureWarnings = () => {
 
 describe("WorktreeLifecycle.remove", () => {
   it.effect(
-    "runs the teardown script in the worktree, with the setup env, before removing it",
+    "runs the teardown script in the worktree, with the terminal env, before removing it",
     () =>
       Effect.gen(function* () {
         const t = yield* fixture((out) => [
           teardown(
-            `{ pwd -P; echo "$T3CODE_PROJECT_ROOT"; echo "$T3CODE_WORKTREE_PATH"; cat tracked.txt; } > ${quote(`${out}/ran`)}`,
+            `{ pwd -P; echo "$T3CODE_PROJECT_ROOT"; echo "$T3CODE_WORKTREE_PATH"; echo "\${T3CODE_HOME-unset} \${PORT-unset} \${ELECTRON_RUN_AS_NODE-unset}"; cat tracked.txt; } > ${quote(`${out}/ran`)}`,
           ),
         ]);
         yield* t.lifecycle.remove({
@@ -130,7 +140,7 @@ describe("WorktreeLifecycle.remove", () => {
         });
         assert.strictEqual(
           yield* t.readOut("ran"),
-          `${t.realWorktree}\n${t.repo}\n${t.worktree}\noriginal\n`,
+          `${t.realWorktree}\n${t.repo}\n${t.worktree}\nunset unset unset\noriginal\n`,
         );
         assert.isFalse(yield* t.fs.exists(t.worktree));
       }).pipe(Effect.provide(testLayer), Effect.scoped),
@@ -192,7 +202,8 @@ describe("WorktreeLifecycle.remove", () => {
   it.effect("logs the signal that killed a script and still removes the worktree", () => {
     const { warnings, layer } = captureWarnings();
     return Effect.gen(function* () {
-      const t = yield* fixture(() => [teardown("kill -TERM $$")]);
+      // SIGKILL, because a shell may handle SIGTERM and exit 143 instead.
+      const t = yield* fixture(() => [teardown("kill -KILL $$")]);
       yield* t.lifecycle.remove({
         projectRoot: t.repo,
         worktreePath: t.worktree,
@@ -204,40 +215,84 @@ describe("WorktreeLifecycle.remove", () => {
       const warning = warnings.find((entry) => entry.message.includes("teardown script failed"));
       assert.deepInclude(warning?.annotations, {
         exitCode: null,
-        signal: "SIGTERM",
+        signal: "SIGKILL",
         timedOut: false,
       });
     }).pipe(Effect.provide(Layer.merge(testLayer, layer)), Effect.scoped);
   });
 
-  // The timeout is the behavior under test, so this one runs on the real clock.
-  it.live("kills a script that outlives the timeout, with its children, and removes anyway", () => {
-    const { warnings, layer } = captureWarnings();
-    return Effect.gen(function* () {
-      const t = yield* fixture(
-        (out) => [teardown(`echo stuck; sleep 30 & echo $! > ${quote(`${out}/pid`)}; wait`)],
-        200,
-      );
-      yield* t.lifecycle.remove({
-        projectRoot: t.repo,
-        worktreePath: t.worktree,
-        force: true,
-        projectId: PROJECT_ID,
-        threadId: THREAD_ID,
-      });
-      assert.isFalse(yield* t.fs.exists(t.worktree));
+  // The timeout is the behavior under test, so these run on the real clock.
+  // Rollbacks remove from uninterruptible error handlers, where it must still fire.
+  it.live.each([
+    ["", (effect: Effect.Effect<void, GitCommandError>) => effect],
+    [" in an uninterruptible region", Effect.uninterruptible],
+  ] as const)(
+    "kills a script that outlives the timeout%s, with its children, and removes anyway",
+    ([, region]) => {
+      const { warnings, layer } = captureWarnings();
+      return Effect.gen(function* () {
+        const t = yield* fixture(
+          (out) => [teardown(`echo stuck; sleep 30 & echo $! > ${quote(`${out}/pid`)}; wait`)],
+          200,
+        );
+        yield* region(
+          t.lifecycle.remove({
+            projectRoot: t.repo,
+            worktreePath: t.worktree,
+            force: true,
+            projectId: PROJECT_ID,
+            threadId: THREAD_ID,
+          }),
+        );
+        assert.isFalse(yield* t.fs.exists(t.worktree));
+        assert.isFalse(yield* processRunning(Number((yield* t.readOut("pid"))?.trim())));
+        const warning = warnings.find((entry) => entry.message.includes("timed out"));
+        assert.deepInclude(warning?.annotations, {
+          threadId: THREAD_ID,
+          timeoutMs: 200,
+          timedOut: true,
+          exitCode: null,
+          outputBytes: "stuck\n".length,
+        });
+        assert.isAtLeast(Number(warning?.annotations.durationMs), 200);
+      }).pipe(Effect.provide(Layer.merge(testLayer, layer)), Effect.scoped);
+    },
+  );
+
+  it.live("kills the script and skips removal when the caller is interrupted", () =>
+    Effect.gen(function* () {
+      const runner = yield* ProcessRunner.ProcessRunner;
+      const t = yield* fixture((out) => [
+        teardown(
+          `sleep 30 & echo $! > ${quote(`${out}/pid`)}; echo started > ${quote(`${out}/started`)}; wait`,
+        ),
+      ]);
+      // Reading a fifo blocks until the script writes it, so the test knows it runs.
+      yield* runner.run({ command: "mkfifo", args: [`${t.out}/started`] });
+      const removal = yield* t.lifecycle
+        .remove({
+          projectRoot: t.repo,
+          worktreePath: t.worktree,
+          force: true,
+          projectId: PROJECT_ID,
+        })
+        .pipe(Effect.forkChild);
+      yield* t.fs.readFileString(`${t.out}/started`);
+      yield* Fiber.interrupt(removal);
+      assert.isTrue(yield* t.fs.exists(t.worktree));
       assert.isFalse(yield* processRunning(Number((yield* t.readOut("pid"))?.trim())));
-      const warning = warnings.find((entry) => entry.message.includes("timed out"));
-      assert.deepInclude(warning?.annotations, {
-        threadId: THREAD_ID,
-        timeoutMs: 200,
-        timedOut: true,
-        exitCode: null,
-        outputBytes: "stuck\n".length,
-      });
-      assert.isAtLeast(Number(warning?.annotations.durationMs), 200);
-    }).pipe(Effect.provide(Layer.merge(testLayer, layer)), Effect.scoped);
-  });
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("treats a storage cleanup removal of a worktree already removed as done", () =>
+    Effect.gen(function* () {
+      const t = yield* fixture(() => []);
+      const input = { projectRoot: t.repo, worktreePath: t.worktree, projectId: PROJECT_ID };
+      yield* t.lifecycle.remove({ ...input, force: true });
+      yield* t.lifecycle.remove({ ...input, force: false, sweep: { cleanUntrackedFiles: false } });
+      assert.isFalse(yield* t.fs.exists(t.worktree));
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
 
   it.effect("never runs the script outside a linked worktree of the project", () =>
     Effect.gen(function* () {

@@ -23,7 +23,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { terminalShellCandidates } from "../terminal/Manager.ts";
+import { createTerminalSpawnEnv, terminalShellCandidates } from "../terminal/Manager.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 
 export interface WorktreeRemoveInput {
@@ -96,16 +96,19 @@ const make = Effect.gen(function* () {
       );
     });
 
+  const platform = yield* HostProcess.Platform;
+  const hostEnv = yield* HostProcess.Environment;
+  const home = yield* HostProcess.HomeDirectory;
+
   // cmd.exe's quoting needs verbatim arguments, which the spawner cannot pass;
   // PowerShell, its fallback, ships with every Windows.
-  const teardownShells = terminalShellCandidates(
-    yield* HostProcess.Platform,
-    yield* HostProcess.Environment,
-  ).flatMap((candidate) => {
+  const teardownShells = terminalShellCandidates(platform, hostEnv).flatMap((candidate) => {
     const name = path.basename(candidate.shell).toLowerCase();
     if (name === "cmd.exe" || name === "cmd") return [];
-    const commandFlag = /^(pwsh|powershell)(\.exe)?$/.test(name) ? "-Command" : "-c";
-    return [{ shell: candidate.shell, args: [...(candidate.args ?? []), commandFlag] }];
+    const commandFlags = /^(pwsh|powershell)(\.exe)?$/.test(name)
+      ? ["-NonInteractive", "-Command"]
+      : ["-c"];
+    return [{ shell: candidate.shell, args: [...(candidate.args ?? []), ...commandFlags] }];
   });
 
   const resolveProject = (input: WorktreeRemoveInput) =>
@@ -160,13 +163,20 @@ const make = Effect.gen(function* () {
     }
     const options = {
       cwd: worktreePath,
-      env: {
-        ...projectScriptRuntimeEnv({ project: { cwd: project.workspaceRoot }, worktreePath }),
-        COLORTERM: "",
-        NO_COLOR: "1",
-        FORCE_COLOR: "0",
-      },
-      extendEnv: true,
+      // The terminal's env, as setup gets: no T3 server variables such as
+      // T3CODE_HOME, PORT or ELECTRON_RUN_AS_NODE.
+      env: createTerminalSpawnEnv(
+        hostEnv,
+        {
+          ...projectScriptRuntimeEnv({ project: { cwd: project.workspaceRoot }, worktreePath }),
+          COLORTERM: "",
+          NO_COLOR: "1",
+          FORCE_COLOR: "0",
+        },
+        platform,
+        home,
+      ),
+      extendEnv: false,
       stdin: "ignore",
       forceKillAfter: TEARDOWN_KILL_GRACE,
     } satisfies ChildProcess.CommandOptions;
@@ -251,6 +261,11 @@ const make = Effect.gen(function* () {
           force: input.force,
         })
       : Effect.gen(function* () {
+          // Another remover won the removal lock; the worktree is already gone.
+          const exists = yield* fileSystem
+            .exists(worktreePath)
+            .pipe(Effect.orElseSucceed(() => true));
+          if (!exists) return;
           if (input.sweep?.cleanUntrackedFiles)
             yield* sweepGit(worktreePath, ["clean", "-ffdx"], "git clean");
           yield* sweepGit(
