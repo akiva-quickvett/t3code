@@ -29,6 +29,17 @@ describe("orchestrator MCP contracts", () => {
     ).toBe("worktree");
     expect(() => decodeDelegateTaskInput({ task: "Review changes", isolation: "copy" })).toThrow();
   });
+  it("decodes an optional worktree branch and base ref", () => {
+    const request = decodeDelegateTaskInput({
+      task: "Build the feature",
+      isolation: "worktree",
+      branch: " pod/goal-feature ",
+      baseRef: "origin/slice",
+    });
+    expect(request.branch).toBe("pod/goal-feature");
+    expect(request.baseRef).toBe("origin/slice");
+    expect(() => decodeDelegateTaskInput({ task: "Build", branch: "  " })).toThrow();
+  });
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
       task: "Inspect the workspace and report the result.",
