@@ -16,7 +16,6 @@ const testState = vi.hoisted(() => {
     readonly environmentId: string;
     readonly promotedTo: null;
     readonly threadId: string;
-    readonly rolePreset?: { readonly id: string; readonly label: string };
   } | null = null;
   const router = {
     state: {
@@ -36,8 +35,6 @@ const testState = vi.hoisted(() => {
     setDraftThreadContext: vi.fn(),
     setLogicalProjectDraftThreadId: vi.fn(),
     setModelSelection: vi.fn(),
-    setRuntimeMode: vi.fn(),
-    setInteractionMode: vi.fn(),
   };
 
   return {
@@ -74,9 +71,6 @@ const testState = vi.hoisted(() => {
       router.navigate.mockClear();
       draftStore.setDraftThreadContext.mockClear();
       draftStore.setLogicalProjectDraftThreadId.mockClear();
-      draftStore.applyStickyState.mockClear();
-      draftStore.setRuntimeMode.mockClear();
-      draftStore.setInteractionMode.mockClear();
       projectFileRead = new Promise<null>((resolve) => {
         completeProjectFileRead = resolve;
       });
@@ -325,30 +319,4 @@ describe.each([
       );
     },
   );
-});
-
-describe("useNewThreadHandler with a draft a role was applied to", () => {
-  it("opens a plain thread: the role, its modes and its model are dropped", async () => {
-    testState.reset({
-      draftId: "draft-ticket",
-      environmentId: "environment-ssh",
-      promotedTo: null,
-      threadId: "thread-ticket",
-      rolePreset: { id: "ticket", label: "Ticket agent" },
-    });
-    const projectRef = { environmentId: "environment-ssh", projectId: "project-remote" } as never;
-    const pendingOpen = useNewThreadHandler()(projectRef);
-    testState.completeProjectFileRead(null);
-    await pendingOpen;
-
-    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
-      "remote-project",
-      projectRef,
-      "draft-ticket",
-      expect.objectContaining({ rolePreset: null }),
-    );
-    expect(testState.draftStore.setRuntimeMode).toHaveBeenCalledWith("draft-ticket", null);
-    expect(testState.draftStore.setInteractionMode).toHaveBeenCalledWith("draft-ticket", null);
-    expect(testState.draftStore.applyStickyState).toHaveBeenCalledWith("draft-ticket");
-  });
 });

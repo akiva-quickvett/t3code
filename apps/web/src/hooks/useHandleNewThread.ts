@@ -14,6 +14,7 @@ import {
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { newDraftId, newThreadId } from "../lib/utils";
+import { DEFAULT_INTERACTION_MODE } from "../types";
 import { orderItemsByPreferredIds } from "../components/Sidebar.logic";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -112,12 +113,17 @@ export function useNewThreadHandler() {
     const composerModelSelection = composerActiveProvider
       ? (carrySourceComposer?.modelSelectionByProvider[composerActiveProvider] ?? null)
       : null;
-    const carryModelSelection = composerModelSelection ?? carrySourceShell?.modelSelection ?? null;
-    const carryInteractionMode =
-      carrySourceComposer?.interactionMode ??
-      carrySourceShell?.interactionMode ??
-      carrySourceDraft?.interactionMode ??
-      null;
+    // A draft a role was applied to carries none of the role's model or modes into a plain thread.
+    const carrySourceHasRole = carrySourceDraft?.rolePreset != null;
+    const carryModelSelection = carrySourceHasRole
+      ? null
+      : (composerModelSelection ?? carrySourceShell?.modelSelection ?? null);
+    const carryInteractionMode = carrySourceHasRole
+      ? null
+      : (carrySourceComposer?.interactionMode ??
+        carrySourceShell?.interactionMode ??
+        carrySourceDraft?.interactionMode ??
+        null);
     const project = projects.find(
       (candidate) =>
         candidate.id === projectRef.projectId &&
@@ -253,16 +259,24 @@ export function useNewThreadHandler() {
             }),
           };
         }
+        const droppingRole = emptyStoredDraftThread.rolePreset != null;
+        const reusedModes = {
+          ...(!isDraftAlreadyOpen || droppingRole ? { runtimeMode: defaultRuntimeMode } : {}),
+          ...(carryInteractionMode
+            ? { interactionMode: carryInteractionMode }
+            : droppingRole
+              ? { interactionMode: DEFAULT_INTERACTION_MODE }
+              : {}),
+        };
         if (workspaceContext) {
           setDraftThreadContext(emptyStoredDraftThread.draftId, {
             ...workspaceContext,
-            ...(!isDraftAlreadyOpen ? { runtimeMode: defaultRuntimeMode } : {}),
-            ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
+            ...reusedModes,
           });
         }
         const storedDraft = getComposerDraft(emptyStoredDraftThread.draftId);
         const storedDraftHasExplicitModelPick = hasExplicitComposerModelSelection(storedDraft);
-        if (emptyStoredDraftThread.rolePreset != null) {
+        if (droppingRole) {
           dropDraftRole(emptyStoredDraftThread.draftId);
         } else if (!storedDraftHasExplicitModelPick) {
           applyDefaultModel(emptyStoredDraftThread.draftId);
@@ -278,8 +292,7 @@ export function useNewThreadHandler() {
           {
             threadId: emptyStoredDraftThread.threadId,
             ...workspaceContext,
-            ...(!isDraftAlreadyOpen ? { runtimeMode: defaultRuntimeMode } : {}),
-            ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
+            ...reusedModes,
             rolePreset: null,
           },
         );
@@ -321,8 +334,12 @@ export function useNewThreadHandler() {
       setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, currentRouteTarget.draftId, {
         threadId: latestActiveDraftThread.threadId,
         createdAt: latestActiveDraftThread.createdAt,
-        runtimeMode: latestActiveDraftThread.runtimeMode,
-        interactionMode: latestActiveDraftThread.interactionMode,
+        ...(latestActiveDraftThread.rolePreset == null
+          ? {
+              runtimeMode: latestActiveDraftThread.runtimeMode,
+              interactionMode: latestActiveDraftThread.interactionMode,
+            }
+          : { runtimeMode: defaultRuntimeMode, interactionMode: DEFAULT_INTERACTION_MODE }),
         ...pickExplicitWorkspaceOptions(options),
         rolePreset: null,
       });
