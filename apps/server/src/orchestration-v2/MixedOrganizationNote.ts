@@ -68,6 +68,53 @@ export function handoffsSinceAcceptedTurn<
   );
 }
 
+/**
+ * The instance that last ran a provider thread's native conversation, when another instance now
+ * resumes it natively (instances sharing one Claude config dir), and the run that made the switch.
+ * Nothing once a turn on the resuming instance was accepted.
+ */
+export function nativeResumeSource(input: {
+  readonly providerThread: Pick<OrchestrationV2ProviderThread, "id" | "nativeThreadRef">;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly providerThreads: ReadonlyArray<
+    Pick<OrchestrationV2ProviderThread, "id" | "nativeThreadRef">
+  >;
+  readonly runs: ReadonlyArray<
+    Pick<
+      OrchestrationV2Run,
+      "id" | "ordinal" | "providerThreadId" | "activeAttemptId" | "providerInstanceId"
+    >
+  >;
+  readonly providerTurns: ReadonlyArray<Pick<OrchestrationV2ProviderTurn, "runAttemptId">>;
+}):
+  | { readonly instanceId: ProviderInstanceId; readonly switchRunId: OrchestrationV2Run["id"] }
+  | undefined {
+  const nativeId = input.providerThread.nativeThreadRef?.nativeId;
+  if (nativeId == null) return undefined;
+  const conversationThreadIds = new Set([
+    input.providerThread.id,
+    ...input.providerThreads
+      .filter((thread) => thread.nativeThreadRef?.nativeId === nativeId)
+      .map((thread) => thread.id),
+  ]);
+  const acceptedAttemptIds = new Set(input.providerTurns.map((turn) => turn.runAttemptId));
+  const conversationRuns = input.runs
+    .filter(
+      (run) => run.providerThreadId !== null && conversationThreadIds.has(run.providerThreadId),
+    )
+    .toSorted((left, right) => left.ordinal - right.ordinal);
+  const lastAccepted = conversationRuns.findLast((run) =>
+    acceptedAttemptIds.has(run.activeAttemptId),
+  );
+  if (lastAccepted === undefined || lastAccepted.providerInstanceId === input.providerInstanceId) {
+    return undefined;
+  }
+  const switchRun = conversationRuns.find((run) => run.ordinal > lastAccepted.ordinal);
+  return switchRun === undefined
+    ? undefined
+    : { instanceId: lastAccepted.providerInstanceId, switchRunId: switchRun.id };
+}
+
 export interface InstanceOrganization {
   readonly driver: ProviderDriverKind;
   readonly organizationKey: string | undefined;

@@ -302,6 +302,18 @@ describe("ClaudeSettings auto-compaction", () => {
   );
 });
 
+describe("ClaudeSettings shared config path", () => {
+  it("defaults to no shared config for settings saved before the field existed", () => {
+    expect(decodeClaudeSettings({ homePath: "~/.claude-work" }).sharedConfigPath).toBe("");
+  });
+
+  it("trims a configured shared config path", () => {
+    expect(decodeClaudeSettings({ sharedConfigPath: "  ~/.claude  " }).sharedConfigPath).toBe(
+      "~/.claude",
+    );
+  });
+});
+
 describe("ClientSettings notifications", () => {
   it("requires opt-in when existing settings omit notification preferences", () => {
     expect(decodeClientSettings({}).notificationMode).toBe("off");

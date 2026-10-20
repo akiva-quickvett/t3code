@@ -2441,6 +2441,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly nativeSessionId?: string;
     readonly settings?: ClaudeSettings;
     readonly freshQueueOnReopen?: boolean;
+    /** Runs when the message stream ends, standing in for the CLI process exiting. */
+    readonly onProcessExit?: Effect.Effect<void>;
   }) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -2536,6 +2538,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                       ),
                     ),
                   ),
+                  Stream.ensuring(options?.onProcessExit ?? Effect.void),
                 ),
                 offer: (message) =>
                   Effect.sync(() => {
@@ -2632,6 +2635,45 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  // Instances sharing a config dir append to one transcript. Closing waits for the
+  // message stream, whose SDK cleanup waits up to 2 s for the CLI to exit.
+  it.effect("finishes closing a session only after its CLI process has exited", () =>
+    Effect.gen(function* () {
+      const lifecycle: Array<string> = [];
+      const sessionScope = yield* Scope.make();
+      const harness = yield* makeWakeHarnessWithOptions({
+        onProcessExit: Effect.gen(function* () {
+          for (let tick = 0; tick < 5; tick++) yield* Effect.yieldNow;
+          lifecycle.push("process exited");
+        }),
+      }).pipe(Effect.provideService(Scope.Scope, sessionScope));
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-claude-close-waits-for-exit"),
+          text: "Start the CLI.",
+          attachments: [],
+        }),
+      );
+
+      yield* harness.offerAndWait(
+        makeAssistantTextFrame({ uuid: "00000000-0000-4000-8000-000000000901", text: "Working." }),
+      );
+
+      yield* Scope.close(sessionScope, Exit.void);
+      lifecycle.push("session closed");
+
+      assert.deepEqual(lifecycle, ["process exited", "session closed"]);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
 
   it.effect.each([
     { isError: false, title: "Check weather" },

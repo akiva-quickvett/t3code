@@ -59,7 +59,9 @@ import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   resolveClaudeHomePath,
+  resolveClaudeSharedConfigPath,
 } from "./ClaudeHome.ts";
+import { materializeClaudeSharedConfig, unshareClaudeConfig } from "./ClaudeConfigLayout.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
@@ -148,11 +150,31 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           Effect.provideService(Path.Path, path),
         ),
       );
+      const configDir = yield* resolveClaudeHomePath(effectiveConfig, processEnv);
+      const sharedConfigDir = yield* resolveClaudeSharedConfigPath(effectiveConfig);
+      // Before anything spawns Claude in this config dir, so it never starts
+      // a private transcript store the links would then conflict with.
+      yield* (
+        sharedConfigDir === undefined
+          ? unshareClaudeConfig(configDir)
+          : materializeClaudeSharedConfig({ configDir, sharedConfigDir })
+      ).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: cause.message,
+              cause,
+            }),
+        ),
+      );
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(
         effectiveConfig,
         processEnv,
       );
-      const configDir = yield* resolveClaudeHomePath(effectiveConfig, processEnv);
       const accountConfigPath = yield* ClaudeResetCredits.claudeAccountConfigPath(
         effectiveConfig.homePath.trim() || processEnv.CLAUDE_CONFIG_DIR?.trim()
           ? configDir
@@ -401,6 +423,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         orchestrationAdapter,
         textGeneration,
         consumeResetCredit,
+        loginFilePath: path.join(configDir, ".credentials.json"),
       } satisfies ProviderInstance;
     }),
 };

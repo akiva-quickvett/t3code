@@ -30,6 +30,7 @@ const [
   Auth,
   Config,
   Settings,
+  Adapters,
 ] = await Promise.all([
   app("orchestration-v2/ProviderTurnStartService"),
   app("orchestration-v2/ProjectionStore"),
@@ -44,6 +45,7 @@ const [
   app("provider/ProviderAuthService"),
   app("config"),
   app("serverSettings"),
+  app("orchestration-v2/ProviderAdapterRegistry"),
 ]);
 let current;
 let fullReads = 0;
@@ -71,6 +73,8 @@ const dependencies = Layer.mergeAll(
   Layer.mock(Auth.ProviderAuthService)({}),
   Layer.mock(Config.ServerConfig)({ worktreesDir: "/synthetic-worktrees" }),
   Settings.layerTest(),
+  // No organization metadata: the memory check must not depend on account lookups.
+  Layer.mock(Adapters.ProviderAdapterRegistryV2)({ getMetadata: undefined }),
   Layer.mock(Projection.ProjectionStoreV2)({
     getThreadProjection: () =>
       Effect.sync(() => {
