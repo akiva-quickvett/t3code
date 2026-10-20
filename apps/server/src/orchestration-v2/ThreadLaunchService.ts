@@ -44,6 +44,7 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import * as WorktreeLifecycle from "../workspace/WorktreeLifecycle.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
@@ -201,6 +202,7 @@ const make = Effect.gen(function* () {
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
   const terminals = yield* TerminalManager.TerminalManager;
   const git = yield* GitWorkflow.GitWorkflowService;
+  const worktreeLifecycle = yield* WorktreeLifecycle.WorktreeLifecycle;
   const setupScripts = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -692,8 +694,14 @@ const make = Effect.gen(function* () {
             // The thread forgets the worktree only once it is gone; a failed
             // removal leaves the directory for the user to clean up rather than
             // reusing a checkout that may be half written.
-            yield* git
-              .removeWorktree({ cwd: project.workspaceRoot, path: removedPath, force: true })
+            yield* worktreeLifecycle
+              .remove({
+                projectRoot: project.workspaceRoot,
+                worktreePath: removedPath,
+                force: true,
+                projectId: project.id,
+                threadId,
+              })
               .pipe(
                 Effect.andThen(
                   threads

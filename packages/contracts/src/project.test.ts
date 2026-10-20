@@ -11,6 +11,7 @@ import {
   ReceivedProjectIcon,
   StoredProjectIcon,
   ProjectReadFileError,
+  ProjectScript,
   ProjectCreatePayload,
   ProjectUpdatePayload,
   ProjectMutation,
@@ -26,6 +27,21 @@ const decodeProjectUpdatePayload = Schema.decodeUnknownSync(ProjectUpdatePayload
 const decodeProjectMutation = Schema.decodeUnknownSync(ProjectMutation);
 const decodeSearchEntriesInput = Schema.decodeUnknownSync(ProjectSearchEntriesInput);
 const decodeSearchContentsInput = Schema.decodeUnknownSync(ProjectSearchContentsInput);
+
+describe("ProjectScript", () => {
+  it("decodes scripts saved before the teardown role existed", () => {
+    const decode = Schema.decodeUnknownSync(ProjectScript);
+    const saved = {
+      id: "setup",
+      name: "Setup",
+      command: "pnpm i",
+      icon: "configure",
+      runOnWorktreeCreate: true,
+    };
+    expect(decode(saved)).toEqual(saved);
+    expect(decode({ ...saved, runOnWorktreeRemove: true }).runOnWorktreeRemove).toBe(true);
+  });
+});
 
 describe("project search inputs", () => {
   it("allows an empty entries query for bounded frecency browsing", () => {

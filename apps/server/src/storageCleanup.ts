@@ -45,6 +45,7 @@ import * as Settings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { isFilesystemRoot, managedWorktreesDirectories } from "./worktreesDirectory.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import * as WorktreeLifecycle from "./workspace/WorktreeLifecycle.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -207,6 +208,7 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const gitManager = yield* GitManager.GitManager;
+  const worktreeLifecycle = yield* WorktreeLifecycle.WorktreeLifecycle;
   const terminals = yield* TerminalManager.TerminalManager;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -533,29 +535,6 @@ const make = Effect.gen(function* () {
     return file === undefined ? null : `has ignored files (${file})`;
   });
 
-  const cleanupGit = Effect.fn("StorageCleanup.cleanupGit")(function* (
-    cwd: string,
-    args: string[],
-    command: string,
-  ) {
-    const result = yield* git.execute({
-      operation: "StorageCleanup.cleanupGit",
-      cwd,
-      args,
-      allowNonZeroExit: true,
-      timeoutMs: 300_000,
-    });
-    if (result.exitCode !== 0)
-      return yield* Effect.fail(
-        new GitCommandError({
-          operation: "StorageCleanup.cleanupGit",
-          command,
-          cwd,
-          detail: result.stderr.trim().split(/\r?\n/)[0]?.slice(0, 1000) || "command failed",
-        }),
-      );
-  });
-
   const cleanWorktrees = Effect.fn("StorageCleanup.cleanWorktrees")(function* (
     serverSettings: ServerSettings,
     now: number,
@@ -829,15 +808,14 @@ const make = Effect.gen(function* () {
           )
         )
           return keep("settings changed since check");
-        // Clean only untracked files; Git must still refuse removal if a tracked
-        // edit arrives after our last status check.
-        if (settings.worktreeKeepWhen === "tracked-changes")
-          yield* cleanupGit(worktreePath, ["clean", "-ffdx"], "git clean");
-        yield* cleanupGit(
-          project.workspaceRoot,
-          ["-c", "status.showUntrackedFiles=normal", "worktree", "remove", "--", worktreePath],
-          "git worktree remove",
-        );
+        yield* worktreeLifecycle.remove({
+          projectRoot: project.workspaceRoot,
+          worktreePath,
+          force: false,
+          projectId: thread.projectId,
+          threadId: thread.id,
+          sweep: { cleanUntrackedFiles: settings.worktreeKeepWhen === "tracked-changes" },
+        });
         entries.push({ ...entry, outcome: "removed", reason: sentence(removalReason), bytes });
         yield* gitManager.invalidateStatus(project.workspaceRoot);
         // Preserve branch and path: ProviderTurnStartService recreates the checkout

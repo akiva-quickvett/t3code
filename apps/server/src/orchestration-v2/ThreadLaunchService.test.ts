@@ -47,6 +47,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
+import * as WorktreeLifecycle from "../workspace/WorktreeLifecycle.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -157,7 +158,7 @@ function makeHarness(options: HarnessOptions = {}) {
     options.renameBranch ?? ((input) => Effect.succeed({ branch: input.newBranch })),
   );
   const removeWorktree = vi.fn(
-    (_input: Parameters<GitWorkflow.GitWorkflowService["Service"]["removeWorktree"]>[0]) =>
+    (_input: Parameters<WorktreeLifecycle.WorktreeLifecycle["Service"]["remove"]>[0]) =>
       Effect.void,
   );
   const runSetup = vi.fn(
@@ -199,7 +200,6 @@ function makeHarness(options: HarnessOptions = {}) {
       hasCommit: options.hasCommit ?? (() => Effect.succeed(false)),
       remoteExists: () => Effect.succeed(true),
       remoteBranchExists: () => Effect.succeed(true),
-      removeWorktree,
       resolveRemoteTrackingCommit: () =>
         Effect.succeed({ commitSha: "remote-main-sha", remoteRefName: "origin/main" }),
       ...options.git,
@@ -207,6 +207,7 @@ function makeHarness(options: HarnessOptions = {}) {
     Layer.succeed(ProjectSetupScriptRunner.ProjectSetupScriptRunner, {
       runForThread: runSetup,
     }),
+    Layer.succeed(WorktreeLifecycle.WorktreeLifecycle, { remove: removeWorktree }),
     Layer.mock(TextGeneration.TextGeneration)({
       generateThreadTitle,
       generateBranchName,
@@ -1937,8 +1938,16 @@ it.effect("removes a worktree that failed before the thread recorded it", () => 
     const projection = yield* threads.getThreadProjection(launched.threadId);
     assert.equal(projection.thread.worktreePath, null);
     assert.deepEqual(
-      harness.removeWorktree.mock.calls.map(([input]) => input.path),
-      ["/repo-worktrees/partial"],
+      harness.removeWorktree.mock.calls.map(([input]) => input),
+      [
+        {
+          projectRoot: "/repo",
+          worktreePath: "/repo-worktrees/partial",
+          force: true,
+          projectId,
+          threadId: launched.threadId,
+        },
+      ],
     );
   }).pipe(Effect.provide(harness.layer));
 });

@@ -578,6 +578,14 @@ function resolveShellCandidates(
   ]);
 }
 
+/** The shells a terminal tries, in order. */
+export function terminalShellCandidates(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+): ShellCandidate[] {
+  return resolveShellCandidates(() => defaultShellResolver(platform, env), platform, env);
+}
+
 function isRetryableShellSpawnError(error: PtyAdapter.PtySpawnError): boolean {
   const queue: unknown[] = [error];
   const seen = new Set<unknown>();
@@ -1271,7 +1279,7 @@ function stripAppImageRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return scrubbed;
 }
 
-function createTerminalSpawnEnv(
+export function createTerminalSpawnEnv(
   baseEnv: NodeJS.ProcessEnv,
   runtimeEnv: Record<string, string> | null | undefined,
   platform: NodeJS.Platform,

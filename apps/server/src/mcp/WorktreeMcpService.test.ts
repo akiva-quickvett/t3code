@@ -29,6 +29,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
+import * as WorktreeLifecycle from "../workspace/WorktreeLifecycle.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as WorktreeMcpService from "./WorktreeMcpService.ts";
 
@@ -306,9 +307,9 @@ const makeHarness = (options: HarnessOptions = {}) => {
           fetchRemote,
           resolveRemoteTrackingCommit,
           createWorktree,
-          removeWorktree,
           deleteLocalBranch,
         } satisfies Partial<GitWorkflowService.GitWorkflowService["Service"]>),
+        Layer.mock(WorktreeLifecycle.WorktreeLifecycle)({ remove: removeWorktree }),
         Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
           runForThread,
         } satisfies Partial<ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"]>),
@@ -696,9 +697,11 @@ describe("t3_worktree_handoff", () => {
       const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/dispatch-defect" }));
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
       expect(harness.removeWorktree).toHaveBeenCalledWith({
-        cwd: workspaceRoot,
-        path: "/worktrees/project/feature/dispatch-defect",
+        projectRoot: workspaceRoot,
+        worktreePath: "/worktrees/project/feature/dispatch-defect",
         force: true,
+        projectId,
+        threadId,
       });
     });
   });
@@ -710,9 +713,11 @@ describe("t3_worktree_handoff", () => {
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "already_in_worktree" });
       expect(harness.createWorktree).toHaveBeenCalledTimes(1);
       expect(harness.removeWorktree).toHaveBeenCalledWith({
-        cwd: workspaceRoot,
-        path: "/worktrees/project/feature/raced",
+        projectRoot: workspaceRoot,
+        worktreePath: "/worktrees/project/feature/raced",
         force: true,
+        projectId,
+        threadId,
       });
       expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
         cwd: workspaceRoot,
@@ -729,9 +734,11 @@ describe("t3_worktree_handoff", () => {
       const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/recheck-fails" }));
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
       expect(harness.removeWorktree).toHaveBeenCalledWith({
-        cwd: workspaceRoot,
-        path: "/worktrees/project/feature/recheck-fails",
+        projectRoot: workspaceRoot,
+        worktreePath: "/worktrees/project/feature/recheck-fails",
         force: true,
+        projectId,
+        threadId,
       });
       expect(harness.dispatch).not.toHaveBeenCalled();
     });
@@ -744,9 +751,11 @@ describe("t3_worktree_handoff", () => {
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "invalid_request" });
       expect(harness.dispatch).not.toHaveBeenCalled();
       expect(harness.removeWorktree).toHaveBeenCalledWith({
-        cwd: workspaceRoot,
-        path: "/worktrees/project/feature/archived-race",
+        projectRoot: workspaceRoot,
+        worktreePath: "/worktrees/project/feature/archived-race",
         force: true,
+        projectId,
+        threadId,
       });
     });
   });
@@ -880,9 +889,11 @@ describe("t3_worktree_handoff", () => {
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
       expect(harness.createWorktree).toHaveBeenCalledTimes(1);
       expect(harness.removeWorktree).toHaveBeenCalledWith({
-        cwd: workspaceRoot,
-        path: "/worktrees/project/feature/dispatch-fails",
+        projectRoot: workspaceRoot,
+        worktreePath: "/worktrees/project/feature/dispatch-fails",
         force: true,
+        projectId,
+        threadId,
       });
     });
   });

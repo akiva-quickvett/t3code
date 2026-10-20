@@ -325,7 +325,13 @@ export function createVcsEnvironmentAtoms<R, E>(
       label: "environment-data:vcs:remove-worktree",
       tag: WS_METHODS.vcsRemoveWorktree,
       scheduler: vcsCommandScheduler,
-      concurrency: vcsCommandConcurrency,
+      // The server may run the project's teardown script first, so a removal
+      // queues only behind removals of the same path, not the project's Git work.
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, "remove-worktree", input.path]),
+      },
       onSettled: invalidateRefs,
     }),
     createRef: createEnvironmentRpcCommand(runtime, {
