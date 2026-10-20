@@ -54,6 +54,7 @@ const request: ProjectScriptEditorRequest = {
     runOnWorktreeCreate: false,
     waitForSetup: false,
     runOnSettle: false,
+    runOnWorktreeRemove: false,
     keybinding: "mod+k",
     previewUrl: null,
     autoOpenPreview: false,

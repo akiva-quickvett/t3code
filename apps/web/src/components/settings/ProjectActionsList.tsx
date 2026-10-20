@@ -1,10 +1,24 @@
 import type { ProjectScript, ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import { SettingsIcon } from "lucide-react";
 import { shortcutLabelForCommand } from "../../keybindings";
+import { cn } from "../../lib/utils";
 import { commandForProjectScript } from "../../projectScripts";
 import { ScriptIcon } from "../projectScriptEditor";
 import { Button } from "../ui/button";
 import { SettingsRow } from "./settingsLayout";
+
+function ActionBadge({ children, className }: { children: string; className?: string }) {
+  return (
+    <span
+      className={cn(
+        "shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-2xs font-normal text-muted-foreground",
+        className,
+      )}
+    >
+      {children}
+    </span>
+  );
+}
 
 export function ProjectActionsList({
   scripts,
@@ -33,20 +47,11 @@ export function ProjectActionsList({
           <span className="flex min-w-0 items-center gap-2">
             <ScriptIcon icon={script.icon} className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 truncate">{script.name}</span>
-            {script.runOnWorktreeCreate ? (
-              <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-2xs font-normal text-muted-foreground">
-                setup
-              </span>
-            ) : null}
-            {script.runOnSettle ? (
-              <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-2xs font-normal text-muted-foreground">
-                on settle
-              </span>
-            ) : null}
+            {script.runOnWorktreeCreate ? <ActionBadge>setup</ActionBadge> : null}
+            {script.runOnSettle ? <ActionBadge>on settle</ActionBadge> : null}
+            {script.runOnWorktreeRemove ? <ActionBadge>teardown</ActionBadge> : null}
             {script.previewUrl ? (
-              <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-2xs font-normal text-muted-foreground max-sm:hidden">
-                preview · desktop only
-              </span>
+              <ActionBadge className="max-sm:hidden">preview · desktop only</ActionBadge>
             ) : null}
           </span>
         }

@@ -14,6 +14,7 @@ import {
   EMPTY_PROJECT_SCRIPT_INPUT,
   editorRequestForScript,
   ProjectScriptEditorDialog,
+  projectScriptInputFromFile,
   ScriptIcon,
   type NewProjectScriptInput,
   type ProjectScriptEditorRequest,
@@ -94,15 +95,8 @@ export function ProjectActionsSettings() {
   );
   const importFileScript = async (fileScript: T3ProjectFileScript) => {
     const payload: NewProjectScriptInput = {
-      name: fileScript.name,
-      command: fileScript.command,
-      icon: fileScript.icon ?? "play",
-      runOnWorktreeCreate: fileScript.runOnWorktreeCreate ?? false,
-      waitForSetup: fileScript.runOnWorktreeCreate === true && fileScript.async === false,
-      runOnSettle: fileScript.runOnSettle ?? false,
+      ...projectScriptInputFromFile(fileScript),
       keybinding: null,
-      previewUrl: fileScript.previewUrl ?? null,
-      autoOpenPreview: fileScript.previewUrl ? (fileScript.autoOpenPreview ?? false) : false,
     };
     const result = await submit(null, payload);
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {

@@ -149,6 +149,22 @@ describe("storage cleanup settings", () => {
   });
 });
 
+describe("worktree remove policy", () => {
+  it("gives settings saved before the policy existed a two minute teardown timeout", () => {
+    expect(decodeServerSettings({}).worktreeRemovePolicy).toEqual({ timeoutMs: 120_000 });
+  });
+
+  it("patches the timeout and rejects one outside its bounds", () => {
+    expect(decodeServerSettingsPatch({ worktreeRemovePolicy: { timeoutMs: 30_000 } })).toEqual({
+      worktreeRemovePolicy: { timeoutMs: 30_000 },
+    });
+    expect(() => decodeServerSettingsPatch({ worktreeRemovePolicy: { timeoutMs: 0 } })).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ worktreeRemovePolicy: { timeoutMs: 3_600_000 } }),
+    ).toThrow();
+  });
+});
+
 describe("ClientSettings rich text composer", () => {
   it("enables rich text for new and existing settings without a saved preference", () => {
     expect(decodeClientSettings({}).composerRichTextEnabled).toBe(true);
