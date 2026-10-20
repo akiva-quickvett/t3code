@@ -177,6 +177,13 @@ thread is deleted, including archived threads and worktrees left by earlier dele
 server waits for sessions and terminals to stop and retries skipped worktrees after restart.
 Existing prompts for deleting a worktree manually remain available when this policy is off.
 
+To clean up after a worktree before it goes, such as stopping containers its setup script
+started, turn on **Run before worktree removal** for one of the project's actions, or set
+`"runOnWorktreeRemove": true` on a `t3.json` script. It runs in the worktree whenever T3 Code
+removes one, including cleanup and deleting a thread with its worktree. Removal waits up to two
+minutes for it and goes ahead even if it fails. During cleanup, new files it leaves in the
+worktree keep the worktree unless the policy is **Edited tracked files**.
+
 Choose **Delete now** to run the enabled rules immediately. The latest results show which
 worktrees were removed or kept and why, plus any failures.
 Results also list folders in the worktree folder that no thread uses, with their sizes; cleanup never removes them, so remove them manually if you want.

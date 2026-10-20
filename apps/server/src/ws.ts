@@ -198,6 +198,7 @@ import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import { readWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
+import * as WorktreeLifecycle from "./workspace/WorktreeLifecycle.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
@@ -1238,6 +1239,7 @@ const layerWsRpc = (
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const directEndpoints = yield* DirectEndpoints.DirectEndpoints;
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
+      const worktreeLifecycle = yield* WorktreeLifecycle.WorktreeLifecycle;
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
@@ -2812,7 +2814,13 @@ const layerWsRpc = (
         [WS_METHODS.vcsCreateWorktree]: (input) =>
           gitWorkflow.createWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
-          gitWorkflow.removeWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+          worktreeLifecycle
+            .remove({
+              projectRoot: input.cwd,
+              worktreePath: input.path,
+              force: input.force ?? false,
+            })
+            .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.vcsCreateRef]: (input) =>
           gitWorkflow.createRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.vcsSwitchRef]: (input) =>

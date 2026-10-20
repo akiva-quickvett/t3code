@@ -1065,6 +1065,19 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+// Long enough for a teardown that stops a container stack; a script that
+// hangs past it is killed so removal never waits on it indefinitely.
+const DEFAULT_WORKTREE_TEARDOWN_TIMEOUT_MS = 120_000;
+const WorktreeTeardownTimeoutMs = Schema.Int.check(
+  Schema.isBetween({ minimum: 1_000, maximum: 1_800_000 }),
+);
+
+const WorktreeRemovePolicy = Schema.Struct({
+  timeoutMs: WorktreeTeardownTimeoutMs.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKTREE_TEARDOWN_TIMEOUT_MS)),
+  ),
+});
+
 export const ServerSettings = Schema.Struct({
   // Null means no client has migrated this preference yet; an empty value is
   // authoritative so another device cannot resurrect cleared preferences.
@@ -1075,6 +1088,9 @@ export const ServerSettings = Schema.Struct({
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
+  ),
+  worktreeRemovePolicy: WorktreeRemovePolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(WorktreeRemovePolicy)({}))),
   ),
 
   worktreesDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -1404,6 +1420,9 @@ export const ServerSettingsPatch = Schema.Struct({
       browserArtifactsAfterDays: Schema.optionalKey(StorageRetentionDays),
       logsAfterDays: Schema.optionalKey(StorageRetentionDays),
     }),
+  ),
+  worktreeRemovePolicy: Schema.optionalKey(
+    Schema.Struct({ timeoutMs: Schema.optionalKey(WorktreeTeardownTimeoutMs) }),
   ),
   worktreesDirectory: Schema.optionalKey(TrimmedString),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),

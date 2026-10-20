@@ -578,6 +578,14 @@ function resolveShellCandidates(
   ]);
 }
 
+/** The shells a terminal tries, in order. */
+export function terminalShellCandidates(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+): ShellCandidate[] {
+  return resolveShellCandidates(() => defaultShellResolver(platform, env), platform, env);
+}
+
 function isRetryableShellSpawnError(error: PtyAdapter.PtySpawnError): boolean {
   const queue: unknown[] = [error];
   const seen = new Set<unknown>();

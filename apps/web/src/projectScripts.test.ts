@@ -7,6 +7,7 @@ import {
   projectScriptMenuLabel,
   settleProjectScript,
   setupProjectScript,
+  teardownProjectScript,
 } from "@t3tools/shared/projectScripts";
 
 import {
@@ -28,6 +29,7 @@ describe("projectScripts helpers", () => {
         runOnWorktreeCreate: false,
         waitForSetup: false,
         runOnSettle: false,
+        runOnWorktreeRemove: false,
         previewUrl: "http://localhost:5733",
         autoOpenPreview: true,
       }),
@@ -51,6 +53,7 @@ describe("projectScripts helpers", () => {
         runOnWorktreeCreate: false,
         waitForSetup: false,
         runOnSettle: false,
+        runOnWorktreeRemove: false,
         previewUrl: null,
         autoOpenPreview: false,
       }),
@@ -71,6 +74,7 @@ describe("projectScripts helpers", () => {
       previewUrl: null,
       autoOpenPreview: false,
       runOnSettle: false,
+      runOnWorktreeRemove: false,
     } as const;
     expect(
       buildProjectScript("setup", { ...input, runOnWorktreeCreate: true, waitForSetup: true }),
@@ -81,6 +85,14 @@ describe("projectScripts helpers", () => {
     expect(
       buildProjectScript("setup", { ...input, runOnWorktreeCreate: false, waitForSetup: true }),
     ).not.toHaveProperty("async");
+    expect(
+      buildProjectScript("down", {
+        ...input,
+        runOnWorktreeCreate: false,
+        waitForSetup: false,
+        runOnWorktreeRemove: true,
+      }),
+    ).toMatchObject({ runOnWorktreeRemove: true });
   });
 
   it("builds and parses script run commands", () => {
@@ -132,6 +144,14 @@ describe("projectScripts helpers", () => {
         runOnSettle: true,
       },
       {
+        id: "down",
+        name: "Down",
+        command: "docker compose down",
+        icon: "play" as const,
+        runOnWorktreeCreate: false,
+        runOnWorktreeRemove: true,
+      },
+      {
         id: "test",
         name: "Test",
         command: "bun test",
@@ -143,7 +163,10 @@ describe("projectScripts helpers", () => {
     expect(primaryProjectScript(scripts)?.id).toBe("test");
     expect(setupProjectScript(scripts)?.id).toBe("setup");
     expect(settleProjectScript(scripts)?.id).toBe("clean");
+    expect(teardownProjectScript(scripts)?.id).toBe("down");
     expect(primaryProjectScript(scripts.filter((script) => script.id === "clean"))).toBeNull();
+    expect(primaryProjectScript(scripts.filter((script) => script.id === "down"))).toBeNull();
+    expect(teardownProjectScript(scripts.filter((script) => script.id !== "down"))).toBeNull();
   });
 
   it("labels every lifecycle role a script runs in", () => {
@@ -159,9 +182,15 @@ describe("projectScripts helpers", () => {
       "Both (setup, on settle)",
     );
     expect(projectScriptMenuLabel({ ...script, runOnWorktreeCreate: false })).toBe("Both");
+    expect(
+      projectScriptMenuLabel({ ...script, runOnWorktreeCreate: false, runOnWorktreeRemove: true }),
+    ).toBe("Both (teardown)");
+    expect(
+      projectScriptMenuLabel({ ...script, runOnSettle: true, runOnWorktreeRemove: true }),
+    ).toBe("Both (setup, on settle, teardown)");
   });
 
-  it("moves the setup and settle roles to the script that claims them", () => {
+  it("moves the setup, settle, and teardown roles to the script that claims them", () => {
     const input = {
       name: "Next",
       command: "true",
@@ -177,16 +206,25 @@ describe("projectScripts helpers", () => {
       icon: "play" as const,
       runOnWorktreeCreate: true,
       runOnSettle: true,
+      runOnWorktreeRemove: true,
     };
+    const claims = (roles: {
+      runOnWorktreeCreate: boolean;
+      runOnSettle: boolean;
+      runOnWorktreeRemove: boolean;
+    }) => releaseClaimedRoles(holder, { ...input, ...roles });
 
     expect(
-      releaseClaimedRoles(holder, { ...input, runOnWorktreeCreate: false, runOnSettle: true }),
-    ).toMatchObject({ runOnWorktreeCreate: true, runOnSettle: false });
+      claims({ runOnWorktreeCreate: false, runOnSettle: true, runOnWorktreeRemove: false }),
+    ).toMatchObject({ runOnWorktreeCreate: true, runOnSettle: false, runOnWorktreeRemove: true });
     expect(
-      releaseClaimedRoles(holder, { ...input, runOnWorktreeCreate: true, runOnSettle: false }),
-    ).toMatchObject({ runOnWorktreeCreate: false, runOnSettle: true });
+      claims({ runOnWorktreeCreate: true, runOnSettle: false, runOnWorktreeRemove: false }),
+    ).toMatchObject({ runOnWorktreeCreate: false, runOnSettle: true, runOnWorktreeRemove: true });
     expect(
-      releaseClaimedRoles(holder, { ...input, runOnWorktreeCreate: false, runOnSettle: false }),
+      claims({ runOnWorktreeCreate: false, runOnSettle: false, runOnWorktreeRemove: true }),
+    ).toMatchObject({ runOnWorktreeCreate: true, runOnSettle: true, runOnWorktreeRemove: false });
+    expect(
+      claims({ runOnWorktreeCreate: false, runOnSettle: false, runOnWorktreeRemove: false }),
     ).toBe(holder);
   });
 
