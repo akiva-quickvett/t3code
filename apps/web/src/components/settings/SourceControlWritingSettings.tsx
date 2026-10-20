@@ -356,7 +356,7 @@ export function SourceControlWritingSettingsSection() {
                   environmentId={environmentId}
                   activeInstanceId={activeSelection.instanceId}
                   model={activeSelection.model}
-                  lockedProvider={null}
+                  providerLock={null}
                   instanceEntries={instanceEntries}
                   modelOptionsByInstance={modelOptionsByInstance}
                   triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
@@ -472,7 +472,7 @@ export function SourceControlWritingSettingsSection() {
                       environmentId={environmentId}
                       activeInstanceId={reviewGuideSelection.instanceId}
                       model={reviewGuideSelection.model}
-                      lockedProvider={null}
+                      providerLock={null}
                       instanceEntries={instanceEntries}
                       modelOptionsByInstance={reviewGuideModelOptionsByInstance}
                       triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}

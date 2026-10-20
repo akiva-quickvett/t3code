@@ -160,7 +160,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
               environmentId={representative?.environmentId ?? null}
               activeInstanceId={selection.instanceId}
               model={selection.model}
-              lockedProvider={null}
+              providerLock={null}
               instanceEntries={entries}
               modelOptionsByInstance={modelOptions}
               triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}

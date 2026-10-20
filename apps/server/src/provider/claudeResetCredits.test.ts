@@ -134,6 +134,81 @@ effectIt.layer(NodeServices.layer)("readClaudeResetCredits", (it) => {
   );
 });
 
+const readOrganizationFrom = (text: string | undefined) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const accountConfigPath = path.join(yield* fs.makeTempDirectoryScoped(), ".claude.json");
+    if (text !== undefined) yield* fs.writeFileString(accountConfigPath, text);
+    return yield* ClaudeResetCredits.readClaudeOrganization(accountConfigPath);
+  });
+const accountConfig = (oauthAccount: unknown) => `{"oauthAccount":${JSON.stringify(oauthAccount)}}`;
+
+effectIt.layer(NodeServices.layer)("readClaudeOrganization", (it) => {
+  it.effect("reads the organization id and trimmed name", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* readOrganizationFrom(
+          accountConfig({ organizationUuid: " org-1 ", organizationName: "  Acme  " }),
+        ),
+      ).toEqual({ id: "org-1", label: "Acme" });
+    }),
+  );
+
+  it.effect.each([
+    ["a missing file", undefined],
+    ["malformed JSON", "{not json"],
+    ["no oauthAccount", '{"numStartups":3}'],
+    ["a non-object oauthAccount", accountConfig("org-1")],
+    ["no organization id", accountConfig({ organizationName: "Acme" })],
+    ["a non-string organization id", accountConfig({ organizationUuid: 42 })],
+    ["a blank organization id", accountConfig({ organizationUuid: "   " })],
+  ] as const)("reports no organization for %s", ([, text]) =>
+    Effect.gen(function* () {
+      expect(yield* readOrganizationFrom(text)).toBeUndefined();
+    }),
+  );
+
+  it.effect.each([
+    ["a non-string name", 42],
+    ["a blank name", "   "],
+    ["an email address as the name", "dev@example.com's Organization"],
+  ] as const)("keeps the id but drops %s", ([, organizationName]) =>
+    Effect.gen(function* () {
+      expect(
+        yield* readOrganizationFrom(accountConfig({ organizationUuid: "org-1", organizationName })),
+      ).toEqual({ id: "org-1" });
+    }),
+  );
+
+  it.effect("reads only .claude.json from the config dir, never .credentials.json", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { configDir, accountConfigPath } = yield* writeLogin;
+      const opened: Array<string> = [];
+      const spyFileSystem: FileSystem.FileSystem = {
+        ...fs,
+        readFile: (file) => {
+          opened.push(file);
+          return fs.readFile(file);
+        },
+        readFileString: (file, encoding) => {
+          opened.push(file);
+          return fs.readFileString(file, encoding);
+        },
+      };
+
+      const organization = yield* ClaudeResetCredits.claudeAccountConfigPath(configDir).pipe(
+        Effect.flatMap(ClaudeResetCredits.readClaudeOrganization),
+        Effect.provideService(FileSystem.FileSystem, spyFileSystem),
+      );
+
+      expect(organization).toEqual({ id: "org-1" });
+      expect(opened).toEqual([accountConfigPath]);
+    }),
+  );
+});
+
 const ClaimBody = Schema.fromJsonString(
   Schema.Struct({ program: Schema.String, grant_id: Schema.String, request_id: Schema.String }),
 );

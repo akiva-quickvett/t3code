@@ -3,12 +3,14 @@ import { projectComposerContextForProvider } from "@t3tools/shared/composerConte
 import {
   CommandId,
   latestProviderTurnForAttempt,
+  type OrchestrationV2ContextHandoff,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2TurnItem,
+  type ProviderInstanceId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -46,6 +48,7 @@ import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
@@ -55,6 +58,13 @@ import {
   pendingRestartCancelledBackgroundWork,
   restartCancelledBackgroundWorkNote,
 } from "./RestartBackgroundNote.ts";
+import {
+  crossesOrganization,
+  handoffsSinceAcceptedTurn,
+  handoffSourceInstanceIds,
+  MIXED_ORGANIZATION_NOTE,
+  MIXED_ORGANIZATION_NOTICE,
+} from "./MixedOrganizationNote.ts";
 
 export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStartError>()(
   "ProviderTurnStartError",
@@ -98,6 +108,7 @@ export const layer: Layer.Layer<
   | ProjectService.ProjectService
   | ProviderAuthService.ProviderAuthService
   | ProjectionStore.ProjectionStoreV2
+  | ProviderAdapterRegistry.ProviderAdapterRegistryV2
   | ProviderSessionManager.ProviderSessionManagerV2
   | RunExecutionService.RunExecutionServiceV2
   | RuntimePolicy.RuntimePolicyV2
@@ -119,6 +130,18 @@ export const layer: Layer.Layer<
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+    const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+    // Only Claude logins carry an organization for now; other drivers keep handing off silently.
+    const instanceOrganization = (instanceId: ProviderInstanceId) =>
+      providerAdapters.getMetadata === undefined
+        ? Effect.succeed(undefined)
+        : providerAdapters.getMetadata(instanceId).pipe(
+            Effect.map(({ driver, organizationKey }) => ({
+              driver,
+              organizationKey: driver === "claudeAgent" ? organizationKey : undefined,
+            })),
+            Effect.orElseSucceed(() => undefined),
+          );
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -839,6 +862,45 @@ export const layer: Layer.Layer<
         status: "running",
         startedAt: now,
       };
+      // Provider-side reasoning stays with the organization that produced it. The agent is told
+      // until a turn carrying the note is accepted; the timeline notes it once, on the run the
+      // cross-organization handoff was made for.
+      const handoffsWithSources = handoffsSinceAcceptedTurn({
+        providerThreadId: providerThread.id,
+        handoffs: projection.contextHandoffs,
+        runs: projection.runs,
+        providerTurns: projection.providerTurns,
+      }).flatMap((handoff) => {
+        const sources = handoffSourceInstanceIds({
+          handoffs: [handoff],
+          providerThreads: projection.providerThreads,
+        }).filter((instanceId) => instanceId !== run.providerInstanceId);
+        return sources.length === 0 ? [] : [{ handoff, sources }];
+      });
+      const targetOrganization =
+        handoffsWithSources.length === 0
+          ? undefined
+          : yield* instanceOrganization(run.providerInstanceId);
+      const crossOrganizationHandoffs: Array<OrchestrationV2ContextHandoff> = [];
+      for (const { handoff, sources } of handoffsWithSources) {
+        if (
+          crossesOrganization(
+            targetOrganization,
+            yield* Effect.forEach(sources, instanceOrganization),
+          )
+        ) {
+          crossOrganizationHandoffs.push(handoff);
+        }
+      }
+      const crossOrganization = crossOrganizationHandoffs.length > 0;
+      const mixedOrganizationNoticeId = idAllocator.derive.runSignalTurnItem({
+        runId: run.id,
+        signal: "mixed-organization",
+      });
+      // A later attempt of the same run must not rewrite the notice the first attempt placed.
+      const noteMixedOrganization =
+        crossOrganizationHandoffs.some((handoff) => handoff.targetRunId === run.id) &&
+        !projection.turnItems.some((item) => item.id === mixedOrganizationNoticeId);
       const events: Array<OrchestrationV2DomainEvent> = [
         {
           id: yield* idAllocator.allocate.event({
@@ -917,6 +979,43 @@ export const layer: Layer.Layer<
           occurredAt: now,
           payload: runningRootNode,
         },
+        ...(noteMixedOrganization
+          ? [
+              {
+                id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
+                type: "turn-item.updated" as const,
+                threadId: projection.thread.id,
+                runId: run.id,
+                nodeId: rootNode.id,
+                providerInstanceId: run.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  id: mixedOrganizationNoticeId,
+                  threadId: projection.thread.id,
+                  runId: run.id,
+                  nodeId: rootNode.id,
+                  providerThreadId: providerThread.id,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal:
+                    Math.max(
+                      0,
+                      ...projection.turnItems
+                        .filter((item) => item.runId === run.id)
+                        .map((item) => item.ordinal),
+                    ) + 1,
+                  type: "system_notice" as const,
+                  status: "completed" as const,
+                  title: MIXED_ORGANIZATION_NOTICE,
+                  message: MIXED_ORGANIZATION_NOTICE,
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                },
+              },
+            ]
+          : []),
       ];
       const runningWrite = yield* eventSink.writeIfRunCurrent({
         threadId: projection.thread.id,
@@ -962,6 +1061,9 @@ export const layer: Layer.Layer<
         restartCancelledWork.length === 0
           ? ""
           : restartCancelledBackgroundWorkNote(restartCancelledWork);
+      const turnNote = [restartNote, crossOrganization ? MIXED_ORGANIZATION_NOTE : ""]
+        .filter((note) => note !== "")
+        .join("\n\n");
       const tokenCap = yield* handoffTokenCapConfig.pipe(
         Effect.orElseSucceed(() => DEFAULT_HANDOFF_TOKEN_CAP),
       );
@@ -1106,7 +1208,7 @@ export const layer: Layer.Layer<
               return handoffBudget({
                 tokenCap,
                 modelContextWindow,
-                userText: restartNote === "" ? userText : `${restartNote}\n\n${userText}`,
+                userText: turnNote === "" ? userText : `${turnNote}\n\n${userText}`,
                 attachments: message.attachments,
                 providerThread: budgetProviderThread,
                 nativeContextEstimate:
@@ -1147,9 +1249,7 @@ export const layer: Layer.Layer<
           });
           if (!(yield* isCurrentAttemptInStatus("running"))) return;
           const start = compact ? session.compactThread! : session.startTurn;
-          const context = [delivery.context, restartNote]
-            .filter((part) => part !== "")
-            .join("\n\n");
+          const context = [delivery.context, turnNote].filter((part) => part !== "").join("\n\n");
           const { restartContinuationOfRunId: _resumedRunId, ...promptedInput } = turnInput;
           yield* start({
             ...(noteContinuation ? promptedInput : turnInput),
@@ -1198,7 +1298,7 @@ export const layer: Layer.Layer<
       const deliverySession =
         effectiveHandoffs.length === 0 &&
         missedItems.length === 0 &&
-        restartNote === "" &&
+        turnNote === "" &&
         !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);

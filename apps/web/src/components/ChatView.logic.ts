@@ -63,7 +63,9 @@ import type { PreviewMiniPlayerSource } from "../previewMiniPlayerStore";
 import type { DesktopPreviewOverlay } from "../previewStateStore";
 import type { RightPanelSurface } from "../rightPanelStore";
 import {
+  filterProviderInstancesForLock,
   NO_PROVIDER_MODEL_SELECTION,
+  resolveProviderInstanceLock,
   resolveSelectableProviderInstanceEntry,
   type ProviderInstanceEntry,
 } from "../providerInstances";
@@ -581,20 +583,11 @@ export function resolveComposerProviderSelection(input: {
     input.entries.find((entry) => entry.instanceId === requestedInstanceId)?.driverKind ??
     input.entries[0]?.driverKind ??
     ProviderDriverKind.make("unconfigured");
-  const lockedContinuationGroupKey = input.lockedProvider
-    ? (input.entries.find((entry) => entry.instanceId === input.lockedInstanceId)
-        ?.continuationGroupKey ?? null)
-    : null;
-  // Missing metadata must not move Antigravity history into another Google profile.
-  const requiresExactInstance =
-    input.lockedProvider === "antigravity" &&
-    input.lockedInstanceId != null &&
-    lockedContinuationGroupKey === null;
-  const compatibleEntries = input.entries.filter(
-    (entry) =>
-      (!input.lockedProvider || entry.driverKind === input.lockedProvider) &&
-      (!lockedContinuationGroupKey || entry.continuationGroupKey === lockedContinuationGroupKey) &&
-      (!requiresExactInstance || entry.instanceId === input.lockedInstanceId),
+  const providerLock = resolveProviderInstanceLock(input);
+  const compatibleEntries = filterProviderInstancesForLock(
+    input.entries,
+    providerLock,
+    requestedInstanceId,
   );
   const selectedProviderEntry =
     input.candidateInstanceIds
@@ -617,7 +610,7 @@ export function resolveComposerProviderSelection(input: {
   return {
     selectedProviderEntry,
     requestedDriverKind,
-    lockedContinuationGroupKey,
+    providerLock,
     unavailableProviderInstanceId,
   };
 }

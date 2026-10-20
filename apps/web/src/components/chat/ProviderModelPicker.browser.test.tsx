@@ -61,7 +61,7 @@ function renderPicker(input: {
       environmentId={null}
       activeInstanceId={instanceId}
       model={input.model}
-      lockedProvider={null}
+      providerLock={null}
       instanceEntries={input.includeEntry === false ? [] : [entry]}
       modelOptionsByInstance={new Map([[instanceId, input.options]])}
       onInstanceModelChange={() => {}}
@@ -183,7 +183,7 @@ describe("ProviderModelPicker", () => {
         environmentId={null}
         activeInstanceId={activeEntry.instanceId}
         model="gpt-5"
-        lockedProvider={null}
+        providerLock={null}
         instanceEntries={[providerEntry("codex", "codex"), activeEntry]}
         modelOptionsByInstance={new Map()}
         size="xs"

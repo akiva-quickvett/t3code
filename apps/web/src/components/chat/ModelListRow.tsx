@@ -40,6 +40,8 @@ export const ModelListRow = memo(function ModelListRow(props: {
   unavailable?: boolean;
   jumpLabel?: string | null;
   disabledReason?: string | null;
+  switchNote?: string | null;
+  switchWarning?: string | null;
   onToggleFavorite: (instanceId: ProviderInstanceId, slug: string) => void;
 }) {
   const model = {
@@ -101,6 +103,14 @@ export const ModelListRow = memo(function ModelListRow(props: {
             </span>
           </div>
         )}
+        {props.switchNote ? (
+          <div className="mt-1 text-2xs leading-snug text-muted-foreground/70">
+            {props.switchNote}
+            {props.switchWarning ? (
+              <span className="block text-warning">{props.switchWarning}</span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">

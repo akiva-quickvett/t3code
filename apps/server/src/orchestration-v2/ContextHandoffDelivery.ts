@@ -12,6 +12,20 @@ import {
   selectHistory,
 } from "@t3tools/provider-core/server/handoffBudget";
 
+/** Handoffs this native thread has not been given yet, or whose delivery is uncertain. */
+export function pendingContextHandoffs<Handoff extends OrchestrationV2ContextHandoff>(
+  handoffs: ReadonlyArray<Handoff>,
+  providerThread: Pick<OrchestrationV2ProviderThread, "nativeThreadRef">,
+): ReadonlyArray<Handoff> {
+  const nativeThreadId = providerThread.nativeThreadRef?.nativeId ?? undefined;
+  return handoffs.filter(
+    (handoff) =>
+      nativeThreadId === undefined ||
+      handoff.delivery?.nativeThreadId !== nativeThreadId ||
+      handoff.delivery.status === "pending",
+  );
+}
+
 /**
  * Persist before/after injection: an ambiguous pending delivery requires a fresh native thread.
  * Run `unsent` when the provider refused the turn before reading the prompt, so that
@@ -30,12 +44,7 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
     readonly persist: (handoff: OrchestrationV2ContextHandoff) => Effect.Effect<void, PersistError>;
   }) {
     const nativeThreadId = input.providerThread.nativeThreadRef?.nativeId ?? undefined;
-    const pending = input.handoffs.filter(
-      (handoff) =>
-        nativeThreadId === undefined ||
-        handoff.delivery?.nativeThreadId !== nativeThreadId ||
-        handoff.delivery.status === "pending",
-    );
+    const pending = pendingContextHandoffs(input.handoffs, input.providerThread);
     if (pending.length === 0 || (input.deferInline && input.inject === undefined))
       return { context: "", delivered: Effect.void, unsent: Effect.void };
     const budget = typeof input.budget === "number" ? input.budget : yield* input.budget;

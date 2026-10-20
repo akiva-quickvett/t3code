@@ -1331,7 +1331,7 @@ function ScheduledTaskEditorForm({
                 disabled={saving || !connected}
                 activeInstanceId={activeInstanceId}
                 model={activeModel}
-                lockedProvider={null}
+                providerLock={null}
                 instanceEntries={instanceEntries}
                 modelOptionsByInstance={modelOptionsByInstance}
                 isComposerOwned={false}
