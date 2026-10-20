@@ -27,6 +27,7 @@ import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { ThreadHeaderRolePicker } from "../roles/RolePresetPicker";
 import {
   WorkspaceBreadcrumb,
   WorkspaceBreadcrumbItem,
@@ -396,6 +397,12 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
             </Tooltip>
           )}
+          {isServerThread && renamingTitle === null ? (
+            <ThreadHeaderRolePicker
+              environmentId={activeThreadEnvironmentId}
+              threadId={activeThreadId}
+            />
+          ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
     </div>

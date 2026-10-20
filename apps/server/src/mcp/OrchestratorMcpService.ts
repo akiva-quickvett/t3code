@@ -1,4 +1,5 @@
 import {
+  type AgentRolePreset,
   CommandId,
   type RunId,
   isProviderAvailable,
@@ -98,6 +99,11 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import {
+  buildAgentRolePresetList,
+  findAgentRolePresetIn,
+  unknownAgentRolePresetMessage,
+} from "../agentRoles/AgentRolePresetService.ts";
 import {
   clientRuntimeModeCeiling,
   type McpInvocationScope,
@@ -606,6 +612,86 @@ export function resolveInteractionMode(
     : Effect.succeed(resolved);
 }
 
+export function narrowerRuntimeMode(left: RuntimeMode, right: RuntimeMode): RuntimeMode {
+  return runtimeModeRank(right) < runtimeModeRank(left) ? right : left;
+}
+
+export function narrowerInteractionMode(
+  left: ProviderInteractionMode,
+  right: ProviderInteractionMode,
+): ProviderInteractionMode {
+  return interactionModeRank(right) < interactionModeRank(left) ? right : left;
+}
+
+/**
+ * A preset's modes are a preference under the caller's ceiling, so a preset
+ * naming a broader mode runs at the caller's; modes passed explicitly win and
+ * are checked as before.
+ */
+export function resolvePresetModes(input: {
+  readonly parentRuntimeMode: RuntimeMode;
+  readonly parentInteractionMode: ProviderInteractionMode;
+  readonly requestedRuntimeMode: OrchestratorMcpRuntimeMode | undefined;
+  readonly requestedInteractionMode: OrchestratorMcpInteractionMode | undefined;
+  readonly preset: Pick<AgentRolePreset, "runtimeMode" | "interactionMode"> | undefined;
+  readonly target: Pick<ResolvedTarget, "modelSelection" | "supportedRuntimeModes">;
+}): Effect.Effect<
+  { readonly runtimeMode: RuntimeMode; readonly interactionMode: ProviderInteractionMode },
+  OrchestratorMcpFailure
+> {
+  const presetRuntime = input.preset?.runtimeMode;
+  const presetInteraction = input.preset?.interactionMode;
+  return Effect.all({
+    runtimeMode:
+      input.requestedRuntimeMode === undefined && presetRuntime !== undefined
+        ? resolveRuntimeMode(
+            narrowerRuntimeMode(input.parentRuntimeMode, presetRuntime),
+            undefined,
+            input.target,
+          )
+        : resolveRuntimeMode(input.parentRuntimeMode, input.requestedRuntimeMode, input.target),
+    interactionMode:
+      input.requestedInteractionMode === undefined && presetInteraction !== undefined
+        ? resolveInteractionMode(
+            narrowerInteractionMode(input.parentInteractionMode, presetInteraction),
+            undefined,
+          )
+        : resolveInteractionMode(input.parentInteractionMode, input.requestedInteractionMode),
+  });
+}
+
+/**
+ * Naming a provider or driver replaces the preset's target. Naming only a
+ * model keeps the preset's provider, and its options only while the model is
+ * the preset's own.
+ */
+export function presetTarget(
+  preset: Pick<AgentRolePreset, "target">,
+  requested: OrchestratorMcpTarget | undefined,
+): { readonly target: OrchestratorMcpTarget; readonly optionsFromPreset: boolean } {
+  if (requested?.providerInstanceId !== undefined || requested?.driverKind !== undefined) {
+    return { target: requested, optionsFromPreset: false };
+  }
+  const model = requested?.model ?? preset.target.model;
+  const presetOptions =
+    model === preset.target.model && preset.target.options.length > 0
+      ? preset.target.options
+      : undefined;
+  const options = requested?.options ?? presetOptions;
+  return {
+    target: {
+      ...(preset.target.providerInstanceId !== undefined
+        ? { providerInstanceId: preset.target.providerInstanceId }
+        : preset.target.driverKind !== undefined
+          ? { driverKind: preset.target.driverKind }
+          : {}),
+      model,
+      ...(options === undefined ? {} : { options }),
+    },
+    optionsFromPreset: requested?.options === undefined && options !== undefined,
+  };
+}
+
 function stablePart(value: string): string {
   return encodeURIComponent(value);
 }
@@ -750,6 +836,7 @@ function listItemFromShell(
     ...threadSnooze(shell, nowMs),
     parentThreadId: shell.lineage.parentThreadId,
     relationshipToParent: shell.lineage.relationshipToParent,
+    ...(shell.rolePreset == null ? {} : { rolePreset: shell.rolePreset }),
     itemCount: shell.visibleItemCount,
     createdAt: DateTime.formatIso(shell.createdAt),
     updatedAt: DateTime.formatIso(shell.updatedAt),
@@ -791,6 +878,7 @@ function threadDetail(
     worktreePath: projection.thread.worktreePath,
     parentThreadId: projection.thread.lineage.parentThreadId,
     relationshipToParent: projection.thread.lineage.relationshipToParent,
+    ...(projection.thread.rolePreset == null ? {} : { rolePreset: projection.thread.rolePreset }),
     runCount: projection.runs.length,
     itemCount,
     pendingRequestCount: projection.runtimeRequests.filter(
@@ -1332,6 +1420,53 @@ const make = Effect.gen(function* () {
 
   const loadProviders = providerRegistry.getProviders;
 
+  const loadRolePresets = (projectId: ProjectId | undefined) =>
+    Effect.gen(function* () {
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError(() => failure("orchestration_error", "Unable to read role presets.")),
+      );
+      return buildAgentRolePresetList({
+        settings,
+        providers: yield* loadProviders,
+        projectId,
+      }).presets;
+    });
+
+  const requirePreset = (projectId: ProjectId, presetId: string | undefined) =>
+    presetId === undefined
+      ? Effect.succeed(undefined)
+      : loadRolePresets(projectId).pipe(
+          Effect.flatMap((presets) => {
+            const preset = findAgentRolePresetIn(presets, presetId);
+            return preset === undefined
+              ? Effect.fail(
+                  failure("invalid_request", unknownAgentRolePresetMessage(presetId, presets)),
+                )
+              : Effect.succeed(preset);
+          }),
+        );
+
+  /** A preset supplies the target unless the request names its own. */
+  const resolveRequestTarget = (input: {
+    readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
+    readonly target: OrchestratorMcpTarget | undefined;
+    readonly preset: AgentRolePreset | undefined;
+    readonly providers: ReadonlyArray<ServerProvider>;
+    readonly skipProjectEnablementFilter?: boolean;
+  }) => {
+    const fromPreset =
+      input.preset === undefined ? undefined : presetTarget(input.preset, input.target);
+    return resolveTargetRechecking({
+      parent: input.parent,
+      target: fromPreset?.target ?? input.target,
+      providers: input.providers,
+      ...(input.skipProjectEnablementFilter === undefined
+        ? {}
+        : { skipProjectEnablementFilter: input.skipProjectEnablementFilter }),
+      ...(fromPreset?.optionsFromPreset === true ? { optionsFromPreset: true } : {}),
+    });
+  };
+
   const loadOrchestrationCapableInstanceIds = () =>
     providerAdapters.list().pipe(Effect.map((instanceIds) => new Set(instanceIds)));
 
@@ -1384,6 +1519,11 @@ const make = Effect.gen(function* () {
      * one checked for a receipt.
      */
     readonly skipProjectEnablementFilter?: boolean;
+    /**
+     * Options a role preset supplied: one the model does not offer is dropped,
+     * since presets are environment-wide and models change under them.
+     */
+    readonly optionsFromPreset?: boolean;
   }): Effect.Effect<ResolvedTarget, OrchestratorMcpFailure> =>
     Effect.gen(function* () {
       const requestedInstanceId = input.target?.providerInstanceId;
@@ -1485,10 +1625,16 @@ const make = Effect.gen(function* () {
         );
       }
 
-      const requestedOptions = input.target?.options;
+      const descriptors = provider.models.find((candidate) => candidate.slug === model)
+        ?.capabilities?.optionDescriptors;
+      const offeredOptions =
+        input.optionsFromPreset === true
+          ? input.target?.options?.filter(
+              (selection) => invalidOptionSelections([selection], descriptors).length === 0,
+            )
+          : input.target?.options;
+      const requestedOptions = offeredOptions?.length === 0 ? undefined : offeredOptions;
       if (requestedOptions !== undefined) {
-        const descriptors = provider.models.find((candidate) => candidate.slug === model)
-          ?.capabilities?.optionDescriptors;
         const invalid = invalidOptionSelections(requestedOptions, descriptors);
         if (invalid.length > 0) {
           return yield* failure(
@@ -2090,6 +2236,7 @@ const make = Effect.gen(function* () {
           Effect.map((settings) => settings.providerModelPreferences ?? {}),
           Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
         );
+        const rolePresets = yield* loadRolePresets(parent?.thread.projectId);
         return {
           parentThreadId: parent?.thread.id ?? null,
           inheritedProviderInstanceId: parent?.thread.modelSelection.instanceId ?? null,
@@ -2128,6 +2275,23 @@ const make = Effect.gen(function* () {
               constraints: [...constraints],
             };
           }),
+          rolePresets: rolePresets.map((preset) => ({
+            id: preset.id,
+            label: preset.label,
+            target: {
+              ...(preset.target.providerInstanceId === undefined
+                ? {}
+                : { providerInstanceId: preset.target.providerInstanceId }),
+              ...(preset.target.driverKind === undefined
+                ? {}
+                : { driverKind: preset.target.driverKind }),
+              model: preset.target.model,
+            },
+            ...(preset.runsIn === undefined ? {} : { runsIn: preset.runsIn }),
+            ...(preset.unavailable === null
+              ? {}
+              : { unavailableReason: preset.unavailable.reason }),
+          })),
           features: {
             appOwnedSubagents: true,
             asyncPolling: true,
@@ -2143,8 +2307,10 @@ const make = Effect.gen(function* () {
     delegateTask: (callerScope, input) =>
       Effect.gen(function* () {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
+        const preset = yield* requirePreset(parent.thread.projectId, input.preset);
+        const isolation = input.isolation ?? preset?.isolation;
         if (
-          input.isolation !== "worktree" &&
+          isolation !== "worktree" &&
           (input.branch !== undefined || input.baseRef !== undefined)
         ) {
           return yield* failure(
@@ -2173,23 +2339,23 @@ const make = Effect.gen(function* () {
           operation: "delegate-task",
         });
         const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
-        const target = yield* resolveTargetRechecking({
+        const target = yield* resolveRequestTarget({
           parent,
           target: input.target,
+          preset,
           providers,
           skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
         });
-        const runtimeMode = yield* resolveRuntimeMode(
-          parent.thread.runtimeMode,
-          input.runtimeMode,
+        const { runtimeMode, interactionMode } = yield* resolvePresetModes({
+          parentRuntimeMode: parent.thread.runtimeMode,
+          parentInteractionMode: parent.thread.interactionMode,
+          requestedRuntimeMode: input.runtimeMode,
+          requestedInteractionMode: input.interactionMode,
+          preset,
           target,
-        );
-        const interactionMode = yield* resolveInteractionMode(
-          parent.thread.interactionMode,
-          input.interactionMode,
-        );
+        });
         let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
-        if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
+        if (isolation === "worktree" && !isRetryOfAcceptedDelegation) {
           const project = yield* requireProject(parent.thread.projectId);
           if (input.branch !== undefined) yield* assertNewBranchName(project, input.branch);
           const base =
@@ -2224,6 +2390,7 @@ const make = Effect.gen(function* () {
             runtimeMode,
             interactionMode,
             ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
+            ...(preset === undefined ? {} : { rolePreset: { id: preset.id, label: preset.label } }),
             // Async delegations wake the parent on every child terminal; wait
             // delegations deliver through the blocking tool call, so a wake is
             // only needed if the parent settled first (timeout, disconnect).
@@ -2510,20 +2677,21 @@ const make = Effect.gen(function* () {
           input.threads,
           (request, index) =>
             Effect.gen(function* () {
-              const target = yield* resolveTargetRechecking({
+              const preset = yield* requirePreset(parent.thread.projectId, request.preset);
+              const target = yield* resolveRequestTarget({
                 parent,
                 target: request.target,
+                preset,
                 providers,
               });
-              const runtimeMode = yield* resolveRuntimeMode(
-                parent.thread.runtimeMode,
-                request.runtimeMode,
+              const { runtimeMode, interactionMode } = yield* resolvePresetModes({
+                parentRuntimeMode: parent.thread.runtimeMode,
+                parentInteractionMode: parent.thread.interactionMode,
+                requestedRuntimeMode: request.runtimeMode,
+                requestedInteractionMode: request.interactionMode,
+                preset,
                 target,
-              );
-              const interactionMode = yield* resolveInteractionMode(
-                parent.thread.interactionMode,
-                request.interactionMode,
-              );
+              });
               const threadId = stableThreadId({
                 scope,
                 requestKey: key,
@@ -2559,6 +2727,9 @@ const make = Effect.gen(function* () {
                   interactionMode,
                   branch: parent.thread.branch,
                   worktreePath: parent.thread.worktreePath,
+                  ...(preset === undefined
+                    ? {}
+                    : { rolePreset: { id: preset.id, label: preset.label } }),
                 })
                 .pipe(
                   Effect.mapError((error) =>

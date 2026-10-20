@@ -2271,6 +2271,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       interactionMode: command.interactionMode,
       branch: command.branch,
       worktreePath: command.worktreePath,
+      ...(command.rolePreset === undefined ? {} : { rolePreset: command.rolePreset }),
       activeProviderThreadId: null,
       pullRequests: [],
       lineage: {
@@ -3016,6 +3017,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 : {}),
             ...(command.branch === undefined ? {} : { branch: command.branch }),
             ...(command.worktreePath === undefined ? {} : { worktreePath: command.worktreePath }),
+            ...(command.rolePreset === undefined ? {} : { rolePreset: command.rolePreset }),
             ...(command.linkedPullRequest === undefined
               ? {}
               : {
@@ -6764,6 +6766,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
+        ...(command.rolePreset === undefined ? {} : { rolePreset: command.rolePreset }),
         ...(command.workspaceStrategy === undefined ? {} : { branch: null, worktreePath: null }),
       };
       const task: OrchestrationV2Subagent = {

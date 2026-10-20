@@ -1,6 +1,8 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import type { ProviderAdapterV2Role } from "@t3tools/provider-core/server/ProviderAdapter";
+import { roleInstructionsBlock } from "../orchestration-v2/RoleInstructions.ts";
 
 import {
   T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
@@ -224,4 +226,36 @@ export function buildCodexAdditionalContext(
     },
     ...(tools ? { t3_code_tools: { kind: "application", value: tools } } : {}),
   };
+}
+
+function splitUtf8(text: string, maxBytes: number): ReadonlyArray<string> {
+  const chunks: Array<string> = [];
+  let chunk = "";
+  let bytes = 0;
+  for (const char of text) {
+    const size = Buffer.byteLength(char);
+    if (bytes + size > maxBytes) {
+      chunks.push(chunk);
+      chunk = "";
+      bytes = 0;
+    }
+    chunk += char;
+    bytes += size;
+  }
+  return chunk === "" ? chunks : [...chunks, chunk];
+}
+
+/** One entry per 4,000 bytes, numbered so Codex keeps them in order. */
+export function buildCodexRoleContext(
+  role: ProviderAdapterV2Role,
+): Record<string, V2TurnStartParams__AdditionalContextEntry> {
+  if (role.instructions === "") return {};
+  return Object.fromEntries(
+    splitUtf8(roleInstructionsBlock(role), CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES).map(
+      (value, index) => [
+        `t3_code_role_${String(index + 1).padStart(2, "0")}`,
+        { kind: "application" as const, value },
+      ],
+    ),
+  );
 }

@@ -77,6 +77,7 @@ import {
   SquarePenIcon,
   SunIcon,
   TextSearchIcon,
+  TicketIcon,
 } from "lucide-react";
 import { requestThreadFindOpen } from "./chat/threadFindActionBus";
 import {
@@ -137,6 +138,8 @@ import {
 import { useProjects, useServerConfigs, useThreadShells, waitForProject } from "../state/entities";
 import { useThreadSearch } from "../state/queries";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
+import { useStartTicketThread } from "../hooks/useStartTicketThread";
+import { readEnvironmentSupportsRolePresets } from "../state/agentRoles";
 import {
   appendBrowsePathSegment,
   ensureBrowseDirectoryPath,
@@ -745,6 +748,7 @@ function OpenCommandPaletteDialog(props: {
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
+  const startTicketThread = useStartTicketThread();
   const paletteRouteTarget = useThreadRouteTarget();
   const projects = useProjects();
   const referenceThreadRef =
@@ -1605,6 +1609,26 @@ function OpenCommandPaletteDialog(props: {
           });
         },
       });
+      const ticketProjectRef = contextualProjectRef;
+      if (
+        ticketProjectRef !== null &&
+        readEnvironmentSupportsRolePresets(ticketProjectRef.environmentId)
+      ) {
+        actionItems.push({
+          kind: "action",
+          value: "action:new-ticket",
+          searchTerms: ["new ticket", "ticket", "linear", "issue", "file a ticket"],
+          title: (
+            <>
+              New ticket in <span className="font-semibold">{activeProjectTitle}</span>
+            </>
+          ),
+          icon: <TicketIcon className={ITEM_ICON_CLASS} />,
+          run: async () => {
+            await startTicketThread(ticketProjectRef);
+          },
+        });
+      }
     }
 
     actionItems.push({

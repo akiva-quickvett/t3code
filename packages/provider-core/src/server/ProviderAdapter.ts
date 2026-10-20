@@ -412,6 +412,15 @@ export interface ProviderAdapterV2EnsureThreadInput {
   readonly existingProviderThread?: OrchestrationV2ProviderThread;
 }
 
+/** The thread's role preset, resolved by the server for this turn. */
+export interface ProviderAdapterV2Role {
+  readonly presetId: string;
+  readonly label: string;
+  readonly instructions: string;
+  /** Claude only; other adapters ignore it. */
+  readonly contextWindow?: "200k" | "1m";
+}
+
 export interface ProviderAdapterV2TurnInput {
   readonly appThread: OrchestrationV2AppThread;
   readonly threadId: ThreadId;
@@ -427,6 +436,8 @@ export interface ProviderAdapterV2TurnInput {
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
   readonly appContext?: ReadonlyArray<{ readonly key: string; readonly text: string }>;
+  /** Set only for a session whose `readsRoleInstructions` is true. */
+  readonly role?: ProviderAdapterV2Role;
 }
 
 export interface ProviderAdapterV2SteerInput {
@@ -566,6 +577,11 @@ export interface ProviderAdapterV2SessionRuntime {
    * thread keeps showing Waiting.
    */
   readonly backgroundTasksEndWithProcess?: true;
+  /**
+   * The adapter delivers `ProviderAdapterV2TurnInput.role` outside the prompt.
+   * Without it, turn start prefixes the role to the provider's prompt instead.
+   */
+  readonly readsRoleInstructions?: true;
   readonly getModelContextWindow?: (
     modelSelection: ModelSelection,
     cwd?: string | null,

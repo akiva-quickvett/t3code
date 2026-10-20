@@ -458,6 +458,25 @@ describe("CodexAdapterV2 runtime policy", () => {
     }),
   );
 
+  it.effect("sends the thread's role as application context on every turn", () =>
+    Effect.gen(function* () {
+      const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "native-role",
+        codexInput: [{ type: "text", text: "review it" }],
+        runtimePolicy: { runtimeMode: "full-access", interactionMode: "default", cwd: null },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        role: { presetId: "review-t1", label: "Reviewer", instructions: "Never edit code." },
+      });
+      assert.deepEqual(params.additionalContext, {
+        t3_code_role_01: {
+          kind: "application",
+          value:
+            '<t3_role_instructions role="review-t1">\nNever edit code.\n</t3_role_instructions>',
+        },
+      });
+    }),
+  );
+
   it.effect("sends MCP app model context as untrusted Codex context", () =>
     Effect.gen(function* () {
       const policy = { runtimeMode: "full-access", interactionMode: "default", cwd: null } as const;

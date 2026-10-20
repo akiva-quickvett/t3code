@@ -10,6 +10,14 @@ import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.t
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
+import {
+  buildAgentRolePresetList,
+  findAgentRolePresetIn,
+  unknownAgentRolePresetMessage,
+} from "../../../agentRoles/AgentRolePresetService.ts";
+import { narrowerInteractionMode, narrowerRuntimeMode } from "../../OrchestratorMcpService.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -44,6 +52,27 @@ const assertProjectWorktree = Effect.fn("mcp.assertProjectWorktree")(function* (
       message:
         "worktreePath must be one of the project's git worktrees. t3_worktree_list shows them.",
     });
+});
+
+const requireLaunchPreset = Effect.fn("mcp.requireLaunchPreset")(function* (
+  projectId: ProjectId,
+  presetId: string,
+) {
+  const settings = yield* ServerSettings.ServerSettingsService.pipe(
+    Effect.flatMap((service) => service.getSettings),
+    Effect.mapError(unavailable),
+  );
+  const providers = yield* ProviderRegistry.ProviderRegistry.pipe(
+    Effect.flatMap((registry) => registry.getProviders),
+  );
+  const { presets } = buildAgentRolePresetList({ settings, providers, projectId });
+  const preset = findAgentRolePresetIn(presets, presetId);
+  if (preset === undefined)
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: unknownAgentRolePresetMessage(presetId, presets),
+    });
+  return preset;
 });
 
 const access = Effect.gen(function* () {
@@ -122,8 +151,20 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 }),
             ),
           );
+        const preset =
+          input.preset === undefined
+            ? undefined
+            : yield* requireLaunchPreset(projectId, input.preset);
+        if (input.modelSelection === undefined && preset?.unavailable != null) {
+          return yield* new OrchestratorMcpFailure({
+            code:
+              preset.unavailable.kind === "model" ? "model_unavailable" : "provider_unavailable",
+            message: `Role preset ${preset.id} cannot start: ${preset.unavailable.reason}`,
+          });
+        }
         const modelSelection =
           input.modelSelection ??
+          preset?.resolvedModelSelection ??
           caller?.modelSelection ??
           (yield* readProject)?.defaultModelSelection ??
           undefined;
@@ -139,9 +180,17 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           projectId,
           title: input.title,
           modelSelection,
-          runtimeMode,
-          interactionMode,
+          // A preset's modes stay under the caller's; modes passed explicitly win.
+          runtimeMode:
+            input.runtimeMode === undefined && preset?.runtimeMode !== undefined
+              ? narrowerRuntimeMode(runtimeMode, preset.runtimeMode)
+              : runtimeMode,
+          interactionMode:
+            input.interactionMode === undefined && preset?.interactionMode !== undefined
+              ? narrowerInteractionMode(interactionMode, preset.interactionMode)
+              : interactionMode,
           workspaceStrategy: input.workspaceStrategy ?? { type: "root" },
+          ...(preset === undefined ? {} : { rolePreset: { id: preset.id, label: preset.label } }),
           ...(input.message === undefined && attachments.length === 0
             ? {}
             : {
