@@ -69,7 +69,10 @@ import {
   createOrchestrationV2TurnItemVisibility,
   isOrchestrationV2SupersededInterrupt,
 } from "@t3tools/shared/orchestrationV2Timeline";
-import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  backgroundWorkHoldsSnooze,
+  derivePendingBackgroundWork,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -170,6 +173,39 @@ export type ProjectionLimitRecoveryCandidate = Pick<
   | "limitRecovery"
   | "snoozedUntil"
 >;
+
+/** What decides whether a thread is parked: snoozed or settled, with nothing active. */
+export interface ProjectionThreadParking {
+  readonly id: ThreadId;
+  readonly projectId: OrchestrationV2AppThread["projectId"];
+  readonly worktreePath: string | null;
+  readonly archived: boolean;
+  readonly settled: boolean;
+  readonly snoozedUntil: DateTime.Utc | null;
+  readonly snoozedAt: DateTime.Utc | null;
+  readonly snoozeWhenIdle: NonNullable<OrchestrationV2AppThread["snoozeWhenIdle"]> | null;
+  readonly status: OrchestrationV2ShellThreadStatus;
+  readonly latestRunCompletedAt: DateTime.Utc | null;
+  /** Bumped when the thread settles, so it says when a settled thread parked. */
+  readonly updatedAt: DateTime.Utc;
+  /** Snoozed by limit recovery until its reset, which a tree snooze or wake leaves alone. */
+  readonly limitParked: boolean;
+  /**
+   * A run that is active or queued, a pending request, or background work
+   * whose result the agent waits for (a subagent or monitor; not a shell
+   * command such as a dev server, nor a pull request watch, which wakes it).
+   */
+  readonly busy: boolean;
+}
+
+/**
+ * `treeOf` is the thread and every thread under it in the agent tree; the
+ * others are the threads on a worktree, or those waiting to snooze when idle.
+ */
+export type ProjectionParkingScope =
+  | { readonly treeOf: ThreadId }
+  | { readonly worktreePath: string }
+  | { readonly snoozeWhenIdle: true };
 
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
@@ -428,6 +464,10 @@ export interface ProjectionStoreV2Shape {
     ReadonlyArray<{ readonly threadId: ThreadId; readonly worktreePath: string }>,
     ProjectionStoreV2Error
   >;
+  /** Deleted threads are left out; archived ones are listed as such. */
+  readonly getThreadParking: (
+    scope: ProjectionParkingScope,
+  ) => Effect.Effect<ReadonlyArray<ProjectionThreadParking>, ProjectionStoreV2Error>;
   /** These threads and every thread they launched or delegated to, transitively, with run activity. */
   readonly getWorkTreeNodes: (
     rootThreadIds: ReadonlyArray<ThreadId>,
@@ -1583,6 +1623,9 @@ export function threadShellFromProjection(
     unsettledAt: projection.thread.unsettledAt ?? null,
     snoozedUntil: projection.thread.snoozedUntil ?? null,
     snoozedAt: projection.thread.snoozedAt ?? null,
+    ...(projection.thread.snoozeWhenIdle == null
+      ? {}
+      : { snoozeWhenIdle: projection.thread.snoozeWhenIdle }),
     pinnedAt: projection.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
@@ -1828,6 +1871,9 @@ function shellFromState(input: {
     unsettledAt: input.state.thread.unsettledAt ?? null,
     snoozedUntil: input.state.thread.snoozedUntil ?? null,
     snoozedAt: input.state.thread.snoozedAt ?? null,
+    ...(input.state.thread.snoozeWhenIdle == null
+      ? {}
+      : { snoozeWhenIdle: input.state.thread.snoozeWhenIdle }),
     pinnedAt: input.state.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
@@ -5770,6 +5816,102 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
       );
 
+    const getThreadParking: ProjectionStoreV2Shape["getThreadParking"] = (scope) =>
+      Effect.gen(function* () {
+        const parent = sql.literal(PROJECTION_THREAD_TREE_PARENT);
+        const rows = yield* sql<{
+          readonly payload_json: string;
+          readonly latest_run_id: string | null;
+          readonly latest_run_status: string | null;
+          readonly latest_run_completed_at: string | null;
+          readonly has_work: number;
+          readonly has_request: number;
+        }>`
+          ${
+            "treeOf" in scope
+              ? sql`WITH RECURSIVE tree(id) AS (
+                  SELECT thread_id FROM orchestration_v2_projection_threads
+                  WHERE thread_id = ${scope.treeOf} AND deleted_at IS NULL
+                  UNION
+                  SELECT thread_id FROM tree, orchestration_v2_projection_threads
+                  WHERE ${parent} = +tree.id AND deleted_at IS NULL
+                )`
+              : sql``
+          }
+          SELECT t.payload_json,
+            r.run_id AS latest_run_id,
+            r.status AS latest_run_status,
+            r.completed_at AS latest_run_completed_at,
+            EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runs work
+              WHERE work.thread_id = t.thread_id
+                AND work.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+            ) AS has_work,
+            EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runtime_requests request
+              WHERE request.thread_id = t.thread_id AND request.status = 'pending'
+            ) AS has_request
+          FROM orchestration_v2_projection_threads t
+          LEFT JOIN orchestration_v2_projection_runs r ON r.run_id = (
+            SELECT latest.run_id FROM orchestration_v2_projection_runs latest
+            WHERE latest.thread_id = t.thread_id
+            ORDER BY latest.ordinal DESC, latest.run_id DESC
+            LIMIT 1
+          )
+          WHERE t.deleted_at IS NULL AND ${
+            "treeOf" in scope
+              ? sql`t.thread_id IN (SELECT id FROM tree)`
+              : "worktreePath" in scope
+                ? sql`json_extract(t.payload_json, '$.worktreePath') = ${scope.worktreePath}`
+                : sql`json_extract(t.payload_json, '$.snoozeWhenIdle') IS NOT NULL`
+          }
+        `;
+        if (rows.length === 0) return [];
+        const threads = yield* Effect.forEach(rows, (row) => decodeThreadPayload(row.payload_json));
+        const threadIds = threads.map((thread) => thread.id);
+        const { providerThreadsByThreadId, pendingTurnItemsByThreadId } =
+          yield* pendingBackgroundDataByThreadId({
+            providerThreadRows: yield* selectShellProviderThreadRows(threadIds),
+            pendingTurnItemRows: yield* selectShellPendingTurnItemRows(threadIds),
+          });
+        return threads.map((thread, index): ProjectionThreadParking => {
+          const row = rows[index]!;
+          const status = shellStatusFromStoredRunStatus(row.latest_run_status);
+          const latestRunId = row.latest_run_id === null ? null : RunId.make(row.latest_run_id);
+          const waitsOnBackground = backgroundWorkHoldsSnooze(
+            derivePendingBackgroundWork({
+              latestRun:
+                latestRunId === null || status === "idle"
+                  ? null
+                  : { id: latestRunId, ordinal: 0, status },
+              providerThreads: providerThreadsByThreadId.get(thread.id) ?? [],
+              turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
+              activeProviderThreadId: thread.activeProviderThreadId,
+              hasActiveRun: row.has_work === 1,
+              pullRequests: thread.pullRequests,
+            }),
+          );
+          return {
+            id: thread.id,
+            projectId: thread.projectId,
+            worktreePath: thread.worktreePath,
+            archived: thread.archivedAt !== null,
+            settled: thread.settledOverride === "settled",
+            snoozedUntil: thread.snoozedUntil ?? null,
+            snoozedAt: thread.snoozedAt ?? null,
+            snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
+            status,
+            latestRunCompletedAt:
+              row.latest_run_completed_at === null
+                ? null
+                : DateTime.makeUnsafe(row.latest_run_completed_at),
+            updatedAt: thread.updatedAt,
+            limitParked: thread.limitRecovery?.snooze === true && thread.snoozedUntil != null,
+            busy: row.has_work === 1 || row.has_request === 1 || waitsOnBackground,
+          };
+        });
+      }).pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
+
     const getWorkTreeNodes: ProjectionStoreV2Shape["getWorkTreeNodes"] = (rootThreadIds) =>
       Effect.gen(function* () {
         if (rootThreadIds.length === 0) return [];
@@ -6171,6 +6313,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThreadsWithPullRequests,
       getWorkTreeNodes,
       getThreadWorktreePaths,
+      getThreadParking,
       getThreadProjection,
       getTurnStartContext,
       getTurnStartHistory,
@@ -6332,6 +6475,75 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 : [],
             ),
           ),
+        ),
+      getThreadParking: (scope) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => {
+            const live = [...state.projections.values()].filter(
+              ({ thread }) => thread.deletedAt === null,
+            );
+            const inScope = (thread: OrchestrationV2AppThread) =>
+              "worktreePath" in scope
+                ? thread.worktreePath === scope.worktreePath
+                : "snoozeWhenIdle" in scope
+                  ? thread.snoozeWhenIdle != null
+                  : true;
+            const tree =
+              "treeOf" in scope
+                ? new Set(
+                    workTreeOf(
+                      scope.treeOf,
+                      live.map(({ thread }) => ({
+                        threadId: thread.id,
+                        parentThreadId:
+                          thread.lineage.supervisorThreadId ??
+                          (thread.lineage.relationshipToParent === "subagent"
+                            ? thread.lineage.parentThreadId
+                            : null),
+                        rolePresetId: null,
+                        running: false,
+                        latestRunRequestedAtMs: null,
+                        latestRunCompletedAtMs: null,
+                      })),
+                    ).map((node) => node.threadId),
+                  )
+                : null;
+            return live
+              .filter(({ thread }) => (tree === null ? inScope(thread) : tree.has(thread.id)))
+              .map((projection): ProjectionThreadParking => {
+                const { thread, runs, runtimeRequests } = projection;
+                const latest = runs.toSorted((left, right) => right.ordinal - left.ordinal)[0];
+                const pending = runtimeRequests.some((request) => request.status === "pending");
+                const waitsOnBackground = backgroundWorkHoldsSnooze(
+                  derivePendingBackgroundWork({
+                    latestRun: latest ?? null,
+                    providerThreads: projection.providerThreads,
+                    turnItems: projection.turnItems,
+                    activeProviderThreadId: thread.activeProviderThreadId,
+                    runs,
+                    pullRequests: thread.pullRequests,
+                  }),
+                );
+                return {
+                  id: thread.id,
+                  projectId: thread.projectId,
+                  worktreePath: thread.worktreePath,
+                  archived: thread.archivedAt !== null,
+                  settled: thread.settledOverride === "settled",
+                  snoozedUntil: thread.snoozedUntil ?? null,
+                  snoozedAt: thread.snoozedAt ?? null,
+                  snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
+                  status: shellStatusFromStoredRunStatus(latest?.status ?? null),
+                  latestRunCompletedAt: latest?.completedAt ?? null,
+                  updatedAt: thread.updatedAt,
+                  limitParked: thread.limitRecovery?.snooze === true && thread.snoozedUntil != null,
+                  busy:
+                    pending ||
+                    waitsOnBackground ||
+                    runs.some((run) => activeRunStatuses.has(run.status)),
+                };
+              });
+          }),
         ),
       getWorkTreeNodes: (rootThreadIds) =>
         Ref.get(replayState).pipe(

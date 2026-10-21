@@ -1,6 +1,8 @@
 import {
   EnvironmentId,
   NodeId,
+  PodRuntimeId,
+  type PodRuntimeSnapshot,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
   ProjectId,
@@ -27,10 +29,13 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { OrchestratorDispatchError } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
+import { layerWithoutPods } from "../pod/testkit/layerWithoutPods.ts";
+import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { liveThreadShell } from "./McpToolAccess.testkit.ts";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(layerWithoutPods),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
@@ -684,5 +689,54 @@ it("sendToThread reports why the orchestrator refused the message", async () => 
     expect(failure.message).toBe(
       `Unable to send to thread ${targetThreadId}: Provider session provider-session-dead is not active.`,
     );
+  }).pipe(Effect.provide(layer), Effect.runPromise);
+});
+
+it("listThreads tells which pod each thread's worktree runs in, and whether it is parked", async () => {
+  const podWorktree = "/work/pods/feature";
+  const inPod = { ...liveThreadShell(childThreadId), projectId, worktreePath: podWorktree };
+  const onHost = { ...liveThreadShell(parentThreadId), projectId };
+  const pod: PodRuntimeSnapshot = {
+    id: PodRuntimeId.make("pod-mcplist1"),
+    projectId,
+    worktreePath: podWorktree,
+    state: "stopped",
+    services: [],
+    image: "docker:27-cli",
+    startedAt: null,
+    lastError: null,
+    containerIds: [],
+    volumeIds: [],
+    updatedAt: "2026-08-04T12:00:00.000Z",
+    parked: true,
+  };
+  const layer = OrchestratorMcpService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(PodRuntimeService.PodRuntimeService)({
+          forPath: (path) => Effect.succeed(path === podWorktree ? pod : undefined),
+        }),
+        Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+        Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          listProjectThreads: () => Effect.succeed([inPod, onHost]),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+        NodeCrypto.layer,
+      ),
+    ),
+  );
+
+  await Effect.gen(function* () {
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    const result = yield* service.listThreads({ ...makeScope(), thread: undefined }, { projectId });
+    const byId = new Map(result.threads.map((thread) => [thread.threadId, thread]));
+    expect(byId.get(childThreadId)?.pod).toEqual({ podId: pod.id, state: "stopped", parked: true });
+    expect(byId.get(parentThreadId)).not.toHaveProperty("pod");
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });

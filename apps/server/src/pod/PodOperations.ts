@@ -1,4 +1,4 @@
-import type { PodRuntimeId, PodRuntimeOperation, T3ProjectFilePod } from "@t3tools/contracts";
+import type { PodRuntimeId, T3ProjectFilePod } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -17,6 +17,7 @@ import {
   type PodPlan,
   podSafeEnv,
 } from "./PodContainerPlan.ts";
+import type { PodInternalOperation } from "./PodRuntimeLifecycle.ts";
 
 /** A pod operation stopped at a step; the message is shown on the pod as its last error. */
 export class PodStepError extends Schema.TaggedError<PodStepError>()("PodStepError", {
@@ -53,6 +54,18 @@ export interface PodOperationContext {
   readonly checkHostPorts: Effect.Effect<void, PodStepError>;
   /** In hostname mode: the proxy's network, which the daemon joins so the proxy reaches its services. */
   readonly proxyNetwork: string | null;
+  /** What the pod's record says it was built with; a start finds every one of them or fails. */
+  readonly recorded: {
+    readonly containerIds: ReadonlyArray<string>;
+    readonly volumeIds: ReadonlyArray<string>;
+  };
+  /** Fails when the resolver the daemon was pinned to has moved since it was built. */
+  readonly checkDnsPin: Effect.Effect<void, PodStepError>;
+  /**
+   * Whether a stop lists the stack's containers anew. A pod that failed keeps
+   * the list from before: what it lacks now is what that list must still name.
+   */
+  readonly recordsStack: boolean;
 }
 
 export interface PodOperationResult {
@@ -255,8 +268,16 @@ const trustProxyCa = (context: PodOperationContext, agentId: string) =>
       ),
     );
 
-/** Creates whatever of the pod is missing and starts it; `fresh` also brings the stack up. */
-const bringUp = (context: PodOperationContext, fresh: boolean) =>
+/**
+ * Creates whatever of the pod is missing and starts it; `fresh` also brings
+ * the stack up, and `checkStack` first confirms a start finds the stack's
+ * containers that its last stop recorded.
+ */
+const bringUp = (
+  context: PodOperationContext,
+  fresh: boolean,
+  options: { readonly checkStack?: boolean } = {},
+) =>
   Effect.gen(function* () {
     const found = yield* podContainers(context);
     yield* context.host.ensureNetwork(context.network).pipe(step("Creating the pods network"));
@@ -282,6 +303,8 @@ const bringUp = (context: PodOperationContext, fresh: boolean) =>
         .pipe(step("Joining the hostname proxy's network"));
     yield* startIfStopped(context, dindId, found.dind?.status, "Starting the pod's Docker daemon");
     yield* awaitDaemon(context, dindId);
+    if (options.checkStack === true && found.dind?.status !== "paused")
+      yield* checkStack(context, dindId);
     const agentId = yield* ensureContainer(
       context,
       found.agent,
@@ -369,6 +392,8 @@ const stop = (context: PodOperationContext) =>
       if (container?.status === "paused")
         yield* context.host.unpause(container.id).pipe(step("Unfreezing the pod"));
     const found = yield* podContainers(context);
+    if (found.dind?.status === "running" && context.recordsStack)
+      yield* recordStack(context, found.dind.id);
     const agent = composeReachable(found);
     if (agent !== undefined)
       yield* execIn(
@@ -389,24 +414,204 @@ const stop = (context: PodOperationContext) =>
       yield* context.host
         .stop(found.dind.id, DIND_STOP_SECONDS)
         .pipe(step("Stopping the pod's Docker daemon"));
-    return {
-      containerIds: [found.dind?.id, found.agent?.id].filter((id) => id !== undefined),
-      volumeIds: found.volume === undefined ? [] : [found.volume.name],
-    };
+    return keptRecord(context, found);
   });
+
+/**
+ * What a stop or freeze records the pod as having. A container or volume the
+ * record names but Docker no longer has stays named, so the next start still
+ * finds it gone and leaves Recreate to the user instead of building it anew.
+ */
+const keptRecord = (
+  context: PodOperationContext,
+  found: {
+    readonly dind: PodContainerInfo | undefined;
+    readonly agent: PodContainerInfo | undefined;
+    readonly volume: { readonly name: string } | undefined;
+  },
+): PodOperationResult => {
+  const containerIds = [found.dind?.id, found.agent?.id].filter((id) => id !== undefined);
+  const volumeIds = found.volume === undefined ? [] : [found.volume.name];
+  const lost =
+    context.recorded.containerIds.some((id) => !containerIds.includes(id)) ||
+    context.recorded.volumeIds.some((name) => !volumeIds.includes(name));
+  return lost ? context.recorded : { containerIds, volumeIds };
+};
+
+/** Agent first, so nothing runs against a daemon that is already frozen. */
+const freeze = (context: PodOperationContext) =>
+  Effect.gen(function* () {
+    const found = yield* podContainers(context);
+    if (found.agent?.status === "running")
+      yield* context.host.pause(found.agent.id).pipe(step("Freezing the agent container"));
+    if (found.dind?.status === "running")
+      yield* context.host.pause(found.dind.id).pipe(step("Freezing the pod's Docker daemon"));
+    return keptRecord(context, found);
+  });
+
+const CHECK_CONTAINERS_STEP = "Checking the pod's containers";
+
+/**
+ * A start resumes exactly what was stopped and never builds anything again, so
+ * a container or volume gone since is the user's to decide about: Recreate.
+ */
+const verifyRecorded = (context: PodOperationContext) =>
+  Effect.gen(function* () {
+    const { containerIds, volumeIds } = context.recorded;
+    if (containerIds.length === 0 && volumeIds.length === 0) return;
+    const listed = yield* context.host.list(POD_LABEL).pipe(step(CHECK_CONTAINERS_STEP));
+    const owned = (labels: Readonly<Record<string, string>>) =>
+      labels[POD_LABEL] === context.podId &&
+      labels[POD_ENVIRONMENT_LABEL] === context.environmentId;
+    const containers = new Set(
+      listed.containers.filter((container) => owned(container.labels)).map((c) => c.id),
+    );
+    const volumes = new Set(
+      listed.volumes.filter((volume) => owned(volume.labels)).map((volume) => volume.name),
+    );
+    const missing = [
+      ...containerIds
+        .filter((id) => !containers.has(id))
+        .map((id) => `container ${id.slice(0, 12)}`),
+      ...volumeIds.filter((name) => !volumes.has(name)).map((name) => `volume ${name}`),
+    ];
+    if (missing.length > 0)
+      return yield* new PodStepError({
+        step: CHECK_CONTAINERS_STEP,
+        exitCode: null,
+        timedOut: false,
+        daemonMessage: `${missing.join(", ")} recorded for this pod ${missing.length === 1 ? "is" : "are"} gone. Recreate the pod to build it again; its stack's data is lost.`,
+      });
+  });
+
+/** Kept in the daemon's own volume, so it lasts exactly as long as the stack it lists. */
+const STACK_LIST_PATH = "/var/lib/docker/t3-stack-containers";
+
+/**
+ * Run in the daemon container: records the stack's compose service containers
+ * by name. One-off and `--rm` containers, which the daemon may remove on its
+ * own, are left out; names, unlike ids, survive the stack being brought up
+ * again from the pod shell. The old list goes first, so a stop that cannot
+ * write one leaves none, and a start never checks against a list older than
+ * the last stop.
+ */
+const RECORD_STACK_SCRIPT = `rm -f ${STACK_LIST_PATH} && docker ps -a --filter label=com.docker.compose.project --filter label=com.docker.compose.oneoff=False --format '{{.Names}}' > ${STACK_LIST_PATH}.next && mv ${STACK_LIST_PATH}.next ${STACK_LIST_PATH}`;
+
+/**
+ * Prints the names of recorded stack containers that are gone and exits 3.
+ * `compose start` silently skips a service whose container was removed, so
+ * without this a start would report success with part of the stack missing.
+ */
+const CHECK_STACK_SCRIPT = [
+  `[ -r ${STACK_LIST_PATH} ] || exit 0`,
+  "missing=",
+  `while read -r name; do docker inspect --type container "$name" >/dev/null 2>&1 || missing="$missing $name"; done < ${STACK_LIST_PATH}`,
+  '[ -z "$missing" ] && exit 0',
+  'echo "missing:$missing"',
+  "exit 3",
+].join("\n");
+
+const STACK_CHECK_STEP = "Checking the stack's containers";
+
+const recordStack = (context: PodOperationContext, dindId: string) =>
+  context.host.exec(dindId, { command: ["sh", "-c", RECORD_STACK_SCRIPT], timeoutMs: 60_000 }).pipe(
+    Effect.flatMap((result) =>
+      result.exitCode === 0
+        ? Effect.void
+        : Effect.logWarning("could not record the pod's stack containers", {
+            podId: context.podId,
+            exitCode: result.exitCode,
+          }),
+    ),
+    // The next start then checks against the list from the stop before.
+    Effect.catch((error) =>
+      Effect.logWarning("could not record the pod's stack containers", {
+        podId: context.podId,
+        operation: error.operation,
+      }),
+    ),
+  );
+
+const checkStack = (context: PodOperationContext, dindId: string) =>
+  context.host.exec(dindId, { command: ["sh", "-c", CHECK_STACK_SCRIPT], timeoutMs: 60_000 }).pipe(
+    step(STACK_CHECK_STEP),
+    Effect.flatMap((result) => {
+      if (result.exitCode === 0) return Effect.void;
+      const names = result.outputTail.replace(/^.*missing:/, "").trim();
+      return Effect.fail(
+        new PodStepError({
+          step: STACK_CHECK_STEP,
+          exitCode: result.exitCode,
+          timedOut: result.timedOut,
+          daemonMessage:
+            result.exitCode === 3 && names.length > 0
+              ? `the stack's containers ${names} are gone, and compose start cannot bring them back. Recreate the pod, or bring the stack up from the pod shell and Retry.`
+              : null,
+          outputTail: result.outputTail,
+        }),
+      );
+    }),
+  );
+
+const HOSTNAME_PROBE_ATTEMPTS = 10;
+const HOSTNAME_PROBE_STEP = "Checking the pod's hostname";
+
+/**
+ * Asks the proxy for `hostname` from the daemon's own network and resolver, so
+ * it checks the DNS pin, the proxy's route and its certificate together, as the
+ * pod's stack sees them. Any HTTP answer counts: a stack still booting gets a
+ * 502 from the proxy, which still proves the route. The daemon image ships
+ * openssl, which the agent image may not.
+ */
+export const probePodHostname = (host: ContainerHost, dindName: string, hostname: string) =>
+  host
+    .exec(dindName, {
+      command: [
+        "sh",
+        "-c",
+        // IPv4 only: the proxy's DNS answers A queries and leaves AAAA unanswered,
+        // which makes an unpinned lookup time out before it connects.
+        'printf "HEAD / HTTP/1.1\\r\\nHost: %s\\r\\nConnection: close\\r\\n\\r\\n" "$1" | timeout 10 openssl s_client -4 -quiet -connect "$1:443" -servername "$1" 2>/dev/null | head -n 1',
+        "sh",
+        hostname,
+      ],
+      timeoutMs: 30_000,
+    })
+    .pipe(
+      step(HOSTNAME_PROBE_STEP),
+      Effect.flatMap((result) =>
+        result.outputTail.startsWith("HTTP/")
+          ? Effect.void
+          : Effect.fail(
+              new PodStepError({
+                step: HOSTNAME_PROBE_STEP,
+                exitCode: result.exitCode,
+                timedOut: result.timedOut,
+                daemonMessage: `${hostname} does not answer through the hostname proxy.`,
+              }),
+            ),
+      ),
+      // The proxy's certificate for a route it just loaded can take a moment.
+      Effect.retry({ schedule: Schedule.spaced("1 second"), times: HOSTNAME_PROBE_ATTEMPTS - 1 }),
+    );
 
 /** Never `rm`, `down` or `prune` except for the operations whose job that is. */
 export const runPodOperation = (
-  operation: PodRuntimeOperation,
+  operation: PodInternalOperation,
   context: PodOperationContext,
 ): Effect.Effect<PodOperationResult, PodStepError> => {
   switch (operation) {
     case "create":
       return bringUp(context, true);
     case "start":
-      return bringUp(context, false);
+      return verifyRecorded(context).pipe(
+        Effect.andThen(context.checkDnsPin),
+        Effect.andThen(bringUp(context, false, { checkStack: true })),
+      );
     case "stop":
       return stop(context);
+    case "freeze":
+      return freeze(context);
     case "recreate":
       return removeAll(context).pipe(Effect.andThen(bringUp(context, true)));
     case "recreateAgentContainer":

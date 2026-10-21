@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   POD_RUNTIME_REQUESTS,
+  POD_RUNTIME_SHELL_STATES,
   podRuntimeRetryRequest,
   type PodRuntimeRequest,
   type PodRuntimeSnapshot,
@@ -111,6 +112,15 @@ export function podRuntimeStatePresentation(state: PodRuntimeState) {
   return STATE_PRESENTATION[state];
 }
 
+/** The pod's state in a sentence, with why it failed or why it is stopped. */
+export function podRuntimeTitle(pod: PodRuntimeSnapshot): string {
+  const { label } = podRuntimeStatePresentation(pod.state);
+  if (pod.lastError !== null) return `Pod ${label}: ${pod.lastError.message}`;
+  return pod.parked === true
+    ? `Pod ${label} while its threads are snoozed or settled; it starts when one wakes`
+    : `Pod ${label}`;
+}
+
 export type PodRuntimeAction =
   | {
       readonly kind: "request";
@@ -144,7 +154,8 @@ export function podRuntimeActions(pod: PodRuntimeSnapshot): ReadonlyArray<PodRun
   const failed = pod.state === "start_failed" || pod.state === "stop_failed";
   if (failed && retry !== null)
     actions.push({ kind: "request", request: retry, label: "Retry", destructive: false });
-  if (pod.state === "running") actions.push({ kind: "openShell", label: "Open pod shell" });
+  if (POD_RUNTIME_SHELL_STATES.includes(pod.state))
+    actions.push({ kind: "openShell", label: "Open pod shell" });
   for (const request of Object.keys(POD_RUNTIME_REQUESTS) as PodRuntimeRequest[]) {
     if (failed && request === retry) continue;
     if (!POD_RUNTIME_REQUESTS[request].from.includes(pod.state)) continue;
@@ -164,4 +175,23 @@ export function podRuntimeActions(pod: PodRuntimeSnapshot): ReadonlyArray<PodRun
       force: true,
     });
   return actions;
+}
+
+/**
+ * What the banner on a failed pod's threads offers: Retry, the shell to look
+ * inside, and Recreate as the last resort. Null while the pod has not failed.
+ */
+export function podFailureActions(pod: PodRuntimeSnapshot): ReadonlyArray<PodRuntimeAction> | null {
+  if ((pod.state !== "start_failed" && pod.state !== "stop_failed") || pod.lastError === null)
+    return null;
+  return [
+    {
+      kind: "request",
+      request: podRuntimeRetryRequest(pod.lastError),
+      label: "Retry",
+      destructive: false,
+    },
+    { kind: "openShell", label: "Open pod shell" },
+    { kind: "request", request: "recreate", label: REQUEST_LABELS.recreate, destructive: true },
+  ];
 }

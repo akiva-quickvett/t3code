@@ -13,6 +13,7 @@ import {
   EnvironmentAuthorizationError,
   EnvironmentId,
   type ScopedThreadRef,
+  type ThreadSnoozeScope,
   ThreadId,
   sessionGrantsScope,
   WorktreePodTeardownError,
@@ -42,6 +43,7 @@ import {
   readEnvironmentSupportsActiveReorder,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
+  readEnvironmentSupportsSnoozeTree,
   readEnvironmentSupportsVisitedTracking,
   readEnvironmentThreadRefs,
   readProject,
@@ -108,6 +110,25 @@ export class ThreadSnoozeBlockedError extends Schema.TaggedError<ThreadSnoozeBlo
   override get message(): string {
     return "This thread is waiting on you. Respond to the pending request before snoozing it.";
   }
+}
+
+export interface ThreadSnoozeOptions {
+  /** Defaults to the whole agent tree where the server supports it. */
+  readonly scope?: ThreadSnoozeScope;
+  /** Waits for active work to end instead of refusing. */
+  readonly whenIdle?: boolean;
+}
+
+/** Servers without snooze trees get today's single-thread command, unchanged. */
+function snoozeScopeInput(
+  environmentId: EnvironmentId,
+  options: ThreadSnoozeOptions,
+): { readonly scope?: ThreadSnoozeScope; readonly whenIdle?: true } {
+  if (!readEnvironmentSupportsSnoozeTree(environmentId)) return {};
+  return {
+    scope: options.scope ?? ("tree" as const),
+    ...(options.whenIdle === true ? { whenIdle: true } : {}),
+  };
 }
 
 function topOfPinnedRunOrderKey(): string | undefined {
@@ -885,7 +906,7 @@ export function useThreadActions() {
     });
   };
 
-  const unsnoozeThread = async (target: ScopedThreadRef) => {
+  const unsnoozeThread = async (target: ScopedThreadRef, options: ThreadSnoozeOptions = {}) => {
     if (!readEnvironmentSupportsSnooze(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
@@ -899,11 +920,19 @@ export function useThreadActions() {
     ThreadUndo.invalidate("snooze", scopedThreadKey(target));
     return unsnoozeThreadMutation({
       environmentId: target.environmentId,
-      input: { threadId: target.threadId, reason: "user" },
+      input: {
+        threadId: target.threadId,
+        reason: "user",
+        ...snoozeScopeInput(target.environmentId, options),
+      },
     });
   };
 
-  const snoozeThread = async (target: ScopedThreadRef, snoozedUntil: string) => {
+  const snoozeThread = async (
+    target: ScopedThreadRef,
+    snoozedUntil: string,
+    options: ThreadSnoozeOptions = {},
+  ) => {
     if (!readEnvironmentSupportsSnooze(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
@@ -915,7 +944,12 @@ export function useThreadActions() {
       );
     }
     const resolved = resolveThreadTarget(target);
-    if (resolved && !canSnooze(resolved.thread, { now: new Date().toISOString() })) {
+    const scope = snoozeScopeInput(target.environmentId, options);
+    if (
+      scope.whenIdle !== true &&
+      resolved &&
+      !canSnooze(resolved.thread, { now: new Date().toISOString() })
+    ) {
       return AsyncResult.failure(
         Cause.fail(
           new ThreadSnoozeBlockedError({
@@ -928,7 +962,7 @@ export function useThreadActions() {
     const action = ThreadUndo.begin("snooze", scopedThreadKey(target));
     const result = await snoozeThreadMutation({
       environmentId: target.environmentId,
-      input: { threadId: target.threadId, snoozedUntil },
+      input: { threadId: target.threadId, snoozedUntil, ...scope },
     });
     if (result._tag !== "Success") {
       action.finish();
@@ -937,7 +971,7 @@ export function useThreadActions() {
     showThreadUndoNotice({
       action: "Snoozed",
       claim: action,
-      undo: () => unsnoozeThread(target),
+      undo: () => unsnoozeThread(target, { scope: options.scope ?? "tree" }),
       failureTitle: "Failed to wake thread",
     });
     return result;

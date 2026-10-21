@@ -1,6 +1,7 @@
 import {
   podRuntimeActions,
   podRuntimeStatePresentation,
+  podRuntimeTitle,
   podServiceLinks,
   type PodRuntimeTone,
 } from "@t3tools/client-runtime/state/pod-runtime";
@@ -24,11 +25,6 @@ const TONE_VARIANT: Readonly<Record<PodRuntimeTone, "success" | "info" | "second
   failed: "error",
 };
 
-function podTitle(pod: PodRuntimeSnapshot) {
-  const { label } = podRuntimeStatePresentation(pod.state);
-  return pod.lastError === null ? `Pod ${label}` : `Pod ${label}: ${pod.lastError.message}`;
-}
-
 function PodChipMenu(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId | null;
@@ -49,8 +45,8 @@ function PodChipMenu(props: {
             render={<button type="button" />}
             variant={TONE_VARIANT[presentation.tone]}
             size="sm"
-            title={podTitle(props.pod)}
-            aria-label={podTitle(props.pod)}
+            title={podRuntimeTitle(props.pod)}
+            aria-label={podRuntimeTitle(props.pod)}
           />
         }
       >
@@ -127,12 +123,16 @@ export function PodChip(props: {
     <Tooltip>
       <TooltipTrigger
         render={
-          <Badge variant={TONE_VARIANT[presentation.tone]} size="sm" aria-label={podTitle(pod)}>
+          <Badge
+            variant={TONE_VARIANT[presentation.tone]}
+            size="sm"
+            aria-label={podRuntimeTitle(pod)}
+          >
             <BoxIcon />
           </Badge>
         }
       />
-      <TooltipPopup side="top">{podTitle(pod)}</TooltipPopup>
+      <TooltipPopup side="top">{podRuntimeTitle(pod)}</TooltipPopup>
     </Tooltip>
   );
 }

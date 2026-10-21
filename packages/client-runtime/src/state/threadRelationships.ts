@@ -465,3 +465,34 @@ export function agentTreeAncestorIds(
   }
   return ancestors;
 }
+
+/**
+ * Every thread under `root` in its environment's agent tree, nearest first:
+ * what a tree snooze or wake covers. Each thread appears once, even when the
+ * lineage data has a cycle.
+ */
+export function agentTreeDescendants<T extends AgentTreeThread>(
+  root: Pick<AgentTreeThread, "environmentId" | "id">,
+  threads: ReadonlyArray<T>,
+): ReadonlyArray<T> {
+  const childrenById = new Map<ThreadId, T[]>();
+  for (const thread of threads) {
+    if (thread.environmentId !== root.environmentId) continue;
+    const parentThreadId = agentTreeParentThreadId(thread);
+    if (parentThreadId === null || parentThreadId === thread.id) continue;
+    const siblings = childrenById.get(parentThreadId);
+    if (siblings === undefined) childrenById.set(parentThreadId, [thread]);
+    else siblings.push(thread);
+  }
+  const seen = new Set<ThreadId>([root.id]);
+  const descendants: T[] = [];
+  for (let index = -1; index < descendants.length; index += 1) {
+    const parentId = index < 0 ? root.id : descendants[index]!.id;
+    for (const child of childrenById.get(parentId) ?? []) {
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
+      descendants.push(child);
+    }
+  }
+  return descendants;
+}

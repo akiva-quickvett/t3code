@@ -434,6 +434,8 @@ export function createThreadEnvironmentAtoms<R, E>(
       unsettledAt: thread.settledOverride === "active" ? (thread.unsettledAt ?? null) : now,
     })),
     snooze: optimistic.wrap(commands.snooze, (thread, input, now, accepted) =>
+      // A snooze when idle may only record a deferral; the server decides which.
+      input.whenIdle === true ||
       (!accepted &&
         (thread.pendingRuntimeRequest !== null ||
           ["preparing", "queued", "starting"].includes(thread.status))) ||
@@ -450,6 +452,7 @@ export function createThreadEnvironmentAtoms<R, E>(
       ...thread,
       snoozedUntil: null,
       snoozedAt: null,
+      snoozeWhenIdle: null,
     })),
     setAutoSettle: optimistic.wrap(commands.setAutoSettle, (thread, input, now) => ({
       ...thread,

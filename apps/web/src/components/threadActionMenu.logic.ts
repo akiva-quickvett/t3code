@@ -1,5 +1,11 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
-import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
+import { agentTreeDescendants } from "@t3tools/client-runtime/state/thread-relationships";
+import {
+  type SnoozePreset,
+  threadHasActiveWork,
+  threadTreeHasActiveWork,
+} from "@t3tools/client-runtime/state/thread-settled";
 
 export type ThreadActionMenuId =
   | "new-thread-on-branch"
@@ -15,7 +21,10 @@ export type ThreadActionMenuId =
   | "auto-settle:disabled"
   | "snooze"
   | `snooze:${string}`
+  | "snooze-thread"
+  | `snooze-thread:${string}`
   | "unsnooze"
+  | "cancel-snooze-when-idle"
   | "rename"
   | "regenerate-title"
   | "mark-unread"
@@ -91,6 +100,103 @@ export interface ThreadActionMenuState {
     readonly threadUsage: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
+  /** Present when the server snoozes agent trees; absent keeps the single-thread menu. */
+  readonly snoozeTree?: ThreadSnoozeTreeMenuState;
+}
+
+export interface ThreadSnoozeTreeMenuState {
+  readonly hasDescendants: boolean;
+  /** Work anywhere in the tree makes a tree snooze wait until it ends. */
+  readonly treeHasActiveWork: boolean;
+  readonly threadHasActiveWork: boolean;
+  /** A snooze already waits for work to end; its way out is to cancel it. */
+  readonly snoozesWhenIdle: boolean;
+}
+
+/** The snooze-tree part of a thread's menu, read from the environment's shells. */
+export function threadSnoozeTreeMenuState(
+  thread: EnvironmentThreadShell,
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+  now: string,
+): ThreadSnoozeTreeMenuState {
+  return {
+    hasDescendants: agentTreeDescendants(thread, threads).length > 0,
+    treeHasActiveWork: threadTreeHasActiveWork(thread, threads, { now }),
+    threadHasActiveWork: threadHasActiveWork(thread, { now }),
+    snoozesWhenIdle: thread.snoozeWhenIdle != null,
+  };
+}
+
+/** Which snooze a clicked preset asks for, or null when the id is not a snooze preset. */
+export function snoozeMenuChoice(
+  action: ThreadActionMenuId,
+  tree: ThreadSnoozeTreeMenuState | undefined,
+): {
+  readonly presetId: string;
+  readonly scope: "tree" | "thread";
+  readonly whenIdle: boolean;
+} | null {
+  const thread = action.startsWith("snooze-thread:");
+  if (!thread && !action.startsWith("snooze:")) return null;
+  const presetId = action.slice(action.indexOf(":") + 1);
+  if (thread) return { presetId, scope: "thread", whenIdle: tree?.threadHasActiveWork === true };
+  return { presetId, scope: "tree", whenIdle: tree?.treeHasActiveWork === true };
+}
+
+function snoozePresetChildren<Prefix extends "snooze" | "snooze-thread">(
+  prefix: Prefix,
+  presets: ReadonlyArray<SnoozePreset>,
+): ReadonlyArray<ContextMenuItem<`${Prefix}:${string}`>> {
+  return [
+    ...presets.map((preset) => ({
+      id: `${prefix}:${preset.id}` as const,
+      label: `${preset.label} (${preset.whenLabel})`,
+    })),
+    { id: `${prefix}:custom` as const, label: "Custom…", separatorBefore: true },
+  ];
+}
+
+/**
+ * Snooze covers the thread's agent tree by default; "only this thread" is the
+ * exception. Active work turns a snooze into one that waits for it to end.
+ */
+function snoozeMenuItems(
+  state: ThreadActionMenuState,
+): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
+  if (state.isSnoozed) return [{ id: "unsnooze", label: "Wake thread", icon: "clock" }];
+  const tree = state.snoozeTree;
+  if (tree === undefined)
+    return [
+      {
+        id: "snooze",
+        label: "Snooze",
+        icon: "clock",
+        disabled: !state.canSnoozeNow,
+        children: snoozePresetChildren("snooze", state.snoozePresets),
+      },
+    ];
+  if (tree.snoozesWhenIdle)
+    return [{ id: "cancel-snooze-when-idle", label: "Cancel snooze when idle", icon: "clock" }];
+  return [
+    {
+      id: "snooze",
+      label: tree.treeHasActiveWork ? "Snooze when idle" : "Snooze",
+      icon: "clock",
+      children: snoozePresetChildren("snooze", state.snoozePresets),
+    },
+    ...(tree.hasDescendants
+      ? [
+          {
+            id: "snooze-thread" as const,
+            label: tree.threadHasActiveWork
+              ? "Snooze only this thread when idle"
+              : "Snooze only this thread",
+            icon: "clock",
+            children: snoozePresetChildren("snooze-thread", state.snoozePresets),
+          },
+        ]
+      : []),
+  ];
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -138,25 +244,7 @@ export function buildThreadActionMenuItems(
             : { id: "settle" as const, label: "Settle thread", icon: "circle-check" },
         ]
       : []),
-    ...(state.supports.snooze
-      ? [
-          state.isSnoozed
-            ? { id: "unsnooze" as const, label: "Wake thread", icon: "clock" }
-            : {
-                id: "snooze" as const,
-                label: "Snooze",
-                icon: "clock",
-                disabled: !state.canSnoozeNow,
-                children: [
-                  ...state.snoozePresets.map((preset) => ({
-                    id: `snooze:${preset.id}` as const,
-                    label: `${preset.label} (${preset.whenLabel})`,
-                  })),
-                  { id: "snooze:custom" as const, label: "Custom…", separatorBefore: true },
-                ],
-              },
-        ]
-      : []),
+    ...(state.supports.snooze ? snoozeMenuItems(state) : []),
     { id: "rename", label: "Rename thread", icon: "pencil", separatorBefore: true },
     ...(state.supports.titleRegeneration
       ? [

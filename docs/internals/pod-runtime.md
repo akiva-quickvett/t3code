@@ -29,6 +29,54 @@ what Docker reports, into the state Docker shows or the failure state whose Retr
 The allowed requests per state are [`POD_RUNTIME_REQUESTS`](../../packages/contracts/src/podRuntime.ts),
 shared with clients so they offer only what the server accepts.
 
+## Following threads
+
+A pod follows the threads on its worktree
+([`PodParkingReactor`](../../apps/server/src/orchestration-v2/PodParkingReactor.ts)): once every
+one is snoozed or settled with no active or queued run and no pending request, it stops (or, for
+snoozes under a `freeze` setting, is paused), and it is marked `parked`. Only a parked pod starts
+again on its own when a thread wakes; a pod the user stopped stays stopped until a turn needs it.
+It parks only when a thread parked after the pod was last asked to run (its snooze, or its
+settle), so a pod the user started from its chip while the threads sleep stays up until one of them
+parks again, while threads that re-park during a slow wake's start still stop it. A
+start that failed after its containers came up is parked too, so a failed wake the user keeps
+snoozed does not hold memory; a failed creation is not, since a stop would hide that Retry builds
+its stack.
+A pod whose threads were all archived or deleted is left alone: it is the teardown's to remove.
+
+A turn on a pod that is not running waits for it, but not inside the effect worker: a start can take
+minutes, longer than an effect's lease and far longer than one of the worker's few slots should be
+held. The turn's effect returns, its run stays `starting` (which also keeps the pod from parking),
+and the turn starts once the pod runs ([`ProviderTurnStartService`](../../apps/server/src/orchestration-v2/ProviderTurnStartService.ts)).
+A server that stops mid-wait recovers the run like any turn cut off while starting. A pod in
+`start_failed` or `stop_failed` fails the turn at once: Retry belongs to the pod's banner, and an
+automatic retry of a failed creation would rebuild its stack on every wake.
+
+Three orderings keep a stop from cutting live work:
+
+- The pod's sessions are released, as a stop, before the pod stops. A session that died under the
+  stop would read as a provider failure, which wakes a snoozed thread and starts the pod again.
+- `park` asks whether the threads are still parked, releases the sessions, and asks again, all under
+  the pod's state lock, before it records the stop. A turn reads its pod under the same lock after
+  its run is recorded as starting, so a turn that began at any point either keeps the pod up or
+  finds it stopping and waits.
+- A turn on a running pod closes only the sessions opened before the pod's latest start, which died
+  with the stop before it. Sessions a sibling turn opened since are kept.
+
+A start resumes exactly what was stopped and never rebuilds: it fails, for the user to Retry or
+Recreate, when a recorded container or volume is gone, when a stack container the last stop listed
+is gone (`compose start` skips those silently; the list names the compose service containers, not
+one-off or `--rm` ones the daemon may drop, lives in the daemon's own volume and is replaced at
+every stop; names, unlike ids, survive bringing the stack up again from the shell), when the hostname proxy's DNS server moved from the address the daemon was
+pinned to, or when, in hostname mode, the pod's first hostname does not answer through the proxy
+from inside the pod. Such a failed start takes its route away but leaves its containers running for
+the shell; Stop or Recreate is the user's call. Creation keeps the rule that a route problem only
+notes itself on the pod.
+
+While any pod exists, the reactor reads each thread whose run or request changes, and each look at
+a pod scans the threads' worktree paths; that is cheap at today's scale, and an index on the
+payload's `worktreePath` is the step if it ever is not.
+
 ## Ownership
 
 Everything a pod creates carries `t3.pod` and `t3.environment` labels, and its names carry the
