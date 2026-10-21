@@ -267,6 +267,7 @@ export const make = Effect.gen(function* () {
       agentRolePresets: true,
       pullRequestLabelRules: true,
       scheduledTaskScripts: true,
+      chatChannels: true,
     },
   };
 

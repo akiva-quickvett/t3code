@@ -16,7 +16,7 @@ import {
 import { MoreHorizontalIcon, PlusIcon, RotateCcwIcon, UserRoundCogIcon } from "lucide-react";
 import { type ReactNode, useState } from "react";
 
-import { requestConfirmDialog } from "../../confirmDialog";
+import { confirmDestructive } from "../../confirmDialog";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
 import {
@@ -64,13 +64,6 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
-
-async function confirmDestructive(message: string): Promise<boolean> {
-  return (
-    (await requestConfirmDialog(message, { variant: "destructive" })) ??
-    window.confirm(message.replace("\n", " "))
-  );
-}
 
 function reportFailure(title: string, result: Parameters<typeof isAtomCommandInterrupted>[0]) {
   if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;

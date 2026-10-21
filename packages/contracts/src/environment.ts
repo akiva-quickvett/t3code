@@ -155,6 +155,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   pullRequestLabelRules: Schema.optionalKey(Schema.Boolean),
   /** Server runs scheduled tasks whose `action` is a project script; absent on stock servers. */
   scheduledTaskScripts: Schema.optionalKey(Schema.Boolean),
+  /** Server answers the chatChannels.* RPCs (Messaging settings); absent on stock servers. */
+  chatChannels: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 
