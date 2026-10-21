@@ -7,12 +7,18 @@ import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import { podParkOperation } from "../pod/PodRuntimeLifecycle.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
-import { changesParking, isThreadParked, parkingThreadRow } from "./threadParking.ts";
+import {
+  changesParking,
+  isThreadParked,
+  lastParkedAtMs,
+  parkingThreadRow,
+} from "./threadParking.ts";
 
 /**
  * A pod follows the threads on its worktree: it stops once every one of them
@@ -58,14 +64,18 @@ export const make = Effect.gen(function* () {
     // Its last thread archived or deleted: the pod is the teardown's to remove.
     if (threads.length === 0) return;
     if (yield* allParked(threads)) {
-      const settled = threads.every((thread) => thread.settled);
-      if (pod.state !== "running" && !(pod.state === "frozen" && settled)) return;
+      if (podParkOperation(pod, "stop") === null) return;
       yield* pods.park(pod.id, {
-        settled,
-        // A turn that started meanwhile holds a run, so its pod stays up.
-        stillParked: parkingOf(pod.worktreePath).pipe(
-          Effect.flatMap(allParked),
-          Effect.orElseSucceed(() => false),
+        settled: threads.every((thread) => thread.settled),
+        // Asked again under the pod's lock: a turn that started meanwhile
+        // holds a run, so its pod stays up.
+        parkedSince: parkingOf(pod.worktreePath).pipe(
+          Effect.flatMap((current) =>
+            allParked(current).pipe(
+              Effect.map((parked) => (parked ? lastParkedAtMs(current) : null)),
+            ),
+          ),
+          Effect.orElseSucceed(() => null),
         ),
         // Closed before the stop, as a stop: dying under it would read as a
         // provider failure, which wakes the thread and starts the pod again.

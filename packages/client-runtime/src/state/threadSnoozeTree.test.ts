@@ -89,4 +89,29 @@ describe("active work", () => {
     ];
     expect(threadTreeHasActiveWork(settled[0]!, settled, { now: NOW })).toBe(false);
   });
+
+  it("counts background work the agent waits for, but not a shell command or a PR watch", () => {
+    const waiting = (kind: "subagent" | "command" | "monitor", taskId = "task-1") => ({
+      ...thread("a"),
+      pendingBackgroundTasks: [{ kind, taskId } as never],
+    });
+    expect(threadHasActiveWork(waiting("subagent"), { now: NOW })).toBe(true);
+    expect(threadHasActiveWork(waiting("command"), { now: NOW })).toBe(false);
+    // A pull request watch is how a snoozed thread wakes, not work it is doing.
+    expect(
+      threadHasActiveWork(waiting("monitor", "pull-request-watch:github.com/o/r#1"), { now: NOW }),
+    ).toBe(false);
+  });
+
+  it("leaves a descendant parked until its limit resets out of the tree's work", () => {
+    const tree = [
+      thread("root"),
+      {
+        ...thread("limited", { parent: "root", status: "running" }),
+        snoozedUntil: "2026-10-21T17:00:00.000Z",
+        limitRecovery: { snooze: true },
+      },
+    ];
+    expect(threadTreeHasActiveWork(tree[0]!, tree, { now: NOW })).toBe(false);
+  });
 });

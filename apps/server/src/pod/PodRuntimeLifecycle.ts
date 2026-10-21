@@ -30,6 +30,11 @@ export interface PodRuntimeRecord {
   readonly dnsAddress?: string;
   /** The pod's route file is in the proxy's directory, as far as this server knows. */
   readonly routed?: boolean;
+  /**
+   * When the pod was last asked to run. Threads that park later stop it; a
+   * pod started after its threads parked, from its chip say, stays up.
+   */
+  readonly startRequestedAt?: string;
 }
 
 /**
@@ -207,6 +212,31 @@ const TRANSITIONAL_STATES = new Set<PodRuntimeState>([
   "removing",
 ]);
 export const isPodTransitional = (state: PodRuntimeState) => TRANSITIONAL_STATES.has(state);
+
+/**
+ * What parking a pod asks for in its state, or null when there is no memory
+ * to give back. A start that failed after its containers came up left them
+ * running, so it stops; a failed creation is left, since a stop would forget
+ * that its Retry must build the stack.
+ */
+export const podParkOperation = (
+  snapshot: Pick<PodRuntimeSnapshot, "state" | "lastError">,
+  wanted: "stop" | "freeze",
+): "stop" | "freeze" | null => {
+  switch (snapshot.state) {
+    case "running":
+      return wanted;
+    case "frozen":
+      return wanted === "stop" ? "stop" : null;
+    case "start_failed":
+      return snapshot.lastError?.operation === "start" ||
+        snapshot.lastError?.operation === "recreateAgentContainer"
+        ? "stop"
+        : null;
+    default:
+      return null;
+  }
+};
 
 /**
  * Any state but a clean stop or a removal may have containers running, so the
@@ -479,8 +509,10 @@ const reducePodEvent = (
     case "pod.operation-requested": {
       // Any other request is someone's own decision, which a wake must not undo.
       const { parked: _parked, ...unparked } = snapshot;
+      const starts = POD_OPERATION_RULES[event.operation].success === "running";
       return {
         ...record,
+        ...(starts ? { startRequestedAt: event.occurredAt } : {}),
         snapshot: {
           ...unparked,
           ...(event.parked === true ? { parked: true as const } : {}),

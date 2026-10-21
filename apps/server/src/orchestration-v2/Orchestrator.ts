@@ -65,6 +65,7 @@ import {
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
+  backgroundWorkHoldsSnooze,
   derivePendingBackgroundWork,
   pendingBackgroundTurnItems,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -77,6 +78,7 @@ import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -2885,9 +2887,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Thread ${command.threadId} snooze wake time ${command.snoozedUntil} is not in the future.`,
         });
       }
+      if (
+        command.whenIdleRequestedAt !== undefined &&
+        thread.snoozeWhenIdle?.requestedAt !== command.whenIdleRequestedAt
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId}'s snooze waiting for idle was cancelled or replaced.`,
+        });
+      }
+      // Background work the agent waits for counts as for a parked pod; a
+      // pull request watch never does, being how the thread wakes.
       const busy =
         projection.runtimeRequests.some((request) => request.status === "pending") ||
-        projection.runs.some((run) => ACTIVE_OR_QUEUED_RUN_STATUSES.has(run.status));
+        projection.runs.some((run) => ACTIVE_OR_QUEUED_RUN_STATUSES.has(run.status)) ||
+        (command.whenIdle === true &&
+          backgroundWorkHoldsSnooze(
+            (yield* projectionStore
+              .getThreadShell(command.threadId)
+              .pipe(mapDispatchError(command)))?.pendingBackgroundTasks ?? [],
+          ));
       // A tree snooze reaches a single thread's lock only once dispatchSnoozeTree
       // found the tree busy and the caller asked to wait for it.
       if (command.scope === "tree" || (command.whenIdle === true && busy)) {
@@ -11725,52 +11745,70 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
    * left; a descendant that refused keeps refusing that id, and clients send
    * a new id per click.
    */
-  const dispatchSnoozeTree = Effect.fn("orchestrationV2.dispatch.snoozeTree")(function* (
-    command: Extract<
-      OrchestrationV2ServerCommand,
-      { readonly type: "thread.snooze" | "thread.unsnooze" }
-    >,
-  ) {
-    const tree = yield* projectionStore
-      .getThreadParking({ treeOf: command.threadId })
-      .pipe(
-        Effect.mapError(
-          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-        ),
+  // One tree cascade at a time: two racing on a tree, a snooze and its undo,
+  // would otherwise interleave thread by thread and leave it half asleep.
+  const treeCascades = yield* Semaphore.make(1);
+  const dispatchSnoozeTree = Effect.fn("orchestrationV2.dispatch.snoozeTree")(
+    function* (
+      command: Extract<
+        OrchestrationV2ServerCommand,
+        { readonly type: "thread.snooze" | "thread.unsnooze" }
+      >,
+    ) {
+      const tree = yield* projectionStore
+        .getThreadParking({ treeOf: command.threadId })
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+      // Limit recovery's own wake at the reset stands: neither a tree snooze nor
+      // a tree wake moves it. Waking such a thread directly still works.
+      const descendants = tree.filter(
+        (thread) =>
+          thread.id !== command.threadId &&
+          !thread.archived &&
+          !thread.settled &&
+          !thread.limitParked,
       );
-    const descendants = tree.filter(
-      (thread) => thread.id !== command.threadId && !thread.archived && !thread.settled,
-    );
-    if (command.type === "thread.snooze") {
-      // The root keeps its own thread's rule, so an agent may snooze itself
-      // mid-turn; only work under it makes the tree wait.
-      const working = descendants.filter((thread) => thread.busy);
-      const rootWorking = tree.some((thread) => thread.id === command.threadId && thread.busy);
-      if (command.whenIdle === true && (working.length > 0 || rootWorking))
-        // Recorded on the root alone; the whole tree snoozes when it is idle.
-        return yield* dispatchWithReceipt({ ...command, scope: "tree" });
-      if (working.length > 0)
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: `${working.length === 1 ? "A thread" : `${working.length} threads`} under this one ${working.length === 1 ? "is" : "are"} still working. Choose Snooze when idle to snooze the tree once ${working.length === 1 ? "it finishes" : "they finish"}.`,
-        });
-    }
-    const result = yield* dispatchWithReceipt({ ...command, scope: "thread" });
-    for (const thread of descendants)
-      if (
-        command.type === "thread.snooze" ||
-        thread.snoozedUntil !== null ||
-        thread.snoozeWhenIdle !== null
-      )
-        yield* dispatchWithReceipt({
-          ...command,
-          scope: "thread",
-          commandId: CommandId.make(`${command.commandId}:tree:${thread.id}`),
-          threadId: thread.id,
-        });
-    return result;
-  });
+      if (command.type === "thread.snooze") {
+        // The root keeps its own thread's rule, so an agent may snooze itself
+        // mid-turn; only work under it makes the tree wait.
+        const working = descendants.filter((thread) => thread.busy);
+        const rootWorking = tree.some((thread) => thread.id === command.threadId && thread.busy);
+        if (command.whenIdle === true && (working.length > 0 || rootWorking))
+          // Recorded on the root alone; the whole tree snoozes when it is idle.
+          return yield* dispatchWithReceipt({ ...command, scope: "tree" });
+        if (working.length > 0)
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `${working.length === 1 ? "A thread" : `${working.length} threads`} under this one ${working.length === 1 ? "is" : "are"} still working. Choose Snooze when idle to snooze the tree once ${working.length === 1 ? "it finishes" : "they finish"}.`,
+          });
+      }
+      const result = yield* dispatchWithReceipt({ ...command, scope: "thread" });
+      for (const thread of descendants) {
+        const commandId = CommandId.make(`${command.commandId}:tree:${thread.id}`);
+        if (command.type === "thread.snooze")
+          yield* dispatchWithReceipt({
+            type: "thread.snooze",
+            commandId,
+            threadId: thread.id,
+            snoozedUntil: command.snoozedUntil,
+            scope: "thread",
+          });
+        else if (thread.snoozedUntil !== null || thread.snoozeWhenIdle !== null)
+          yield* dispatchWithReceipt({
+            ...command,
+            commandId,
+            threadId: thread.id,
+            scope: "thread",
+          });
+      }
+      return result;
+    },
+    (effect) => treeCascades.withPermits(1)(effect),
+  );
 
   const dispatchCommand = (command: OrchestrationV2ServerCommand) =>
     (command.type === "thread.snooze" || command.type === "thread.unsnooze") &&

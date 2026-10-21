@@ -16,6 +16,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as DateTime from "effect/DateTime";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -203,9 +204,12 @@ describe("PodRuntimeService", () => {
           expect(operations(driver)).toEqual([
             "list t3.pod",
             "list t3.pod",
-            // What a start must find again, recorded where the stack's data lives.
+            // What a start must find again, recorded where the stack's data lives: the
+            // compose services by name, never a one-off or --rm container the daemon may drop.
             expect.stringMatching(
-              new RegExp(`^exec t3-envtest-${id}-dind sh -c rm -f .*docker ps -a`),
+              new RegExp(
+                `^exec t3-envtest-${id}-dind sh -c rm -f .*docker ps -a --filter label=com.docker.compose.project --filter label=com.docker.compose.oneoff=False`,
+              ),
             ),
             `exec t3-envtest-${id}-agent docker compose stop`,
             `stop t3-envtest-${id}-agent`,
@@ -1410,7 +1414,8 @@ describe("PodRuntimeService stack output", () => {
 });
 
 describe("PodRuntimeService following threads", () => {
-  const stillParked = Effect.succeed(true);
+  // The threads parked after anything the test asked of the pod.
+  const parkedSince = Effect.succeed(Number.POSITIVE_INFINITY);
   const beforeStop = Effect.void;
 
   it.effect("parks a running pod by stopping it, and any start clears the mark", () => {
@@ -1419,11 +1424,11 @@ describe("PodRuntimeService following threads", () => {
       Effect.gen(function* () {
         const { id } = yield* pods.create({ projectId, worktreePath });
         yield* pods.drain;
-        expect(yield* pods.park(id, { settled: false, stillParked, beforeStop })).toBe(true);
+        expect(yield* pods.park(id, { settled: false, parkedSince, beforeStop })).toBe(true);
         yield* pods.drain;
         expect(yield* pods.awaitSettled(id)).toMatchObject({ state: "stopped", parked: true });
         // Parking again changes nothing.
-        expect(yield* pods.park(id, { settled: false, stillParked, beforeStop })).toBe(false);
+        expect(yield* pods.park(id, { settled: false, parkedSince, beforeStop })).toBe(false);
 
         yield* pods.start(id);
         yield* pods.drain;
@@ -1448,7 +1453,7 @@ describe("PodRuntimeService following threads", () => {
           const { id } = yield* pods.create({ projectId, worktreePath });
           yield* pods.drain;
           driver.calls.length = 0;
-          yield* pods.park(id, { settled: false, stillParked, beforeStop });
+          yield* pods.park(id, { settled: false, parkedSince, beforeStop });
           yield* pods.drain;
           expect(yield* pods.awaitSettled(id)).toMatchObject({ state: "frozen", parked: true });
           expect(operations(driver)).toEqual([
@@ -1457,11 +1462,120 @@ describe("PodRuntimeService following threads", () => {
             `pause t3-envtest-${id}-dind`,
           ]);
 
-          yield* pods.park(id, { settled: true, stillParked, beforeStop });
+          yield* pods.park(id, { settled: true, parkedSince, beforeStop });
           yield* pods.drain;
           expect(yield* pods.awaitSettled(id)).toMatchObject({ state: "stopped", parked: true });
         }),
       { snoozeAction: "freeze" },
+    );
+  });
+
+  it.effect("stops a pod whose start failed after its containers came up", () => {
+    const driver = makeFakeContainerDriver();
+    driver.failWhen(
+      (call) => call.operation === "exec" && call.command?.includes("start") === true,
+    );
+    return withPods(driver, (pods) =>
+      Effect.gen(function* () {
+        const { id } = yield* pods.create({ projectId, worktreePath });
+        yield* pods.drain;
+        yield* pods.stop(id);
+        yield* pods.drain;
+        yield* pods.start(id);
+        yield* pods.drain;
+        expect((yield* pods.awaitSettled(id)).state).toBe("start_failed");
+        expect(yield* pods.park(id, { settled: false, parkedSince, beforeStop })).toBe(true);
+        yield* pods.drain;
+        expect(yield* pods.awaitSettled(id)).toMatchObject({ state: "stopped", parked: true });
+      }),
+    );
+  });
+
+  it.effect(
+    "keeps a failed start's evidence through a parked stop, so the wake fails the same",
+    () => {
+      const driver = makeFakeContainerDriver();
+      return withPods(driver, (pods) =>
+        Effect.gen(function* () {
+          const { id } = yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          yield* pods.stop(id);
+          yield* pods.drain;
+          const dind = driver.containers().find((container) => container.name.endsWith("-dind"))!;
+          yield* driver.driver.forHost("").removeContainer(dind.id);
+          yield* pods.start(id);
+          yield* pods.drain;
+          const failed = (yield* pods.awaitSettled(id)).lastError?.message;
+          expect(failed).toContain("Recreate the pod");
+
+          driver.calls.length = 0;
+          expect(yield* pods.park(id, { settled: false, parkedSince, beforeStop })).toBe(true);
+          yield* pods.drain;
+          expect((yield* pods.awaitSettled(id)).containerIds).toContain(dind.id);
+          yield* pods.start(id);
+          yield* pods.drain;
+          const again = yield* pods.awaitSettled(id);
+          expect(again.state).toBe("start_failed");
+          expect(again.lastError?.message).toBe(failed);
+          expect(operations(driver).some((step) => step.startsWith("createContainer"))).toBe(false);
+        }),
+      );
+    },
+  );
+
+  it.effect("keeps the stack list of a pod whose start found containers gone", () => {
+    const driver = makeFakeContainerDriver();
+    const checksStack = (call: { readonly command?: ReadonlyArray<string> }) =>
+      call.command?.some((part) => part.includes("--type container")) === true;
+    const recordsStack = (call: { readonly command?: ReadonlyArray<string> }) =>
+      call.command?.some((part) => part.includes("com.docker.compose.oneoff=False")) === true;
+    return withPods(driver, (pods) =>
+      Effect.gen(function* () {
+        const { id } = yield* pods.create({ projectId, worktreePath });
+        yield* pods.drain;
+        yield* pods.stop(id);
+        yield* pods.drain;
+        driver.execExitCode((call) => (checksStack(call) ? 3 : 0));
+        driver.execOutput((call) => (checksStack(call) ? "missing: feature-db-1" : ""));
+        yield* pods.start(id);
+        yield* pods.drain;
+        expect((yield* pods.awaitSettled(id)).state).toBe("start_failed");
+
+        driver.calls.length = 0;
+        yield* pods.park(id, { settled: false, parkedSince, beforeStop });
+        yield* pods.drain;
+        expect((yield* pods.awaitSettled(id)).state).toBe("stopped");
+        expect(driver.calls.some(recordsStack)).toBe(false);
+        yield* pods.start(id);
+        yield* pods.drain;
+        expect((yield* pods.awaitSettled(id)).lastError?.message).toContain("feature-db-1");
+      }),
+    );
+  });
+
+  it.effect("stops only for threads that parked after the pod was last asked to run", () => {
+    const driver = makeFakeContainerDriver();
+    return withPods(driver, (pods) =>
+      Effect.gen(function* () {
+        const { id } = yield* pods.create({ projectId, worktreePath });
+        yield* pods.drain;
+        yield* pods.stop(id);
+        yield* pods.drain;
+        const before = DateTime.toEpochMillis(yield* DateTime.now);
+        yield* TestClock.adjust("1 second");
+        // Started from its chip after the threads parked: it stays up.
+        yield* pods.start(id);
+        yield* pods.drain;
+        expect(
+          yield* pods.park(id, { settled: false, parkedSince: Effect.succeed(before), beforeStop }),
+        ).toBe(false);
+        // A thread that parks while the wake's start is still running counts.
+        yield* TestClock.adjust("1 second");
+        const during = DateTime.toEpochMillis(yield* DateTime.now);
+        expect(
+          yield* pods.park(id, { settled: false, parkedSince: Effect.succeed(during), beforeStop }),
+        ).toBe(true);
+      }),
     );
   });
 
@@ -1473,7 +1587,7 @@ describe("PodRuntimeService following threads", () => {
         yield* pods.drain;
         driver.calls.length = 0;
         expect(
-          yield* pods.park(id, { settled: false, stillParked: Effect.succeed(false), beforeStop }),
+          yield* pods.park(id, { settled: false, parkedSince: Effect.succeed(null), beforeStop }),
         ).toBe(false);
         yield* pods.drain;
         expect((yield* pods.awaitSettled(id)).state).toBe("running");
@@ -1492,7 +1606,7 @@ describe("PodRuntimeService following threads", () => {
         let checks = 0;
         const parked = yield* pods.park(id, {
           settled: false,
-          stillParked: Effect.sync(() => ++checks === 1),
+          parkedSince: Effect.sync(() => (++checks === 1 ? Number.POSITIVE_INFINITY : null)),
           beforeStop: Effect.void,
         });
         expect(parked).toBe(false);
@@ -1505,7 +1619,7 @@ describe("PodRuntimeService following threads", () => {
         const parking = yield* Effect.forkChild(
           pods.park(id, {
             settled: false,
-            stillParked,
+            parkedSince,
             beforeStop: Deferred.succeed(releasing, undefined).pipe(
               Effect.andThen(Deferred.await(released)),
             ),
@@ -1528,7 +1642,7 @@ describe("PodRuntimeService following threads", () => {
       Effect.gen(function* () {
         const { id } = yield* pods.create({ projectId, worktreePath });
         yield* pods.drain;
-        yield* pods.park(id, { settled: false, stillParked, beforeStop });
+        yield* pods.park(id, { settled: false, parkedSince, beforeStop });
         expect((yield* pods.ensureRunning(id)).state).toBe("running");
         const steps = operations(driver);
         expect(steps.lastIndexOf(`stop t3-envtest-${id}-dind`)).toBeLessThan(
@@ -1648,6 +1762,8 @@ describe("PodRuntimeService following threads", () => {
           expect(router.routes.has(`t3-envtest-${id}`)).toBe(true);
           const probe = driver.calls.findLast(probes);
           expect(probe?.target).toBe(`t3-envtest-${id}-dind`);
+          // The proxy's DNS answers only A queries; an unpinned lookup would time out.
+          expect(probe?.command?.some((part) => part.includes("openssl s_client -4 "))).toBe(true);
         }),
       {
         router,

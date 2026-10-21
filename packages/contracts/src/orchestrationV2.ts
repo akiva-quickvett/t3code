@@ -2658,6 +2658,12 @@ export const OrchestrationV2Command = Schema.Union([
     scope: Schema.optional(ThreadSnoozeScope),
     /** Waits for active runs, queued work and pending requests to end instead of refusing. */
     whenIdle: Schema.optional(Schema.Boolean),
+    /**
+     * Set by the server when it applies a snooze that waited for idle: the
+     * thread takes it only while that request, made at this time, is still
+     * the one pending, so a cancel or new work in between wins.
+     */
+    whenIdleRequestedAt: Schema.optional(IsoDateTime),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.unsnooze"),

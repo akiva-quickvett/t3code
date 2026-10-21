@@ -61,6 +61,11 @@ export interface PodOperationContext {
   };
   /** Fails when the resolver the daemon was pinned to has moved since it was built. */
   readonly checkDnsPin: Effect.Effect<void, PodStepError>;
+  /**
+   * Whether a stop lists the stack's containers anew. A pod that failed keeps
+   * the list from before: what it lacks now is what that list must still name.
+   */
+  readonly recordsStack: boolean;
 }
 
 export interface PodOperationResult {
@@ -387,7 +392,8 @@ const stop = (context: PodOperationContext) =>
       if (container?.status === "paused")
         yield* context.host.unpause(container.id).pipe(step("Unfreezing the pod"));
     const found = yield* podContainers(context);
-    if (found.dind?.status === "running") yield* recordStack(context, found.dind.id);
+    if (found.dind?.status === "running" && context.recordsStack)
+      yield* recordStack(context, found.dind.id);
     const agent = composeReachable(found);
     if (agent !== undefined)
       yield* execIn(
@@ -408,11 +414,29 @@ const stop = (context: PodOperationContext) =>
       yield* context.host
         .stop(found.dind.id, DIND_STOP_SECONDS)
         .pipe(step("Stopping the pod's Docker daemon"));
-    return {
-      containerIds: [found.dind?.id, found.agent?.id].filter((id) => id !== undefined),
-      volumeIds: found.volume === undefined ? [] : [found.volume.name],
-    };
+    return keptRecord(context, found);
   });
+
+/**
+ * What a stop or freeze records the pod as having. A container or volume the
+ * record names but Docker no longer has stays named, so the next start still
+ * finds it gone and leaves Recreate to the user instead of building it anew.
+ */
+const keptRecord = (
+  context: PodOperationContext,
+  found: {
+    readonly dind: PodContainerInfo | undefined;
+    readonly agent: PodContainerInfo | undefined;
+    readonly volume: { readonly name: string } | undefined;
+  },
+): PodOperationResult => {
+  const containerIds = [found.dind?.id, found.agent?.id].filter((id) => id !== undefined);
+  const volumeIds = found.volume === undefined ? [] : [found.volume.name];
+  const lost =
+    context.recorded.containerIds.some((id) => !containerIds.includes(id)) ||
+    context.recorded.volumeIds.some((name) => !volumeIds.includes(name));
+  return lost ? context.recorded : { containerIds, volumeIds };
+};
 
 /** Agent first, so nothing runs against a daemon that is already frozen. */
 const freeze = (context: PodOperationContext) =>
@@ -422,10 +446,7 @@ const freeze = (context: PodOperationContext) =>
       yield* context.host.pause(found.agent.id).pipe(step("Freezing the agent container"));
     if (found.dind?.status === "running")
       yield* context.host.pause(found.dind.id).pipe(step("Freezing the pod's Docker daemon"));
-    return {
-      containerIds: [found.dind?.id, found.agent?.id].filter((id) => id !== undefined),
-      volumeIds: found.volume === undefined ? [] : [found.volume.name],
-    };
+    return keptRecord(context, found);
   });
 
 const CHECK_CONTAINERS_STEP = "Checking the pod's containers";
@@ -467,11 +488,14 @@ const verifyRecorded = (context: PodOperationContext) =>
 const STACK_LIST_PATH = "/var/lib/docker/t3-stack-containers";
 
 /**
- * Run in the daemon container: records every stack container as `<id> <name>`.
- * The old list goes first, so a stop that cannot write one leaves none, and a
- * start never checks against a list older than the last stop.
+ * Run in the daemon container: records the stack's compose service containers
+ * by name. One-off and `--rm` containers, which the daemon may remove on its
+ * own, are left out; names, unlike ids, survive the stack being brought up
+ * again from the pod shell. The old list goes first, so a stop that cannot
+ * write one leaves none, and a start never checks against a list older than
+ * the last stop.
  */
-const RECORD_STACK_SCRIPT = `rm -f ${STACK_LIST_PATH} && docker ps -a --no-trunc --format '{{.ID}} {{.Names}}' > ${STACK_LIST_PATH}.next && mv ${STACK_LIST_PATH}.next ${STACK_LIST_PATH}`;
+const RECORD_STACK_SCRIPT = `rm -f ${STACK_LIST_PATH} && docker ps -a --filter label=com.docker.compose.project --filter label=com.docker.compose.oneoff=False --format '{{.Names}}' > ${STACK_LIST_PATH}.next && mv ${STACK_LIST_PATH}.next ${STACK_LIST_PATH}`;
 
 /**
  * Prints the names of recorded stack containers that are gone and exits 3.
@@ -481,7 +505,7 @@ const RECORD_STACK_SCRIPT = `rm -f ${STACK_LIST_PATH} && docker ps -a --no-trunc
 const CHECK_STACK_SCRIPT = [
   `[ -r ${STACK_LIST_PATH} ] || exit 0`,
   "missing=",
-  `while read -r id name; do docker inspect "$id" >/dev/null 2>&1 || missing="$missing $name"; done < ${STACK_LIST_PATH}`,
+  `while read -r name; do docker inspect --type container "$name" >/dev/null 2>&1 || missing="$missing $name"; done < ${STACK_LIST_PATH}`,
   '[ -z "$missing" ] && exit 0',
   'echo "missing:$missing"',
   "exit 3",
@@ -545,7 +569,9 @@ export const probePodHostname = (host: ContainerHost, dindName: string, hostname
       command: [
         "sh",
         "-c",
-        'printf "HEAD / HTTP/1.1\\r\\nHost: %s\\r\\nConnection: close\\r\\n\\r\\n" "$1" | timeout 10 openssl s_client -quiet -connect "$1:443" -servername "$1" 2>/dev/null | head -n 1',
+        // IPv4 only: the proxy's DNS answers A queries and leaves AAAA unanswered,
+        // which makes an unpinned lookup time out before it connects.
+        'printf "HEAD / HTTP/1.1\\r\\nHost: %s\\r\\nConnection: close\\r\\n\\r\\n" "$1" | timeout 10 openssl s_client -4 -quiet -connect "$1:443" -servername "$1" 2>/dev/null | head -n 1',
         "sh",
         hostname,
       ],

@@ -69,7 +69,10 @@ import {
   createOrchestrationV2TurnItemVisibility,
   isOrchestrationV2SupersededInterrupt,
 } from "@t3tools/shared/orchestrationV2Timeline";
-import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  backgroundWorkHoldsSnooze,
+  derivePendingBackgroundWork,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -183,7 +186,15 @@ export interface ProjectionThreadParking {
   readonly snoozeWhenIdle: NonNullable<OrchestrationV2AppThread["snoozeWhenIdle"]> | null;
   readonly status: OrchestrationV2ShellThreadStatus;
   readonly latestRunCompletedAt: DateTime.Utc | null;
-  /** A run that is active or queued, or a pending request. */
+  /** Bumped when the thread settles, so it says when a settled thread parked. */
+  readonly updatedAt: DateTime.Utc;
+  /** Snoozed by limit recovery until its reset, which a tree snooze or wake leaves alone. */
+  readonly limitParked: boolean;
+  /**
+   * A run that is active or queued, a pending request, or background work
+   * whose result the agent waits for (a subagent or monitor; not a shell
+   * command such as a dev server, nor a pull request watch, which wakes it).
+   */
   readonly busy: boolean;
 }
 
@@ -5810,6 +5821,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         const parent = sql.literal(PROJECTION_THREAD_TREE_PARENT);
         const rows = yield* sql<{
           readonly payload_json: string;
+          readonly latest_run_id: string | null;
           readonly latest_run_status: string | null;
           readonly latest_run_completed_at: string | null;
           readonly has_work: number;
@@ -5827,6 +5839,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               : sql``
           }
           SELECT t.payload_json,
+            r.run_id AS latest_run_id,
             r.status AS latest_run_status,
             r.completed_at AS latest_run_completed_at,
             EXISTS (
@@ -5853,26 +5866,50 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 : sql`json_extract(t.payload_json, '$.snoozeWhenIdle') IS NOT NULL`
           }
         `;
-        return yield* Effect.forEach(rows, (row) =>
-          decodeThreadPayload(row.payload_json).pipe(
-            Effect.map((thread): ProjectionThreadParking => ({
-              id: thread.id,
-              projectId: thread.projectId,
-              worktreePath: thread.worktreePath,
-              archived: thread.archivedAt !== null,
-              settled: thread.settledOverride === "settled",
-              snoozedUntil: thread.snoozedUntil ?? null,
-              snoozedAt: thread.snoozedAt ?? null,
-              snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
-              status: shellStatusFromStoredRunStatus(row.latest_run_status),
-              latestRunCompletedAt:
-                row.latest_run_completed_at === null
+        if (rows.length === 0) return [];
+        const threads = yield* Effect.forEach(rows, (row) => decodeThreadPayload(row.payload_json));
+        const threadIds = threads.map((thread) => thread.id);
+        const { providerThreadsByThreadId, pendingTurnItemsByThreadId } =
+          yield* pendingBackgroundDataByThreadId({
+            providerThreadRows: yield* selectShellProviderThreadRows(threadIds),
+            pendingTurnItemRows: yield* selectShellPendingTurnItemRows(threadIds),
+          });
+        return threads.map((thread, index): ProjectionThreadParking => {
+          const row = rows[index]!;
+          const status = shellStatusFromStoredRunStatus(row.latest_run_status);
+          const latestRunId = row.latest_run_id === null ? null : RunId.make(row.latest_run_id);
+          const waitsOnBackground = backgroundWorkHoldsSnooze(
+            derivePendingBackgroundWork({
+              latestRun:
+                latestRunId === null || status === "idle"
                   ? null
-                  : DateTime.makeUnsafe(row.latest_run_completed_at),
-              busy: row.has_work === 1 || row.has_request === 1,
-            })),
-          ),
-        );
+                  : { id: latestRunId, ordinal: 0, status },
+              providerThreads: providerThreadsByThreadId.get(thread.id) ?? [],
+              turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
+              activeProviderThreadId: thread.activeProviderThreadId,
+              hasActiveRun: row.has_work === 1,
+              pullRequests: thread.pullRequests,
+            }),
+          );
+          return {
+            id: thread.id,
+            projectId: thread.projectId,
+            worktreePath: thread.worktreePath,
+            archived: thread.archivedAt !== null,
+            settled: thread.settledOverride === "settled",
+            snoozedUntil: thread.snoozedUntil ?? null,
+            snoozedAt: thread.snoozedAt ?? null,
+            snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
+            status,
+            latestRunCompletedAt:
+              row.latest_run_completed_at === null
+                ? null
+                : DateTime.makeUnsafe(row.latest_run_completed_at),
+            updatedAt: thread.updatedAt,
+            limitParked: thread.limitRecovery?.snooze === true && thread.snoozedUntil != null,
+            busy: row.has_work === 1 || row.has_request === 1 || waitsOnBackground,
+          };
+        });
       }).pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
 
     const getWorkTreeNodes: ProjectionStoreV2Shape["getWorkTreeNodes"] = (rootThreadIds) =>
@@ -6473,9 +6510,20 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 : null;
             return live
               .filter(({ thread }) => (tree === null ? inScope(thread) : tree.has(thread.id)))
-              .map(({ thread, runs, runtimeRequests }): ProjectionThreadParking => {
+              .map((projection): ProjectionThreadParking => {
+                const { thread, runs, runtimeRequests } = projection;
                 const latest = runs.toSorted((left, right) => right.ordinal - left.ordinal)[0];
                 const pending = runtimeRequests.some((request) => request.status === "pending");
+                const waitsOnBackground = backgroundWorkHoldsSnooze(
+                  derivePendingBackgroundWork({
+                    latestRun: latest ?? null,
+                    providerThreads: projection.providerThreads,
+                    turnItems: projection.turnItems,
+                    activeProviderThreadId: thread.activeProviderThreadId,
+                    runs,
+                    pullRequests: thread.pullRequests,
+                  }),
+                );
                 return {
                   id: thread.id,
                   projectId: thread.projectId,
@@ -6487,7 +6535,12 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
                   status: shellStatusFromStoredRunStatus(latest?.status ?? null),
                   latestRunCompletedAt: latest?.completedAt ?? null,
-                  busy: pending || runs.some((run) => activeRunStatuses.has(run.status)),
+                  updatedAt: thread.updatedAt,
+                  limitParked: thread.limitRecovery?.snooze === true && thread.snoozedUntil != null,
+                  busy:
+                    pending ||
+                    waitsOnBackground ||
+                    runs.some((run) => activeRunStatuses.has(run.status)),
                 };
               });
           }),

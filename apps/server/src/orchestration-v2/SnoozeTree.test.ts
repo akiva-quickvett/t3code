@@ -8,7 +8,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  type RunId,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -424,6 +424,93 @@ it.layer(layerTest)("snooze trees", (it) => {
       }),
   );
 
+  it.effect("leaves a descendant that limit recovery parked to its own reset", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const lead = ThreadId.make("thread:limit-lead");
+      const limited = ThreadId.make("thread:limit-cell");
+      yield* createThread(lead);
+      yield* createSubagent(limited, lead);
+      const resetAt = DateTime.add(yield* DateTime.now, { hours: 5 });
+      const row = (yield* orchestrator.getThreadProjection(limited)).thread;
+      yield* projections.apply({
+        id: EventId.make("event:limit-cell:parked"),
+        type: "thread.metadata-updated",
+        threadId: limited,
+        providerInstanceId: instanceId,
+        occurredAt: yield* DateTime.now,
+        payload: {
+          ...row,
+          snoozedUntil: resetAt,
+          snoozedAt: yield* DateTime.now,
+          limitRecovery: {
+            runId: RunId.make("run:limit-cell"),
+            resetAt: DateTime.formatIso(resetAt),
+            autoResume: true,
+            snooze: true,
+          },
+        },
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze:limit-lead"),
+        threadId: lead,
+        snoozedUntil: yield* later(1),
+        scope: "tree",
+      });
+      assert.equal(yield* snoozedUntil(limited), DateTime.formatIso(resetAt));
+      yield* orchestrator.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("wake:limit-lead"),
+        threadId: lead,
+        reason: "user",
+        scope: "tree",
+      });
+      assert.isNull(yield* snoozedUntil(lead));
+      assert.equal(yield* snoozedUntil(limited), DateTime.formatIso(resetAt));
+    }),
+  );
+
+  it.effect("applies a snooze when idle only while that request is still the pending one", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("thread:cancelled-wait");
+      yield* createThread(threadId);
+      const run = yield* send(threadId, "busy for a while");
+      const until = yield* later(3);
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze:cancelled-wait"),
+        threadId,
+        snoozedUntil: until,
+        whenIdle: true,
+      });
+      const requestedAt = (yield* snoozeWhenIdleOf(threadId))!.requestedAt;
+      yield* endRun(threadId, run.id);
+      // The request was cancelled and a new one made after the reactor read it.
+      const stale = yield* orchestrator
+        .dispatch({
+          type: "thread.snooze",
+          commandId: CommandId.make("apply:stale-wait"),
+          threadId,
+          snoozedUntil: until,
+          whenIdleRequestedAt: "2000-01-01T00:00:00.000Z",
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(stale));
+      assert.isNull(yield* snoozedUntil(threadId));
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("apply:current-wait"),
+        threadId,
+        snoozedUntil: until,
+        whenIdleRequestedAt: requestedAt,
+      });
+      assert.equal(yield* snoozedUntil(threadId), until);
+    }),
+  );
+
   it.effect("a thread snoozes when idle at once if idle; new work or a wake calls it off", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -510,6 +597,80 @@ it.layer(layerTest)("snooze trees", (it) => {
       });
       assert.isNull(yield* snoozedUntil(threadId));
     }),
+  );
+
+  it.effect("counts a pull request watch as how a thread wakes, not as work", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const lead = ThreadId.make("thread:watching-lead");
+      const slice = ThreadId.make("thread:watching-slice");
+      const worktreePath = "/work/pods/watching";
+      yield* createThread(lead);
+      yield* createThread(slice, { supervisorThreadId: lead, worktreePath });
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request.watch",
+        commandId: CommandId.make("watch:watching-slice"),
+        threadId: slice,
+        host: "github.com",
+        repository: "pingdotgg/t3code",
+        number: 31,
+        watching: true,
+        link: { url: "https://github.com/pingdotgg/t3code/pull/31", source: "agent" },
+      });
+      const until = yield* later(2);
+      // Not refused as "still working", and no wait for the watch to end.
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze:watching-lead"),
+        threadId: lead,
+        snoozedUntil: until,
+        scope: "tree",
+      });
+      assert.equal(yield* snoozedUntil(slice), until);
+      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+      const parking = yield* projections.getThreadParking({ worktreePath });
+      assert.isTrue(parking.every((thread) => isThreadParked(thread, nowMs)));
+    }),
+  );
+
+  it.effect(
+    "waits for a background subagent, not for a pull request watch, to snooze when idle",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("thread:background-agent");
+        yield* createThread(threadId);
+        const run = yield* send(threadId, "start a background subagent");
+        yield* endRun(threadId, run.id);
+        const providerThread = (yield* orchestrator.getThreadProjection(
+          threadId,
+        )).providerThreads.find((candidate) => candidate.id === run.providerThreadId)!;
+        yield* projections.apply({
+          id: EventId.make("event:background-agent:task"),
+          type: "provider-thread.updated",
+          threadId,
+          providerInstanceId: instanceId,
+          occurredAt: yield* DateTime.now,
+          payload: {
+            ...providerThread,
+            pendingBackgroundTasks: [
+              { taskId: "native-subagent-1", description: "Reviewing", kind: "subagent" },
+            ],
+          },
+        });
+        // The client offers "Snooze only this thread when idle"; the server agrees it is working.
+        yield* orchestrator.dispatch({
+          type: "thread.snooze",
+          commandId: CommandId.make("snooze:background-agent"),
+          threadId,
+          snoozedUntil: yield* later(2),
+          whenIdle: true,
+        });
+        assert.isNull(yield* snoozedUntil(threadId));
+        assert.deepInclude(yield* snoozeWhenIdleOf(threadId), { scope: "thread" });
+      }),
   );
 
   it.effect("reads the threads on a worktree and whether each is parked", () =>

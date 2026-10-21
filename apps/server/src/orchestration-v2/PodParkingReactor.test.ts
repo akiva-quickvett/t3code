@@ -52,9 +52,16 @@ const makePods = (initial: Partial<PodRuntimeSnapshot>) => {
     park: (_id, options) =>
       Effect.gen(function* () {
         calls.push(`park${options.settled ? " settled" : ""}`);
-        if (!(yield* options.stillParked)) return false;
+        // As the runtime does: only threads that parked after the pod last started stop it.
+        const stillParked = options.parkedSince.pipe(
+          Effect.map(
+            (since) =>
+              since !== null && (pod.startedAt === null || since > Date.parse(pod.startedAt)),
+          ),
+        );
+        if (!(yield* stillParked)) return false;
         yield* options.beforeStop;
-        if (!(yield* options.stillParked)) return false;
+        if (!(yield* stillParked)) return false;
         pod = { ...pod, state: "stopped", parked: true };
         return true;
       }),
@@ -278,4 +285,72 @@ describe("PodParkingReactor", () => {
       expect(pods.calls).toEqual([]);
     }).pipe(Effect.provide(pods.layer));
   });
+
+  it.effect("keeps a pod the user started after its threads parked, until one parks again", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const snoozed = thread("thread:sleeping", now, {
+        snoozedUntil: DateTime.add(now, { hours: 4 }),
+        snoozedAt: now,
+      });
+      // Started from its chip a second after the snooze, to open the site or the shell.
+      const pods = makePods({
+        state: "running",
+        startedAt: DateTime.formatIso(DateTime.add(now, { seconds: 1 })),
+      });
+      yield* Effect.gen(function* () {
+        yield* put(snoozed);
+        yield* sweep;
+        // Asked, but the threads parked before the start: no sessions closed, still running.
+        expect(pods.calls).toEqual(["park"]);
+        expect(pods.current().state).toBe("running");
+
+        yield* TestClock.adjust("1 minute");
+        const later = yield* DateTime.now;
+        yield* put({ ...snoozed, snoozedAt: later, updatedAt: later });
+        yield* sweep;
+        expect(pods.calls).toEqual(["park", "park", "release sessions"]);
+        expect(pods.current().state).toBe("stopped");
+      }).pipe(Effect.provide(pods.layer));
+    }),
+  );
+
+  it.effect("stops a pod whose start failed after it came up, once its threads are parked", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const snoozed = thread("thread:kept-snoozed", now, {
+        snoozedUntil: DateTime.add(now, { hours: 1 }),
+        snoozedAt: now,
+      });
+      const failedStart = makePods({
+        state: "start_failed",
+        lastError: {
+          operation: "start",
+          message: "the stack's containers are gone",
+          at: "2026-10-21T00:00:00.000Z",
+        },
+      });
+      yield* Effect.gen(function* () {
+        yield* put(snoozed);
+        yield* sweep;
+        expect(failedStart.calls).toEqual(["park", "release sessions"]);
+        expect(failedStart.current()).toMatchObject({ state: "stopped", parked: true });
+      }).pipe(Effect.provide(failedStart.layer));
+
+      // A failed creation never brought its stack up; a stop would hide that its Retry builds it.
+      const failedCreate = makePods({
+        state: "start_failed",
+        lastError: {
+          operation: "create",
+          message: "compose up failed",
+          at: "2026-10-21T00:00:00.000Z",
+        },
+      });
+      yield* Effect.gen(function* () {
+        yield* put(snoozed);
+        yield* sweep;
+        expect(failedCreate.calls).toEqual([]);
+      }).pipe(Effect.provide(failedCreate.layer));
+    }),
+  );
 });

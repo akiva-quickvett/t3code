@@ -2369,6 +2369,7 @@ const make = Effect.gen(function* () {
             maxBatchThreads: 20,
             usageLimits: true,
             usageThreadTree: true,
+            snoozeTree: true,
           },
         };
       }),

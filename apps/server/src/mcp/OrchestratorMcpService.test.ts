@@ -1212,6 +1212,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.notInclude(JSON.stringify(capabilities), "example.com");
         assert.isTrue(capabilities.features.usageLimits);
         assert.isTrue(capabilities.features.usageThreadTree);
+        assert.isTrue(capabilities.features.snoozeTree);
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
     }),
   );

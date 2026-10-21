@@ -255,4 +255,6 @@ the threads it supervises. Choose **Snooze only this thread** to leave them awak
 is still working or waiting on you, the menu offers **Snooze when idle**, which snoozes the tree
 once that work ends, and the thread shows a small alarm clock until then; **Cancel snooze when
 idle** takes it back. A tree snooze gives every thread in it the same wake time, replacing an
-earlier one. **Wake thread** wakes the tree the same way.
+earlier one. **Wake thread** wakes the tree the same way. A thread that a usage limit put to sleep stays asleep
+until its limit resets, whether you snooze or wake the tree above it; wake it directly to bring it
+back sooner.

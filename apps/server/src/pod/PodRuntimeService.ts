@@ -69,6 +69,7 @@ import {
   boundedPodMessage,
   isPodTransitional,
   type PodInternalOperation,
+  podParkOperation,
   POD_LOOPBACK_ADDRESS,
   POD_OPERATION_RULES,
   type PodObservation,
@@ -138,17 +139,20 @@ export class PodRuntimeService extends Context.Service<
     /**
      * Stops (or, for snoozed threads under a `freeze` setting, freezes) a
      * running pod whose threads are all parked, marking it so a wake starts it
-     * again. Under the pod's state lock it asks `stillParked`, runs
-     * `beforeStop`, asks again and only then records the stop: a turn reads
-     * its pod under the same lock after its run is recorded as starting, so
-     * a turn that started meanwhile keeps the pod. Answers whether it parked.
+     * again. Only threads that parked after the pod was last asked to run
+     * stop it, so a pod the user started meanwhile stays up. Under the pod's
+     * state lock it asks `parkedSince`, runs `beforeStop`, asks again and
+     * only then records the stop: a turn reads its pod under the same lock
+     * after its run is recorded as starting, so a turn that started meanwhile
+     * keeps the pod. Answers whether it parked.
      */
     readonly park: (
       podId: PodRuntimeId,
       options: {
         /** Every thread on the worktree is settled, not just snoozed: always a stop. */
         readonly settled: boolean;
-        readonly stillParked: Effect.Effect<boolean>;
+        /** When the last of the pod's threads parked (epoch ms), or null while one is not. */
+        readonly parkedSince: Effect.Effect<number | null>;
         readonly beforeStop: Effect.Effect<void>;
       },
     ) => Effect.Effect<boolean, PodRuntimeError>;
@@ -671,6 +675,7 @@ const make = Effect.gen(function* () {
       checkHostPorts: podServices.checkHostPorts,
       proxyNetwork: hostnameMode ? proxy.network : null,
       recorded: { containerIds: snapshot.containerIds, volumeIds: snapshot.volumeIds },
+      recordsStack: snapshot.lastError === null,
       checkDnsPin: checkDnsPin(record, proxy),
     } satisfies PodOperationContext;
   });
@@ -897,14 +902,20 @@ const make = Effect.gen(function* () {
       podId,
       Effect.gen(function* () {
         const record = yield* requireRecord(podId);
-        const { state } = record.snapshot;
         const { podRuntime } = yield* settingsFor(record.snapshot.projectId);
-        const operation = options.settled || podRuntime.snoozeAction === "stop" ? "stop" : "freeze";
-        // Only a pod that runs, or one frozen whose threads now all settled, has memory to give back.
-        if (state !== "running" && !(state === "frozen" && operation === "stop")) return false;
-        if (!(yield* options.stillParked)) return false;
+        const operation = podParkOperation(
+          record.snapshot,
+          options.settled || podRuntime.snoozeAction === "stop" ? "stop" : "freeze",
+        );
+        if (operation === null) return false;
+        const startMark =
+          record.startRequestedAt ?? record.snapshot.startedAt ?? "1970-01-01T00:00:00.000Z";
+        const stillParked = options.parkedSince.pipe(
+          Effect.map((since) => since !== null && since > Date.parse(startMark)),
+        );
+        if (!(yield* stillParked)) return false;
         yield* options.beforeStop;
-        if (!(yield* options.stillParked)) return false;
+        if (!(yield* stillParked)) return false;
         const next = yield* requestLocked(record, operation, { parked: true });
         return next.parked === true;
       }),

@@ -72,6 +72,8 @@ export const make = Effect.gen(function* () {
       threadId,
       snoozedUntil: request.snoozedUntil,
       scope: request.scope,
+      // A cancel or new work that lands between this read and the root's lock wins.
+      whenIdleRequestedAt: request.requestedAt,
     });
   });
 
