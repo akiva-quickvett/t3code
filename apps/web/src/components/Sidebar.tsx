@@ -622,6 +622,22 @@ function useSidebarThreads(input: {
           ...(agentTreeDescendantsByRootKey.get(threadShellKey(thread)) ?? []),
         ]),
   );
+  // A nested row in its tree parent's project can skip the project cue. A
+  // supervised or delegated thread may live in another project, so it keeps it.
+  const agentTreeKeysInParentProject = new Set<string>();
+  if (agentTree !== null) {
+    for (const row of agentTreeRowByKey.values()) {
+      const parentKey = agentTree.parentKeyByKey.get(row.key);
+      const parent = parentKey === undefined ? undefined : agentTreeRowByKey.get(parentKey);
+      if (
+        parent !== undefined &&
+        parent.thread.environmentId === row.thread.environmentId &&
+        parent.thread.projectId === row.thread.projectId
+      ) {
+        agentTreeKeysInParentProject.add(row.key);
+      }
+    }
+  }
   // The open thread can sit inside a collapsed parent; that row says so.
   let agentTreeRouteHolderKey: string | null = null;
   if (agentTree !== null && routeThreadKey !== null && !agentTreeRowByKey.has(routeThreadKey)) {
@@ -643,6 +659,7 @@ function useSidebarThreads(input: {
     agentTreeDescendantsByRootKey,
     agentTreeRowByKey,
     agentTreeRouteHolderKey,
+    agentTreeKeysInParentProject,
     threads,
     workingShelfEnabled,
     searchableThreads: [
@@ -1685,6 +1702,8 @@ type SidebarThreadRowProps = {
   treeExpanded: boolean;
   /** Collapsed, with the open thread somewhere below it. */
   treeHoldsRoute: boolean;
+  /** Nested in a row of the same project, which already shows the project. */
+  treeInParentProject: boolean;
   onToggleAgentTree: (threadKey: string, expanded: boolean) => void;
 };
 
@@ -2079,6 +2098,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const sortableRootProps = sortable
     ? { ref: sortable.setNodeRef, style: sortableStyle, ...sortable.listeners }
     : {};
+  // Nested rows give their width to the title: the root row carries recency,
+  // and the role badge gets a small cap.
+  const isNestedTreeRow = props.treeDepth !== null && props.treeDepth > 0;
   const treeIndentStyle =
     props.treeDepth !== null && props.treeDepth > 0
       ? {
@@ -2287,8 +2309,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 {treeDisclosure}
               </span>
             )}
-            {/* A nested row is always in its root's project, so it skips the favicon. */}
-            {props.treeDepth !== null && props.treeDepth > 0 ? null : (
+            {props.treeInParentProject ? null : (
               <span
                 className={cn(
                   "flex shrink-0 items-center transition-opacity",
@@ -2306,7 +2327,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             {props.treeDepth === null ? (
               <ThreadRoleBadge thread={thread} />
             ) : (
-              <span className="flex min-w-0 max-w-[45%]">
+              <span className={cn("flex min-w-0", isNestedTreeRow ? "max-w-[30%]" : "max-w-[45%]")}>
                 <ThreadRoleBadge thread={thread} shrink />
               </span>
             )}
@@ -2325,6 +2346,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               <span
                 className={cn(
                   "relative ml-auto flex h-6 min-w-8 shrink-0 items-center justify-end",
+                  isNestedTreeRow && "min-w-0",
                   props.sweepAction !== null && "hidden",
                 )}
               >
@@ -2355,7 +2377,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       />
                       <TooltipPopup side="top">Dismiss Woke notification</TooltipPopup>
                     </Tooltip>
-                  ) : (
+                  ) : isNestedTreeRow ? null : (
                     <span className="text-xs">
                       <RelativeTimeLabel
                         timestamp={
@@ -3193,6 +3215,7 @@ export default function Sidebar() {
     agentTreeDescendantsByRootKey,
     agentTreeRowByKey,
     agentTreeRouteHolderKey,
+    agentTreeKeysInParentProject,
   } = useSidebarThreads({
     projectScopeKey,
     scopedProjectKeys,
@@ -5061,6 +5084,7 @@ export default function Sidebar() {
                             treeChildCount={treeRow?.childCount ?? 0}
                             treeExpanded={treeRow?.expanded ?? false}
                             treeHoldsRoute={agentTreeRouteHolderKey === threadKey}
+                            treeInParentProject={agentTreeKeysInParentProject.has(threadKey)}
                             onToggleAgentTree={setAgentTreeExpanded}
                             thread={thread}
                             variant={rowVariant}

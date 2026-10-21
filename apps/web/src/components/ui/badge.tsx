@@ -15,11 +15,6 @@ const badgeVariants = cva(
       variant: "default",
     },
     variants: {
-      // Lets a cramped row narrow the badge; wrap the label in a `truncate` span.
-      shrink: {
-        false: "",
-        true: "min-w-0 shrink justify-start overflow-hidden",
-      },
       size: {
         control:
           "h-7 min-w-7 rounded-[var(--control-radius)] px-[calc(--spacing(2)-1px)] text-sm sm:h-6 sm:min-w-6 sm:text-xs",
@@ -42,6 +37,12 @@ const badgeVariants = cva(
         warning: "bg-warning/8 text-warning-foreground dark:bg-warning/16",
         label:
           "bg-[color-mix(in_srgb,var(--label)_8%,transparent)] text-[color-mix(in_srgb,var(--label)_30%,var(--color-foreground))] dark:bg-[color-mix(in_srgb,var(--label)_12%,transparent)] dark:text-[color-mix(in_srgb,var(--label)_45%,var(--color-foreground))]",
+      },
+      // Lets a cramped row narrow the badge; wrap the label in a `truncate` span.
+      // Declared after size so its min-w-0 wins over the size's min width.
+      shrink: {
+        false: "",
+        true: "min-w-0 sm:min-w-0 shrink justify-start overflow-hidden",
       },
     },
   },
