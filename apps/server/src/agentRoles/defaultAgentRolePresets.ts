@@ -66,7 +66,17 @@ export const DEFAULT_AGENT_ROLE_PRESETS: ReadonlyArray<AgentRolePreset> = [
     "Slice orchestrator",
     OPUS_HIGH,
     "Own one goal: its branch, its pull request and the brokers that build it. Never write code yourself.",
-    { allowedChildRoles: ["broker", "research", "scout", "review-t1", "review-t2", "review-t3"] },
+    {
+      allowedChildRoles: [
+        "broker",
+        "research",
+        "scout",
+        "review-t1",
+        "review-t2",
+        "review-t3",
+        "ticket",
+      ],
+    },
   ),
   preset(
     "broker",

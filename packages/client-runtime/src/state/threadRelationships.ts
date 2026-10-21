@@ -1,9 +1,12 @@
 import type {
+  EnvironmentId,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadShell,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+
+import { scopedThreadKey, scopeThreadRef } from "../environment/scoped.ts";
 
 export type ThreadRelationshipKind = "parent" | "fork" | "subagent" | "supervised" | "transfer";
 
@@ -252,4 +255,213 @@ export function orderWebThreadLineageRows(input: {
     }
     return left.threadId < right.threadId ? -1 : left.threadId > right.threadId ? 1 : 0;
   });
+}
+
+type AgentTreeLineage = Pick<
+  OrchestrationV2ThreadShell["lineage"],
+  "parentThreadId" | "relationshipToParent" | "supervisorThreadId"
+>;
+
+export interface AgentTreeThread {
+  readonly environmentId: EnvironmentId;
+  readonly id: ThreadId;
+  /** ISO timestamp; siblings are ordered by it. */
+  readonly createdAt: string;
+  readonly lineage: AgentTreeLineage;
+}
+
+export interface AgentTree<T extends AgentTreeThread> {
+  /** Every thread with no parent in the tree, in the caller's order. */
+  readonly roots: ReadonlyArray<T>;
+  /** Children by parent key, oldest first. */
+  readonly childrenByKey: ReadonlyMap<string, ReadonlyArray<T>>;
+  readonly parentKeyByKey: ReadonlyMap<string, string>;
+}
+
+export interface AgentTreeRow<T extends AgentTreeThread> {
+  readonly thread: T;
+  readonly key: string;
+  readonly depth: number;
+  readonly childCount: number;
+  readonly expanded: boolean;
+}
+
+/**
+ * The thread an agent tree nests this one under: the thread that delegated it,
+ * or the thread supervising it. A supervised thread is top-level everywhere
+ * else, so `supervisorThreadId` is the only edge that puts it in the tree.
+ * Forks stay at the top level.
+ */
+export function agentTreeParentThreadId(thread: { readonly lineage: AgentTreeLineage }) {
+  if (thread.lineage.relationshipToParent === "subagent") return thread.lineage.parentThreadId;
+  return thread.lineage.supervisorThreadId ?? null;
+}
+
+/**
+ * The thread "Go to parent" opens: the thread this one was delegated or forked
+ * from, else its supervisor.
+ */
+export function navigationParentThreadId(
+  thread: Pick<OrchestrationV2ThreadShell, "forkedFrom"> & { readonly lineage: AgentTreeLineage },
+): ThreadId | null {
+  const parentThreadId =
+    thread.forkedFrom?.type === "run" ? thread.forkedFrom.threadId : thread.lineage.parentThreadId;
+  return parentThreadId ?? thread.lineage.supervisorThreadId ?? null;
+}
+
+function agentTreeKey(thread: Pick<AgentTreeThread, "environmentId" | "id">): string {
+  return scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+}
+
+function compareAgentTreeSiblings(left: AgentTreeThread, right: AgentTreeThread): number {
+  if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? -1 : 1;
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+}
+
+/**
+ * Nests threads under their agent parent. A thread whose parent is not in
+ * `threads` (deleted, archived, filtered out) is a root, and so is the first
+ * thread of any cycle in the lineage data, so every thread appears exactly once.
+ */
+export function deriveAgentTree<T extends AgentTreeThread>(
+  threads: ReadonlyArray<T>,
+): AgentTree<T> {
+  const byKey = new Map<string, T>();
+  for (const thread of threads) {
+    const key = agentTreeKey(thread);
+    if (!byKey.has(key)) byKey.set(key, thread);
+  }
+  const childrenByKey = new Map<string, T[]>();
+  const parentKeyByKey = new Map<string, string>();
+  const rootKeys = new Set<string>();
+  for (const [key, thread] of byKey) {
+    const parentThreadId = agentTreeParentThreadId(thread);
+    const parentKey =
+      parentThreadId === null
+        ? null
+        : agentTreeKey({ environmentId: thread.environmentId, id: parentThreadId });
+    if (parentKey === null || parentKey === key || !byKey.has(parentKey)) {
+      rootKeys.add(key);
+      continue;
+    }
+    parentKeyByKey.set(key, parentKey);
+    const siblings = childrenByKey.get(parentKey);
+    if (siblings === undefined) childrenByKey.set(parentKey, [thread]);
+    else siblings.push(thread);
+  }
+
+  const reached = new Set<string>();
+  const reachFrom = (rootKey: string) => {
+    const pending = [rootKey];
+    for (let key = pending.pop(); key !== undefined; key = pending.pop()) {
+      reached.add(key);
+      for (const child of childrenByKey.get(key) ?? []) pending.push(agentTreeKey(child));
+    }
+  };
+  for (const key of rootKeys) reachFrom(key);
+  // Whatever no root reaches is on a cycle or hangs off one. Walking up from it
+  // finds a thread on the cycle; cutting the edge into that thread makes it a
+  // root, with the rest of the cycle and anything hanging off it below.
+  if (reached.size < byKey.size) {
+    for (const key of byKey.keys()) {
+      if (reached.has(key)) continue;
+      const walked = new Set<string>();
+      let onCycle = key;
+      while (!walked.has(onCycle)) {
+        walked.add(onCycle);
+        onCycle = parentKeyByKey.get(onCycle)!;
+      }
+      const parentKey = parentKeyByKey.get(onCycle)!;
+      parentKeyByKey.delete(onCycle);
+      const siblings = childrenByKey.get(parentKey)!;
+      siblings.splice(siblings.indexOf(byKey.get(onCycle)!), 1);
+      rootKeys.add(onCycle);
+      reachFrom(onCycle);
+    }
+  }
+
+  for (const siblings of childrenByKey.values()) siblings.sort(compareAgentTreeSiblings);
+  return {
+    roots: [...byKey].flatMap(([key, thread]) => (rootKeys.has(key) ? [thread] : [])),
+    childrenByKey,
+    parentKeyByKey,
+  };
+}
+
+/**
+ * Makes a root of each thread that `outranks` says should not sit under the
+ * root it currently hangs from, such as live work under a parked parent. Its
+ * own descendants follow it. Parents are decided before their children.
+ */
+export function liftAgentTreeThreads<T extends AgentTreeThread>(
+  tree: AgentTree<T>,
+  outranks: (thread: T, root: T) => boolean,
+): AgentTree<T> {
+  const childrenByKey = new Map<string, T[]>();
+  const parentKeyByKey = new Map(tree.parentKeyByKey);
+  const lifted: T[] = [];
+  const pending = tree.roots.map((root) => ({ thread: root, root }));
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    const key = agentTreeKey(next.thread);
+    const kept: T[] = [];
+    for (const child of tree.childrenByKey.get(key) ?? []) {
+      if (outranks(child, next.root)) {
+        parentKeyByKey.delete(agentTreeKey(child));
+        lifted.push(child);
+        pending.push({ thread: child, root: child });
+      } else {
+        kept.push(child);
+        pending.push({ thread: child, root: next.root });
+      }
+    }
+    if (kept.length > 0) childrenByKey.set(key, kept);
+  }
+  return lifted.length === 0
+    ? tree
+    : { roots: [...tree.roots, ...lifted], childrenByKey, parentKeyByKey };
+}
+
+/**
+ * The rows shown for `roots`: each root, then its descendants depth-first while
+ * their parent is expanded. Children are collapsed unless `isExpanded` says so.
+ */
+export function flattenAgentTree<T extends AgentTreeThread>(
+  tree: Pick<AgentTree<T>, "childrenByKey">,
+  roots: ReadonlyArray<T>,
+  isExpanded: (key: string) => boolean,
+): ReadonlyArray<AgentTreeRow<T>> {
+  const rows: AgentTreeRow<T>[] = [];
+  const pending: Array<{ readonly thread: T; readonly depth: number }> = [];
+  for (let index = roots.length - 1; index >= 0; index -= 1) {
+    pending.push({ thread: roots[index]!, depth: 0 });
+  }
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    const key = agentTreeKey(next.thread);
+    const children = tree.childrenByKey.get(key) ?? [];
+    const expanded = children.length > 0 && isExpanded(key);
+    rows.push({ ...next, key, childCount: children.length, expanded });
+    if (!expanded) continue;
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push({ thread: children[index]!, depth: next.depth + 1 });
+    }
+  }
+  return rows;
+}
+
+/** The thread's agent ancestors, nearest first, stopping at a missing thread or a cycle. */
+export function agentTreeAncestorIds(
+  threadId: ThreadId,
+  lookup: (threadId: ThreadId) => { readonly lineage: AgentTreeLineage } | null,
+): ReadonlyArray<ThreadId> {
+  const ancestors: ThreadId[] = [];
+  const seen = new Set<ThreadId>([threadId]);
+  let current = lookup(threadId);
+  while (current !== null) {
+    const parentThreadId = agentTreeParentThreadId(current);
+    if (parentThreadId === null || seen.has(parentThreadId)) break;
+    seen.add(parentThreadId);
+    ancestors.push(parentThreadId);
+    current = lookup(parentThreadId);
+  }
+  return ancestors;
 }

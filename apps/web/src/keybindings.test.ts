@@ -270,6 +270,44 @@ describe("settle thread shortcut", () => {
   });
 });
 
+describe("agent tree shortcuts", () => {
+  it.each([
+    [{ key: "ArrowUp", metaKey: true, altKey: true }, "MacIntel", "thread.goToParent"],
+    [{ key: "ArrowUp", ctrlKey: true, altKey: true }, "Win32", "thread.goToParent"],
+    [
+      { key: "B", metaKey: true, altKey: true, shiftKey: true },
+      "MacIntel",
+      "sidebar.showAgentTree",
+    ],
+    [{ key: "B", ctrlKey: true, altKey: true, shiftKey: true }, "Linux", "sidebar.showAgentTree"],
+  ] as const)(
+    "resolves %o on %s to %s, unshadowed by later defaults",
+    (keys, platform, command) => {
+      assert.equal(
+        resolveShortcutCommand(event(keys), DEFAULT_RESOLVED_KEYBINDINGS, {
+          platform,
+          context: { terminalFocus: false },
+        }),
+        command,
+      );
+    },
+  );
+
+  it("leaves both shortcuts to a focused terminal", () => {
+    for (const keys of [
+      { key: "ArrowUp", ctrlKey: true, altKey: true },
+      { key: "B", ctrlKey: true, altKey: true, shiftKey: true },
+    ]) {
+      assert.isNull(
+        resolveShortcutCommand(event(keys), DEFAULT_RESOLVED_KEYBINDINGS, {
+          platform: "Linux",
+          context: { terminalFocus: true },
+        }),
+      );
+    }
+  });
+});
+
 describe("thread undo shortcut", () => {
   it("resolves mod+z with nothing editable focused", () => {
     assert.equal(

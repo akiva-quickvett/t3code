@@ -34,6 +34,14 @@ describe("DEFAULT_AGENT_ROLE_PRESETS", () => {
     ]);
   });
 
+  it("only lets a role delegate to roles that exist", () => {
+    for (const preset of DEFAULT_AGENT_ROLE_PRESETS) {
+      for (const child of preset.allowedChildRoles ?? []) {
+        expect(byId.has(child), `${preset.id} delegates to ${child}`).toBe(true);
+      }
+    }
+  });
+
   it("are valid presets", () => {
     for (const preset of DEFAULT_AGENT_ROLE_PRESETS) {
       expect(decodePreset(preset)).toEqual(preset);

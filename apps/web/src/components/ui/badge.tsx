@@ -10,6 +10,7 @@ const badgeVariants = cva(
   "relative inline-flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-sm border border-transparent font-medium outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 [&_svg:not([class*='opacity-'])]:opacity-80 [&_svg:not([class*='size-'])]:size-3.5 sm:[&_svg:not([class*='size-'])]:size-3 [&_svg]:pointer-events-none [&_svg]:shrink-0 [button&,a&]:cursor-pointer [button&,a&]:pointer-coarse:after:absolute [button&,a&]:pointer-coarse:after:size-full [button&,a&]:pointer-coarse:after:min-h-11 [button&,a&]:pointer-coarse:after:min-w-11",
   {
     defaultVariants: {
+      shrink: false,
       size: "default",
       variant: "default",
     },
@@ -37,6 +38,12 @@ const badgeVariants = cva(
         label:
           "bg-[color-mix(in_srgb,var(--label)_8%,transparent)] text-[color-mix(in_srgb,var(--label)_30%,var(--color-foreground))] dark:bg-[color-mix(in_srgb,var(--label)_12%,transparent)] dark:text-[color-mix(in_srgb,var(--label)_45%,var(--color-foreground))]",
       },
+      // Lets a cramped row narrow the badge; wrap the label in a `truncate` span.
+      // Declared after size so its min-w-0 wins over the size's min width.
+      shrink: {
+        false: "",
+        true: "min-w-0 sm:min-w-0 shrink justify-start overflow-hidden",
+      },
     },
   },
 );
@@ -44,11 +51,12 @@ const badgeVariants = cva(
 interface BadgeProps extends useRender.ComponentProps<"span"> {
   variant?: VariantProps<typeof badgeVariants>["variant"];
   size?: VariantProps<typeof badgeVariants>["size"];
+  shrink?: boolean | undefined;
 }
 
-function Badge({ className, variant, size, render, ...props }: BadgeProps) {
+function Badge({ className, variant, size, shrink, render, ...props }: BadgeProps) {
   const defaultProps = {
-    className: cn(badgeVariants({ className, size, variant })),
+    className: cn(badgeVariants({ className, shrink, size, variant })),
     "data-slot": "badge",
   };
 

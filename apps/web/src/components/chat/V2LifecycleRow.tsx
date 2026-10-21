@@ -345,18 +345,23 @@ const NOTIFICATION_OUTCOME_LABEL: Record<OrchestrationV2Notification["outcome"],
 export function SubagentNotificationLink(props: {
   readonly parentRef: ScopedThreadRef;
   readonly childThreadId: ThreadId;
+  /** The tasks the notification reports on, when its source names them. */
+  readonly taskIds: ReadonlyArray<NodeId> | undefined;
   readonly outcome: OrchestrationV2Notification["outcome"];
   readonly createdAt: string;
   readonly timestampFormat: TimestampFormat;
   readonly onOpenThread: (threadId: ThreadId) => void;
   readonly fallback: ReactNode;
 }) {
-  const agent = useAtomValue(
-    environmentThreadDetails.threadAtom(props.parentRef),
-    (thread) =>
-      thread?.projection.subagents.find((agent) => agent.childThreadId === props.childThreadId) ??
-      null,
-  );
+  const agent = useAtomValue(environmentThreadDetails.threadAtom(props.parentRef), (thread) => {
+    const agents = thread?.projection.subagents ?? [];
+    // A supervised thread or a followed-up child has a task per run; show the one reported.
+    return (
+      agents.find((agent) => props.taskIds?.includes(agent.id) === true) ??
+      agents.find((agent) => agent.childThreadId === props.childThreadId) ??
+      null
+    );
+  });
   if (agent === null) return props.fallback;
   // A subagent resumed since this notification shows its live status, not the outcome reported then.
   const resumed =
