@@ -257,8 +257,10 @@ export class PullRequestService extends Context.Service<
     readonly labelCandidates: (
       input: PullRequestRef,
     ) => Effect.Effect<PullRequestLabelCandidateList, PullRequestError>;
+    /** `background` marks a write the label rules make, which never spends the quota reserve. */
     readonly setLabels: (
       input: PullRequestLabelChangeInput,
+      options?: { readonly background?: boolean },
     ) => Effect.Effect<void, PullRequestError>;
     readonly invalidate: (
       input: PullRequestInvalidateInput,
@@ -557,7 +559,12 @@ function withRateLimitBackoff(
     ...(api.listLabelCandidates === undefined
       ? {}
       : { listLabelCandidates: interactive("listLabelCandidates", api.listLabelCandidates) }),
-    ...(api.setLabels === undefined ? {} : { setLabels: interactive("setLabels", api.setLabels) }),
+    ...(api.setLabels === undefined
+      ? {}
+      : {
+          setLabels: (input: Parameters<NonNullable<PullRequestProviderApi["setLabels"]>>[0]) =>
+            protect("setLabels", api.setLabels!(input), input.background !== true),
+        }),
     replyToThread: interactive("replyToThread", api.replyToThread),
     setReaction: interactive("setReaction", api.setReaction),
     setThreadResolution: interactive("setThreadResolution", api.setThreadResolution),
@@ -1500,6 +1507,7 @@ export const make = Effect.gen(function* () {
             ...(changeRequest.mergeability === undefined
               ? {}
               : { mergeability: changeRequest.mergeability }),
+            ...(changeRequest.labels === undefined ? {} : { labels: changeRequest.labels }),
             ...(changeRequest.stack === undefined ? {} : { stack: changeRequest.stack }),
           })),
         );
@@ -2309,7 +2317,7 @@ export const make = Effect.gen(function* () {
       }),
     );
 
-  const setLabels: PullRequestService["Service"]["setLabels"] = (input) =>
+  const setLabels: PullRequestService["Service"]["setLabels"] = (input, options) =>
     requireProject(input).pipe(
       Effect.flatMap((project): Effect.Effect<void, PullRequestError> => {
         const change = project.api.setLabels;
@@ -2337,6 +2345,7 @@ export const make = Effect.gen(function* () {
                   number: input.number,
                   labels: input.labels,
                   applied: input.applied,
+                  ...(options?.background === true ? { background: true } : {}),
                 }).pipe(Effect.mapError(toPullRequestError("setLabels"))),
           ),
         );
@@ -3185,14 +3194,14 @@ export const make = Effect.gen(function* () {
     });
 
   const invalidatedByMutation =
-    <I extends PullRequestRef>(
-      method: (input: I) => Effect.Effect<void, PullRequestError>,
-    ): ((input: I) => Effect.Effect<void, PullRequestError>) =>
-    (input) =>
+    <I extends PullRequestRef, O = never>(
+      method: (input: I, options?: O) => Effect.Effect<void, PullRequestError>,
+    ): ((input: I, options?: O) => Effect.Effect<void, PullRequestError>) =>
+    (input, options) =>
       Effect.gen(function* () {
         const ref = yield* canonicalRef(input);
         yield* readCache.invalidate(refScope(ref)).pipe(
-          Effect.andThen(method(input)),
+          Effect.andThen(method(input, options)),
           Effect.ensuring(readCache.invalidate(refScope(ref))),
           Effect.tap(() =>
             Effect.sync(() => {

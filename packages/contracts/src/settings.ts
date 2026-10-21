@@ -46,6 +46,11 @@ import {
   ProviderDriverKind,
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
+import {
+  DEFAULT_PULL_REQUEST_LABEL_RULES,
+  PullRequestLabelRules,
+  StoredPullRequestLabelRules,
+} from "./pullRequestLabelRules.ts";
 import { HeadroomPercent, UsageHeadroomSetting } from "./providerUsageLimits.ts";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
@@ -938,6 +943,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "branchNamePrefix",
   "branchNameInstructions",
   "pullRequestMergeMethod",
+  "pullRequestLabelRules",
   "sidebarAutoSettleOnMerge",
   "sidebarAutoSettleAfterDays",
   "sidebarAutoSettleKeepPullRequests",
@@ -981,6 +987,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   branchNamePrefix: Schema.optionalKey(TrimmedString),
   branchNameInstructions: Schema.optionalKey(TrimmedString),
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
+  pullRequestLabelRules: ForwardCompatibleOptional(PullRequestLabelRules),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
@@ -991,6 +998,26 @@ export const ProjectSettingsOverrides = Schema.Struct({
   ),
 } satisfies Record<ProjectScopedServerSettingKey | "providerInstances", unknown>);
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
+
+/**
+ * A project's override entry as a settings patch sends it. Clients round-trip the whole entry on
+ * every edit, and ones built before label rules never send them, so an entry without them keeps
+ * the stored ones; `null` clears them. Unlike the stored decode, a value the rules cannot apply
+ * is refused here.
+ */
+export const ProjectSettingsOverridesPatch = Schema.Struct({
+  ...ProjectSettingsOverrides.fields,
+  // Undefined, as a stored entry may hold it, counts as absent.
+  pullRequestLabelRules: Schema.optionalKey(
+    Schema.UndefinedOr(Schema.NullOr(PullRequestLabelRules)),
+  ),
+});
+export type ProjectSettingsOverridesPatch = typeof ProjectSettingsOverridesPatch.Type;
+
+/** A patch entry keeps this key when it leaves it out, so removing its override sends null. */
+export function projectOverrideClearsWithNull(key: ProjectScopedServerSettingKey): boolean {
+  return key === "pullRequestLabelRules";
+}
 
 /**
  * Whether `null` is a stored override value for this key rather than "unset".
@@ -1252,6 +1279,9 @@ export const ServerSettings = Schema.Struct({
   pullRequestMergeMethod: Schema.NullOr(PullRequestMergeMethod).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  pullRequestLabelRules: StoredPullRequestLabelRules.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_PULL_REQUEST_LABEL_RULES)),
+  ),
 
   // The driver-specific config blob is `Schema.Unknown` at this layer so
   // envelopes with unknown drivers (forks, downgrades, in-flight PR branches)
@@ -1478,7 +1508,7 @@ export const ServerSettingsPatch = Schema.Struct({
    * field existed cannot wipe it by editing another key.
    */
   projectSettingsOverrides: Schema.optionalKey(
-    Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverrides)),
+    Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverridesPatch)),
   ),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
   enableDeviceSupport: Schema.optionalKey(Schema.Boolean),
@@ -1522,6 +1552,7 @@ export const ServerSettingsPatch = Schema.Struct({
   reviewGuideModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   reviewGuideInstructions: Schema.optionalKey(TrimmedString),
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
+  pullRequestLabelRules: Schema.optionalKey(PullRequestLabelRules),
   observability: Schema.optionalKey(
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),

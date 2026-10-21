@@ -2269,6 +2269,13 @@ describe("batched pull request summaries", () => {
     baseRefName: "main",
     author: { __typename: "Bot", login: "renovate", avatarUrl: "https://a/r.png" },
     latestReviews: { nodes: [] },
+    labels: {
+      pageInfo: { hasNextPage: false },
+      nodes: [
+        { name: "Agent Done", color: "0e8a16" },
+        { name: " ", color: "ffffff" },
+      ],
+    },
     commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
     ...fields,
   });
@@ -2283,9 +2290,15 @@ describe("batched pull request summaries", () => {
       checksState: "failing",
       mergeability: "unknown",
       additions: 0,
+      labels: [{ name: "Agent Done", color: "0e8a16" }],
     });
     // The read did not ask about stacks, so the summary does not claim an answer.
     expect(mapped).not.toHaveProperty("stack");
+  });
+
+  it("leaves labels out when the pull request has more than one read returns", () => {
+    const labels = { pageInfo: { hasNextPage: true }, nodes: [{ name: "bug", color: "ffffff" }] };
+    expect(toPullRequestSummary(decodeSummary(summary({ labels })))).not.toHaveProperty("labels");
   });
 
   it("reads stack membership only where the read asked for it", () => {

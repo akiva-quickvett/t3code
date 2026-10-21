@@ -384,6 +384,21 @@ describe("projectSettingsOverrides patches", () => {
     });
   });
 
+  it("resets a project's label rules through the patch, which keeps them when omitted", () => {
+    const rules = { ...DEFAULT_SERVER_SETTINGS.pullRequestLabelRules, enabled: true };
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      projectSettingsOverrides: {
+        [projectId]: { defaultAutoPull: true, pullRequestLabelRules: rules },
+      },
+    });
+    const entry = clearProjectSettingsOverrides(settings, projectId, ["pullRequestLabelRules"]);
+    expect(entry).toEqual({ defaultAutoPull: true, pullRequestLabelRules: null });
+    const reset = applyServerSettingsPatch(settings, {
+      projectSettingsOverrides: { [projectId]: entry },
+    });
+    expect(reset.projectSettingsOverrides[projectId]).toEqual({ defaultAutoPull: true });
+  });
+
   it("builds replacement entries and clears individual keys", () => {
     const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       projectSettingsOverrides: {

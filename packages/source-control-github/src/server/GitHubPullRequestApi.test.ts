@@ -873,6 +873,10 @@ layer("GitHubPullRequestApi.layer", (it) => {
         latestReviews: {
           nodes: [{ state: "APPROVED", author: { __typename: "User", login: "reviewer" } }],
         },
+        labels: {
+          pageInfo: { hasNextPage: false },
+          nodes: [{ name: "Agent Building", color: "0e8a16" }],
+        },
         additions: 12,
         deletions: 3,
         changedFiles: 2,
@@ -1018,6 +1022,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
                       mergeable: "MERGEABLE",
                       reviewDecision: null,
                       latestReviews: { nodes: [] },
+                      labels: { pageInfo: { hasNextPage: false }, nodes: [] },
                       additions: 1,
                       deletions: 1,
                       changedFiles: 1,

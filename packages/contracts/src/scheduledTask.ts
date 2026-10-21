@@ -154,6 +154,28 @@ export const ScheduledTaskUpsertSchedule = Schema.Union([
 });
 export type ScheduledTaskUpsertSchedule = typeof ScheduledTaskUpsertSchedule.Type;
 
+export const ScheduledTaskAction = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("agentTurn").annotate({
+      description: "Send the prompt to an agent, in a new thread or the bound one.",
+    }),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("script").annotate({
+      description:
+        "Run one of the project's configured scripts in the project root. No agent, thread or model is involved.",
+    }),
+    // Only ever a lookup key into the project's scripts, never part of a command.
+    scriptId: TrimmedNonEmptyString.annotate({
+      description: "Id of a script configured in the project's settings.",
+    }),
+  }),
+]).annotate({
+  description:
+    "What a run does. Omit for an agent turn. A script action ignores the model and mode fields, and a webhook trigger passes no request data to the script.",
+});
+export type ScheduledTaskAction = typeof ScheduledTaskAction.Type;
+
 export const ScheduledTaskRunStatus = Schema.Literals(["never", "running", "succeeded", "failed"]);
 export type ScheduledTaskRunStatus = typeof ScheduledTaskRunStatus.Type;
 
@@ -186,6 +208,8 @@ export const ScheduledTask = Schema.Struct({
   lastRunError: Schema.NullOr(Schema.String),
   runCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   webhook: Schema.optional(ScheduledTaskWebhookEndpoint),
+  /** Absent means an agent turn, which is all a stock server stores. */
+  action: Schema.optional(ScheduledTaskAction),
 });
 export type ScheduledTask = typeof ScheduledTask.Type;
 
@@ -217,6 +241,10 @@ export const ScheduledTaskUpsertInput = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   createdBy: Schema.optional(OrchestrationV2Actor),
   creationSource: Schema.optional(OrchestrationV2CreationSource),
+  action: Schema.optional(ScheduledTaskAction).annotate({
+    description:
+      "What a run does. Omit to keep an existing task's action, or for an agent turn on a new task.",
+  }),
 });
 export type ScheduledTaskUpsertInput = typeof ScheduledTaskUpsertInput.Type;
 

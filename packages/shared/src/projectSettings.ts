@@ -6,6 +6,8 @@ import {
   type ProjectId,
   type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
+  type ProjectSettingsOverridesPatch,
+  projectOverrideClearsWithNull,
   resolveProjectProviderInstanceEnabled,
   type ResolvedServerSettings,
   type ServerSettings,
@@ -218,12 +220,20 @@ export function clearProjectSettingsOverrides(
   settings: Pick<ServerSettings, "projectSettingsOverrides">,
   projectId: ProjectId,
   keys: readonly ProjectScopedServerSettingKey[],
-): ProjectSettingsOverrides | null {
+): ProjectSettingsOverridesPatch | null {
   const current = settings.projectSettingsOverrides[projectId];
   if (current === undefined) return null;
-  const next = { ...current };
-  for (const key of keys) delete next[key];
-  return Object.keys(next).length === 0 ? null : next;
+  const removed = new Set<string>(keys);
+  const next = Object.fromEntries(
+    Object.entries(current).filter(([key, value]) => value !== undefined && !removed.has(key)),
+  ) as ProjectSettingsOverridesPatch;
+  if (Object.keys(next).length === 0) return null;
+  const cleared = keys.filter(
+    (key) => projectOverrideClearsWithNull(key) && Object.hasOwn(current, key),
+  );
+  return cleared.length === 0
+    ? next
+    : { ...next, ...Object.fromEntries(cleared.map((key) => [key, null])) };
 }
 
 export function resolveWorktreeCleanup(

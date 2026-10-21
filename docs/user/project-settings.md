@@ -73,6 +73,22 @@ Webhook tasks only run when their URL is called, so they can't be run
 immediately.
 Leaving an edited form asks before discarding unsaved changes.
 
+## Scheduled project actions
+
+A scheduled task can run one of a project's actions instead of an agent turn, for chores
+that need no model, such as syncing a project board. On desktop or web, open
+**Settings → Scheduled tasks**, create or edit a task, and set **Each run** to
+**Project action**, then pick the action. It runs in the project checkout without a thread,
+and the task's last run shows **succeeded** or **failed** with the exit code and the end of
+the action's error output. A run that takes longer than 30 minutes is stopped.
+
+Pausing, **Run now** and every schedule work as for agent tasks. On webhook, the request
+only starts the action: nothing from it reaches the command. If the action is later removed
+from the project, the next run fails and says so; you can still pause, rename or delete the task.
+Agents can schedule an action too, but only from a thread with full access. Mobile lists these
+tasks and keeps the action when you save one there, but its prompt and model fields do nothing for
+a project action; choose the action on desktop or web.
+
 ## Webhook automations
 
 In **Settings → Scheduled tasks**, choose **On webhook**
