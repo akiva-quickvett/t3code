@@ -5,6 +5,7 @@ import {
   CheckpointScopeId,
   MessageId,
   NodeId,
+  PodRuntimeId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderDriverKind,
@@ -46,6 +47,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import { PodProviderPlacement, ProviderPodRefusedError } from "../provider/PodProviderSessions.ts";
 
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
 
@@ -290,6 +292,9 @@ function makeLocalCommandHarness(input: {
   readonly interruptRunBeforeOpenFailure?: boolean;
   readonly writeFailure?: unknown;
   readonly failReadsAfterRunning?: boolean;
+  /** The provider thread names the instance's shared session, as a multi-thread provider's does. */
+  readonly sharedSession?: boolean;
+  readonly podPlacement?: typeof PodProviderPlacement.Service;
 }) {
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
   const threadId = ThreadId.make("thread-native-account-command");
@@ -297,10 +302,13 @@ function makeLocalCommandHarness(input: {
   const rootNodeId = NodeId.make("root-native-account-command");
   const attemptId = RunAttemptId.make("attempt-native-account-command");
   const providerThreadId = ProviderThreadId.make("new-provider-thread");
-  const providerSessionId = ProviderSessionId.make("new-provider-session");
   const oldProviderThreadId = ProviderThreadId.make("existing-native-provider-thread");
   const oldInstanceId = ProviderInstanceId.make("antigravity-personal");
   const newInstanceId = ProviderInstanceId.make("codex-personal");
+  const providerSessionId =
+    input.sharedSession === true
+      ? IdAllocator.derive.providerSession({ providerInstanceId: newInstanceId })
+      : ProviderSessionId.make("new-provider-session");
   const checkpointScopeId = CheckpointScopeId.make("scope-native-account-command");
   const messageId = MessageId.make("message-native-account-command");
   const run: OrchestrationV2ThreadProjection["runs"][number] = {
@@ -568,6 +576,9 @@ function makeLocalCommandHarness(input: {
         )
       : Effect.void,
   );
+  const detach = vi.fn<ProviderSessionManager.ProviderSessionManagerV2Shape["detach"]>(
+    () => Effect.void,
+  );
   const tryHandlePromptCommand = vi.fn(() =>
     input.logoutFailure === undefined
       ? Effect.succeed(true)
@@ -662,7 +673,10 @@ function makeLocalCommandHarness(input: {
               }),
             ),
         }),
-        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open, detach }),
+        ...(input.podPlacement === undefined
+          ? []
+          : [Layer.succeed(PodProviderPlacement, input.podPlacement)]),
         Layer.mock(ProviderAuthService.ProviderAuthService)({ tryHandlePromptCommand }),
         Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({
@@ -680,6 +694,7 @@ function makeLocalCommandHarness(input: {
     resolveRuntimePolicy,
     createWorktree,
     open,
+    detach,
     writeIfRunCurrent,
     startRootRun,
     tryHandlePromptCommand,
@@ -796,6 +811,77 @@ effectIt.effect("reads only thread state before taking the startup lease", () =>
     );
     expect(harness.getTurnStartContext).toHaveBeenCalledOnce();
     expect(harness.projection().runs.at(-1)?.status).toBe("completed");
+  }),
+);
+
+effectIt.effect.each([
+  { place: "pod", podId: PodRuntimeId.make("pod-turnstart1") },
+  { place: "host", podId: undefined },
+] as const)("opens the shared session of the place a run starts in ($place)", ({ podId }) =>
+  Effect.gen(function* () {
+    const worktreePath = "/tmp/provider-start-pod-worktree";
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      worktreePath,
+      failReadsAfterRunning: true,
+      sharedSession: true,
+      // The pod exists by the time the run starts, though not when it was queued.
+      podPlacement: {
+        place: () => Effect.die("unused"),
+        podFor: ({ cwd }) => Effect.succeed(cwd === worktreePath ? podId : undefined),
+      },
+    });
+    const hostShared = IdAllocator.derive.providerSession({
+      providerInstanceId: harness.newInstanceId,
+    });
+    yield* harness.start;
+    const opened = harness.open.mock.calls.at(0)?.at(0) as
+      | { readonly providerSessionId: string }
+      | undefined;
+    if (podId === undefined) {
+      expect(opened?.providerSessionId).toBe(hostShared);
+      expect(harness.detach).not.toHaveBeenCalled();
+      return;
+    }
+    const podShared = IdAllocator.derive.providerSession({
+      providerInstanceId: harness.newInstanceId,
+      scope: podId,
+    });
+    expect(opened?.providerSessionId).toBe(podShared);
+    // The provider thread is recorded on the pod's session, so later runs keep it.
+    expect(
+      harness.events.some(
+        (event) =>
+          event.type === "provider-thread.updated" && event.payload.providerSessionId === podShared,
+      ),
+    ).toBe(true);
+    expect(harness.detach).toHaveBeenCalledWith(
+      expect.objectContaining({ providerSessionId: hostShared }),
+    );
+  }),
+);
+
+effectIt.effect("keeps the host's shared session for a thread its pod refuses", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      worktreePath: "/tmp/provider-start-refused-worktree",
+      failReadsAfterRunning: true,
+      sharedSession: true,
+      podPlacement: {
+        place: () => Effect.die("unused"),
+        podFor: () =>
+          Effect.fail(new ProviderPodRefusedError({ reason: "OpenCode cannot run in a pod." })),
+      },
+    });
+    yield* harness.start;
+    const opened = harness.open.mock.calls.at(0)?.at(0) as
+      | { readonly providerSessionId: string }
+      | undefined;
+    expect(opened?.providerSessionId).toBe(
+      IdAllocator.derive.providerSession({ providerInstanceId: harness.newInstanceId }),
+    );
+    expect(harness.detach).not.toHaveBeenCalled();
   }),
 );
 

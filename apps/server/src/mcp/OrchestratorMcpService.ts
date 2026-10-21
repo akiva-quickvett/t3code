@@ -98,6 +98,7 @@ import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { podRefusalReason } from "../provider/PodProviderSessions.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
@@ -2295,6 +2296,7 @@ const make = Effect.gen(function* () {
           runtimeMode: limits.runtimeMode,
           interactionMode: limits.interactionMode,
           providers: providers.map((provider) => {
+            const podRefusal = podRefusalReason(provider.driver);
             const constraints = providerConstraints(
               provider,
               orchestrationCapableInstanceIds.has(provider.instanceId),
@@ -2325,6 +2327,7 @@ const make = Effect.gen(function* () {
               canRunCrossProviderChildTask: constraints.length === 0,
               constraints: [...constraints],
               headroom: agentHeadroom(provider, settings.usageHeadroom, now),
+              ...(podRefusal === undefined ? {} : { podRefusal }),
             };
           }),
           rolePresets: rolePresets.map((preset) => ({

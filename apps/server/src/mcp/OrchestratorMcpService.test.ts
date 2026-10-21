@@ -1214,6 +1214,41 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
+  it.effect("lists why a provider's sessions are refused on a pod's worktree", () =>
+    Effect.gen(function* () {
+      const providers = [
+        providerSnapshot({
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+        }),
+        providerSnapshot({
+          instanceId: ProviderInstanceId.make("cursor"),
+          driver: ProviderDriverKind.make("cursor"),
+        }),
+      ];
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(parentProjection([])),
+        }),
+        ServerSettings.layerTest(),
+        providerRegistryLayer(providers),
+        adapterRegistryLayer(providers.map((provider) => provider.instanceId)),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const capabilities = yield* service.capabilities(scope);
+        const [codex, cursor] = capabilities.providers;
+        assert.isUndefined(codex?.podRefusal);
+        assert.include(cursor?.podRefusal, "inside the T3 server process");
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
   it.effect("leaves models the user hid out of the capability catalog", () =>
     Effect.gen(function* () {
       const codex = providerSnapshot({

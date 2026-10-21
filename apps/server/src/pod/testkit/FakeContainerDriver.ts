@@ -9,6 +9,7 @@ import {
   type PodContainerInfo,
   type PodContainerSpec,
   type PodContainerStatus,
+  type PodNetworkInfo,
 } from "../ContainerDriver.ts";
 
 export interface FakeContainer {
@@ -38,6 +39,7 @@ export const makeFakeContainerDriver = () => {
   let failWhen: (call: FakeCall) => boolean = () => false;
   let dieWhen: (call: FakeCall) => boolean = () => false;
   let execExitCode: (call: FakeCall) => number | null = () => 0;
+  let podNetwork: PodNetworkInfo = { subnet: "172.18.0.0/16", gateway: "172.18.0.1" };
   let containerLogs: (name: string) => string = () => "";
   let execOutput: (call: FakeCall) => string = () => "";
   /** Containers other than the pod's, such as a proxy, as `docker inspect` reports them. */
@@ -109,6 +111,7 @@ export const makeFakeContainerDriver = () => {
           })),
         ),
       ensureNetwork: (name) => record("network", name).pipe(Effect.asVoid),
+      inspectNetwork: (name) => record("network", name).pipe(Effect.map(() => podNetwork)),
       createVolume: ({ name, labels }) =>
         record("createVolume", name).pipe(
           Effect.tap(() => Effect.sync(() => state.volumes.set(name, { ...labels }))),
@@ -212,6 +215,10 @@ export const makeFakeContainerDriver = () => {
     },
     execExitCode: (resolve: (call: FakeCall) => number | null) => {
       execExitCode = resolve;
+    },
+    /** What every pod network reports as its subnet and gateway. */
+    setNetwork: (info: PodNetworkInfo) => {
+      podNetwork = info;
     },
     /** What a container that is not a pod's, such as the hostname proxy, inspects as. */
     seedInspection: (name: string, inspection: ContainerInspection | null) => {

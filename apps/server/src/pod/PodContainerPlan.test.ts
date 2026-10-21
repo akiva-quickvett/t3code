@@ -52,7 +52,7 @@ describe("pod container plan", () => {
       "bind /home/dev/.claude:/home/dev/.claude",
       "bind /home/dev/.codex:/home/dev/.codex",
       "bind /home/dev/.codex-work:/home/dev/.codex-work",
-      "bind /home/dev/.local/bin:/opt/t3/provider-bin/0 ro",
+      "bind /home/dev/.local/bin:/opt/t3/provider-bin/home/dev/.local/bin ro",
       "bind /home/dev/.gitconfig:/home/dev/.gitconfig ro",
       "bind /home/dev/.config/gh:/home/dev/.config/gh ro",
       "bind /home/dev/pods/seeds/repo:/seeds/repo ro",
@@ -94,10 +94,18 @@ describe("pod container plan", () => {
       DOCKER_HOST: "tcp://127.0.0.1:2375",
     });
     // Host binaries come after the image's own, so they never shadow them.
-    expect(env.PATH?.endsWith(":/bin:/opt/t3/provider-bin/0")).toBe(true);
+    expect(env.PATH?.endsWith(":/bin:/opt/t3/provider-bin/home/dev/.local/bin")).toBe(true);
     expect(user).toBe("1000:1000");
     expect(workdir).toBe("/home/dev/worktrees/feature");
     expect(network).toEqual({ mode: "container", container: "t3-env1-pod-abc123-dind" });
+  });
+
+  it("records on the daemon the network the pod was made on", () => {
+    const { dind } = planPod(input);
+    expect(dind.labels).toMatchObject({ "t3.network": "t3-pods" });
+    // Beside the daemon's own command, which keeps dockerd first.
+    expect(dind.command[0]).toBe("dockerd");
+    expect(dind.hostAlias).toBe("host.docker.internal");
   });
 
   it("labels everything with the pod and the environment that owns it", () => {

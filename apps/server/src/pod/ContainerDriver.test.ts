@@ -25,7 +25,14 @@ const recordingDriver = (
         runs.push(input);
         const response = respond(input);
         return {
-          stdout: response.stdout ?? "container-id\n",
+          // A pod network's inspect answers with its subnet and gateway.
+          stdout:
+            response.stdout ??
+            (input.args[0] === "network"
+              ? JSON.stringify([
+                  { IPAM: { Config: [{ Subnet: "172.18.0.0/16", Gateway: "172.18.0.1" }] } },
+                ])
+              : "container-id\n"),
           stderr: response.stderr ?? "",
           code: (response.code ?? 0) as never,
           timedOut: false,
@@ -74,7 +81,7 @@ describe("Docker container driver", () => {
         const docker = yield* host;
         yield* docker.createContainer(plan.dind);
         yield* docker.createContainer(plan.agent);
-        const [dind, agent] = runs;
+        const [, dind, agent] = runs;
         expect(dind?.args).toEqual(expect.arrayContaining(["--init", "--privileged"]));
         expect(agent?.args).toContain("--init");
         expect(agent?.args).not.toContain("--privileged");
@@ -91,6 +98,24 @@ describe("Docker container driver", () => {
           "type=bind,src=/home/dev/repo/.git,dst=/home/dev/repo/.git",
           "type=bind,src=/home/dev/.claude,dst=/home/dev/.claude",
         ]);
+      }),
+    ),
+  );
+
+  it.effect("points the host alias at the pod network's gateway, shared by the agent", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { runs, host } = recordingDriver();
+        const docker = yield* host;
+        yield* docker.createContainer(plan.dind);
+        yield* docker.createContainer(plan.agent);
+        const [inspect, dind, agent] = runs;
+        expect(inspect?.args).toEqual(["network", "inspect", "t3-pods"]);
+        expect(dind?.args).toEqual(
+          expect.arrayContaining(["--add-host", "host.docker.internal:172.18.0.1"]),
+        );
+        // Docker refuses --add-host with a container network; the agent uses the daemon's hosts file.
+        expect(agent?.args).not.toContain("--add-host");
       }),
     ),
   );
@@ -165,7 +190,7 @@ describe("Docker container driver", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const { runs, host } = recordingDriver((input) =>
-          input.args[0] === "network"
+          input.args[0] === "network" && input.args[1] === "connect"
             ? {
                 stderr:
                   "Error response from daemon: endpoint with name t3-dind already exists in network pods",

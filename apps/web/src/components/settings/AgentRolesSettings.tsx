@@ -574,7 +574,7 @@ function AgentRoleEditorDialog(props: {
                   onChange={(contextWindow) => update({ contextWindow })}
                 />
               </Field>
-              <Field label="Runs in" hint="recorded for pods" htmlFor="role-runs-in">
+              <Field label="Runs in" hint="providers that can't use pods" htmlFor="role-runs-in">
                 <OptionalSelect
                   id="role-runs-in"
                   value={draft.runsIn}

@@ -22,6 +22,8 @@ export interface McpCredentialRequest {
    */
   readonly browserToolsAvailable?: boolean;
   readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
+  /** The URL the provider is given; the server's own address when absent. */
+  readonly endpoint?: string;
 }
 
 export interface McpIssuedCredential {
@@ -70,6 +72,13 @@ const bytesToHex = (bytes: Uint8Array): string =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 
 const tokenFromBytes = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64url");
+
+/**
+ * Provider-session tokens are a bare base64url secret; OAuth client session
+ * tokens are `<payload>.<signature>`, so a dot tells them apart.
+ */
+export const looksLikeProviderSessionToken = (token: string) =>
+  token.length > 0 && !token.includes(".");
 
 const getHttpMcpEndpointHost = (address: NetAddress.IpAddress): string =>
   NetAddress.isUnspecified(address)
@@ -139,7 +148,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           threadId: scope.thread.threadId,
           providerSessionId,
           providerInstanceId: scope.thread.providerInstanceId,
-          endpoint,
+          endpoint: request.endpoint ?? endpoint,
           authorizationHeader: `Bearer ${rawToken}`,
           browserToolsAvailable: scope.capabilities.has("preview"),
           capabilities: scope.capabilities,

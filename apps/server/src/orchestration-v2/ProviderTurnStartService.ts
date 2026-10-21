@@ -8,6 +8,7 @@ import {
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
+  type ProviderSessionId,
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2TurnItem,
@@ -54,7 +55,11 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import { adapterRole, rolePromptNote } from "./RoleInstructions.ts";
-import { findAgentRolePreset } from "../agentRoles/AgentRolePresetService.ts";
+import {
+  findAgentRolePreset,
+  threadRolePresetRunsIn,
+} from "../agentRoles/AgentRolePresetService.ts";
+import { PodProviderPlacement } from "../provider/PodProviderSessions.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import {
   isRestartNoteContinuation,
@@ -135,6 +140,7 @@ export const layer: Layer.Layer<
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
     const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+    const podPlacement = yield* PodProviderPlacement;
     // What each provider thread was last told about its role, for providers that
     // take it in the prompt. A restart forgets this, so the role is repeated once.
     const deliveredRoleKeys = new Map<string, string>();
@@ -158,6 +164,56 @@ export const layer: Layer.Layer<
         ),
       );
     };
+    /**
+     * A shared provider session is one process, which runs in one place. The
+     * orchestrator names it when the run is queued, which for a new worktree
+     * is before its pod exists, so the run start moves the thread to the
+     * session of the place it runs in now: its pod's, or the host's.
+     */
+    const placeSharedSession = Effect.fn("ProviderTurnStartService.placeSharedSession")(
+      function* (input: {
+        readonly thread: OrchestrationV2AppThread;
+        readonly providerThread: OrchestrationV2ProviderThread;
+        readonly storedSessionId: ProviderSessionId;
+        readonly cwd: string | null;
+      }) {
+        const { providerInstanceId, driver } = input.providerThread;
+        const shared = idAllocator.derive.providerSession({ providerInstanceId });
+        const stored = input.storedSessionId;
+        if (stored !== shared && !stored.startsWith(`${shared}:`)) return stored;
+        const { cwd } = input;
+        const runsIn = yield* serverSettings.getSettings.pipe(
+          Effect.map((settings) => threadRolePresetRunsIn(settings, input.thread)),
+          Effect.catch((cause) =>
+            Effect.logWarning("Could not read the thread's role preset.", {
+              threadId: input.thread.id,
+              cause,
+            }).pipe(Effect.as(undefined)),
+          ),
+        );
+        const podId =
+          cwd === null
+            ? undefined
+            : yield* podPlacement.podFor({ cwd, driver, runsIn }).pipe(
+                // A thread its pod refuses keeps the host's; opening says why.
+                Effect.catchTags({ ProviderPodRefusedError: () => Effect.succeed(undefined) }),
+              );
+        const placed = idAllocator.derive.providerSession({
+          providerInstanceId,
+          ...(podId === undefined ? {} : { scope: podId }),
+        });
+        if (placed !== stored) {
+          yield* providerSessions
+            .detach({
+              providerSessionId: stored,
+              threadId: input.thread.id,
+              detail: "The thread's workspace moved into or out of a pod.",
+            })
+            .pipe(Effect.ignore);
+        }
+        return placed;
+      },
+    );
     // Only Claude logins carry an organization for now; other drivers keep handing off silently.
     const instanceOrganization = (instanceId: ProviderInstanceId) =>
       providerAdapters.getMetadata === undefined
@@ -552,7 +608,6 @@ export const layer: Layer.Layer<
       const inheritedBackgroundTurnItems = yield* projectionStore
         .getRuntimeRecoveryProjection(projection.thread.id)
         .pipe(Effect.map(selectInheritedBackgroundItems));
-      const providerSessionId = providerThread.providerSessionId;
       const runControls = makeRunControls({
         threadId: projection.thread.id,
         runId: run.id,
@@ -566,6 +621,12 @@ export const layer: Layer.Layer<
       const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
         thread: projection.thread,
         modelSelection: run.modelSelection,
+      });
+      const providerSessionId = yield* placeSharedSession({
+        thread: projection.thread,
+        providerThread,
+        storedSessionId: providerThread.providerSessionId,
+        cwd: resolvedRuntimePolicy.cwd,
       });
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,

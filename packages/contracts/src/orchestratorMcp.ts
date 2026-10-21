@@ -556,6 +556,11 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
   constraints: Schema.Array(Schema.String),
   /** Missing on older servers; see t3_usage_limits. */
   headroom: Schema.optional(AgentUsageHeadroom),
+  /**
+   * Why its sessions are refused on a pod's worktree unless the role preset
+   * says `runsIn: host`. Absent when they run in the pod, and on older servers.
+   */
+  podRefusal: Schema.optional(Schema.String),
 });
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
 
