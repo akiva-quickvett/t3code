@@ -46,6 +46,7 @@ describe("V2 preview upgrade", () => {
         [64, "CanonicalizeThreadPullRequestLinks"],
         [65, "ScheduledTaskActions"],
         [66, "ProjectionThreadTreeParentIndex"],
+        [67, "ChatChannels"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -135,6 +136,7 @@ describe("V2 preview upgrade", () => {
         [64, "CanonicalizeThreadPullRequestLinks"],
         [65, "ScheduledTaskActions"],
         [66, "ProjectionThreadTreeParentIndex"],
+        [67, "ChatChannels"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

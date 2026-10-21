@@ -99,6 +99,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  ChatChannelRpcGroup,
   ServerSettings as ServerSettingsSchema,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
@@ -124,6 +125,7 @@ import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as AgentRolePresetService from "./agentRoles/AgentRolePresetService.ts";
+import * as ChatChannelService from "./chat/ChatChannelService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import {
   archivedShellStreamItemFromThreadShell,
@@ -561,6 +563,24 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
+// Chat channel RPCs have their own handler layer; see ChatChannelRpcGroup.
+const ServerCoreWsRpcGroup = ServerWsRpcGroup.omit(
+  WS_METHODS.chatChannelsSubscribe,
+  WS_METHODS.chatChannelsMutate,
+  WS_METHODS.chatChannelsGetTemplateStatus,
+);
+const ServerChatChannelRpcGroup = ChatChannelRpcGroup.middleware(RpcInstrumentation);
+
+const layerChatChannelRpc = ServerChatChannelRpcGroup.toLayer(
+  Effect.gen(function* () {
+    const chatChannels = yield* ChatChannelService.ChatChannelService;
+    return ServerChatChannelRpcGroup.of({
+      [WS_METHODS.chatChannelsSubscribe]: (_input) => chatChannels.subscribe(),
+      [WS_METHODS.chatChannelsMutate]: (input) => chatChannels.mutate(input),
+      [WS_METHODS.chatChannelsGetTemplateStatus]: (input) => chatChannels.templateStatus(input),
+    });
+  }),
+);
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
@@ -1182,7 +1202,7 @@ const layerWsRpc = (
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
 ) =>
-  ServerWsRpcGroup.toLayer(
+  ServerCoreWsRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
@@ -1807,7 +1827,7 @@ const layerWsRpc = (
         return result;
       });
 
-      const handlers = ServerWsRpcGroup.of({
+      const handlers = ServerCoreWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -3179,12 +3199,15 @@ export const layer = Layer.unwrap(
           return httpEffect;
         }).pipe(
           Effect.provide(
-            layerWsRpc(
-              session,
-              clientOrigin,
-              clientAnalyticsProps,
-              previewAutomationBroker,
-              serverBrowser,
+            Layer.merge(
+              layerWsRpc(
+                session,
+                clientOrigin,
+                clientAnalyticsProps,
+                previewAutomationBroker,
+                serverBrowser,
+              ),
+              layerChatChannelRpc,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Request fibers run in the handlers' context, so this reporter sees

@@ -59,6 +59,7 @@ export interface SettingsSearchItem {
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
   readonly requiresPullRequestLabelRules?: boolean;
+  readonly requiresChatChannels?: boolean;
 }
 
 export interface SettingsSearchAvailability {
@@ -72,6 +73,7 @@ export interface SettingsSearchAvailability {
   readonly hasThreadAutoSettlement: boolean;
   readonly managedTunnelActive?: boolean;
   readonly hasPullRequestLabelRules?: boolean;
+  readonly hasChatChannels?: boolean;
 }
 
 export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
@@ -705,6 +707,29 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["xcode android studio sdk avd runtime"],
   },
   {
+    id: "messaging-channels",
+    title: "Messaging channels",
+    to: "/settings/integrations",
+    targetId: "messaging",
+    searchTerms: ["whatsapp bugbot chat channel access token phone number app secret template"],
+    requiresChatChannels: true,
+  },
+  {
+    id: "messaging-contacts",
+    title: "Messaging contacts",
+    to: "/settings/integrations",
+    targetId: "messaging",
+    searchTerms: ["whatsapp bugbot people phone numbers bot thread"],
+    requiresChatChannels: true,
+  },
+  {
+    id: "messaging-production-access",
+    title: "Production access for investigation pods",
+    to: "/settings/integrations",
+    searchTerms: ["bugbot railway database read-only investigator prod"],
+    requiresChatChannels: true,
+  },
+  {
     id: "browser-profiles",
     title: "Browser profiles",
     to: "/settings/integrations",
@@ -1143,7 +1168,8 @@ export function filterAvailableSettingsSearchItems(
       (!item.wslAvailableOnly || availability.isWslSettingsRowVisible) &&
       (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement) &&
       (!item.managedTunnelOnly || availability.managedTunnelActive === true) &&
-      (!item.requiresPullRequestLabelRules || availability.hasPullRequestLabelRules === true),
+      (!item.requiresPullRequestLabelRules || availability.hasPullRequestLabelRules === true) &&
+      (!item.requiresChatChannels || availability.hasChatChannels === true),
   );
 }
 
