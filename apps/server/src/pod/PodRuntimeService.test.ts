@@ -9,6 +9,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -25,6 +26,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ContainerDriver from "./ContainerDriver.ts";
+import * as PodHostnameRouter from "./PodHostnameRouter.ts";
 import * as PodHostPorts from "./PodHostPorts.ts";
 import * as PodRuntimeService from "./PodRuntimeService.ts";
 import * as PodRuntimeStore from "./PodRuntimeStore.ts";
@@ -32,6 +34,10 @@ import {
   makeFakeContainerDriver,
   type FakeContainerDriver,
 } from "./testkit/FakeContainerDriver.ts";
+import {
+  type FakePodHostnameRouter,
+  makeFakePodHostnameRouter,
+} from "./testkit/FakePodHostnameRouter.ts";
 
 const projectId = ProjectId.make("project-pods");
 const worktreePath = "/work/pods/feature";
@@ -41,21 +47,33 @@ const ENVIRONMENT = "env-test";
 interface FakeHostNetwork {
   readonly busy: Set<string>;
   tailnetAddress: string | null;
+  resolvConf: string;
 }
 
-const makeFakeHostNetwork = (): FakeHostNetwork => ({ busy: new Set(), tailnetAddress: null });
+const makeFakeHostNetwork = (): FakeHostNetwork => ({
+  busy: new Set(),
+  tailnetAddress: null,
+  resolvConf: "",
+});
 
 const harness = (options: {
   readonly driver: FakeContainerDriver;
   readonly enabled?: boolean;
   readonly publishOnTailnet?: boolean;
+  readonly dnsServers?: ReadonlyArray<string>;
+  readonly dockerHost?: string;
   readonly projectFile?: T3ProjectFile | null;
   readonly network?: FakeHostNetwork;
+  readonly router?: FakePodHostnameRouter;
+  readonly projects?: ReadonlyArray<{ readonly id: ProjectId; readonly workspaceRoot: string }>;
 }) => {
   const opened: Array<string> = [];
   const network = options.network ?? makeFakeHostNetwork();
   /** What the preview's server list probes for each pod, by owner. */
-  const discovery = new Map<string, ReadonlyArray<string>>();
+  const discovery = new Map<
+    string,
+    ReadonlyArray<string | { readonly url: string; readonly probeUrl: string }>
+  >();
   const base = Layer.mergeAll(
     PodRuntimeStore.layer,
     Layer.succeed(ContainerDriver.ContainerDriver, options.driver.driver),
@@ -63,11 +81,18 @@ const harness = (options: {
       podRuntime: {
         enabled: options.enabled ?? true,
         publishOnTailnet: options.publishOnTailnet ?? false,
+        ...(options.dnsServers === undefined ? {} : { dnsServers: options.dnsServers }),
+        ...(options.dockerHost === undefined ? {} : { dockerHost: options.dockerHost }),
       },
     }),
     Layer.mock(ProjectService.ProjectService)({
       getById: () => Effect.succeed(Option.some({ workspaceRoot: "/work/repo" } as never)),
+      listShells: () => Effect.succeed((options.projects ?? []) as never),
     }),
+    Layer.succeed(
+      PodHostnameRouter.PodHostnameRouter,
+      (options.router ?? makeFakePodHostnameRouter()).router,
+    ),
     Layer.mock(T3ProjectFileLoader.T3ProjectFileLoader)({
       load: () =>
         Effect.succeed(
@@ -97,6 +122,7 @@ const harness = (options: {
       probePort: (address, port) =>
         Effect.sync(() => (network.busy.has(`${address}:${port}`) ? "in-use" : "free")),
       tailnetAddress: Effect.sync(() => network.tailnetAddress),
+      resolvConf: Effect.sync(() => network.resolvConf),
     }),
   ).pipe(
     Layer.provideMerge(SqlitePersistence.layerMemory),
@@ -920,6 +946,439 @@ describe("PodRuntimeService .env", () => {
           expect(driver.containers()).toEqual([]);
         }),
       { projectFile: envProjectFile({ DATABASE_URL: "{db.url}" }) },
+    );
+  });
+});
+
+describe("PodRuntimeService hostnames", () => {
+  const hostnameProject = (env: Record<string, string> = {}): T3ProjectFile => ({
+    pod: { services: { web: 3000, api: 8000 }, env, hostnames: true },
+  });
+  const hostname = (id: string, service: string) => `t3-envtest-${id}-${service}.pods.internal`;
+
+  it.effect("serves a running pod on its hostnames and routes it only while it runs", () => {
+    const driver = makeFakeContainerDriver();
+    const router = makeFakePodHostnameRouter();
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const worktree = yield* fileSystem.makeTempDirectoryScoped();
+      const { base, discovery } = harness({
+        driver,
+        router,
+        projectFile: hostnameProject({ WEB: "{web.url}", WEB_PORT: "{web.port}" }),
+      });
+      const context = yield* Layer.build(base);
+      const pods = Context.get(
+        yield* Layer.build(PodRuntimeService.layer).pipe(Effect.provide(context)),
+        PodRuntimeService.PodRuntimeService,
+      );
+      const { id } = yield* pods.create({ projectId, worktreePath: worktree });
+      yield* pods.drain;
+      const stem = `t3-envtest-${id}`;
+      const urls = [`https://${hostname(id, "web")}`, `https://${hostname(id, "api")}`];
+      const running = yield* pods.awaitSettled(id);
+      expect(running.state).toBe("running");
+      expect(running.services.map((service) => service.url)).toEqual(urls);
+      expect(running).not.toHaveProperty("hostnameProblem");
+      // The proxy reaches each service's inner port on the daemon, over its network.
+      expect(router.routes.get(stem)).toEqual([
+        { hostname: hostname(id, "web"), upstream: `${stem}-dind:3000` },
+        { hostname: hostname(id, "api"), upstream: `${stem}-dind:8000` },
+      ]);
+      // Listed by hostname, probed at the loopback port the server's own fetch can reach.
+      expect(discovery.get(`pod:${id}`)).toEqual([
+        { url: urls[0], probeUrl: "http://127.0.0.1:20000" },
+        { url: urls[1], probeUrl: "http://127.0.0.1:20001" },
+      ]);
+      expect(yield* fileSystem.readFileString(`${worktree}/.env`)).toBe(
+        `WEB=https://${hostname(id, "web")}\nWEB_PORT=443\n`,
+      );
+      const dind = driver.containers().find((container) => container.name === `${stem}-dind`);
+      expect(dind?.spec?.dns).toEqual(["172.21.0.2"]);
+      expect(dind?.spec?.command).toEqual(expect.arrayContaining(["--dns", "172.21.0.2"]));
+      expect(driver.calls).toContainEqual(
+        expect.objectContaining({
+          operation: "connect",
+          target: `${stem}-dind`,
+          command: ["pods"],
+        }),
+      );
+      const agent = driver.containers().find((container) => container.name === `${stem}-agent`);
+      expect(agent?.spec?.mounts).toContainEqual({
+        type: "bind",
+        source: "~/.local/state/herdr-orch/caddy/root.crt",
+        target: "/usr/local/share/ca-certificates/t3-pods-proxy.crt",
+        readOnly: true,
+      });
+      expect(operations(driver)).toContain(`exec ${stem}-agent update-ca-certificates`);
+
+      yield* pods.stop(id);
+      yield* pods.drain;
+      expect((yield* pods.awaitSettled(id)).services.map((service) => service.url)).toEqual([
+        null,
+        null,
+      ]);
+      expect(router.routes.has(stem)).toBe(false);
+
+      yield* pods.start(id);
+      yield* pods.drain;
+      expect((yield* pods.awaitSettled(id)).services.map((service) => service.url)).toEqual(urls);
+      expect(router.routes.has(stem)).toBe(true);
+
+      yield* pods.recreate(id);
+      yield* pods.drain;
+      expect((yield* pods.awaitSettled(id)).services.map((service) => service.url)).toEqual(urls);
+      expect(router.routes.has(stem)).toBe(true);
+
+      yield* pods.remove({ podId: id });
+      yield* pods.drain;
+      expect((yield* pods.awaitSettled(id)).state).toBe("removed");
+      expect(router.routes.has(stem)).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+  });
+
+  it.effect("falls back to ports, saying why, when the host has no hostname proxy", () => {
+    const driver = makeFakeContainerDriver();
+    const router = makeFakePodHostnameRouter();
+    router.prepareAs({ type: "unavailable", reason: "no container is named pods-proxy" });
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const worktree = yield* fileSystem.makeTempDirectoryScoped();
+      yield* withPods(
+        driver,
+        (pods) =>
+          Effect.gen(function* () {
+            const { id } = yield* pods.create({ projectId, worktreePath: worktree });
+            yield* pods.drain;
+            expect(yield* pods.awaitSettled(id)).toMatchObject({
+              state: "running",
+              lastError: null,
+              hostnameProblem:
+                "Hostnames are off for this pod: no container is named pods-proxy. Its services use ports; Recreate the pod once that is fixed.",
+            });
+            expect((yield* pods.awaitSettled(id)).services[0]?.url).toBe("http://127.0.0.1:20000");
+            expect(yield* fileSystem.readFileString(`${worktree}/.env`)).toBe(
+              "WEB=http://127.0.0.1:20000\n",
+            );
+            expect(driver.calls.some((call) => call.operation === "connect")).toBe(false);
+            expect(router.calls.filter((call) => call.startsWith("install"))).toEqual([]);
+
+            // The proxy is back: a stop and start keep ports; Recreate moves to hostnames.
+            router.prepareAs({ type: "ready", dnsAddress: "172.21.0.2" });
+            yield* pods.stop(id);
+            yield* pods.drain;
+            yield* pods.start(id);
+            yield* pods.drain;
+            expect((yield* pods.awaitSettled(id)).hostnameProblem).toContain("Hostnames are off");
+            yield* pods.recreate(id);
+            yield* pods.drain;
+            const recreated = yield* pods.awaitSettled(id);
+            expect(recreated).not.toHaveProperty("hostnameProblem");
+            expect(recreated.services[0]?.url).toBe(`https://${hostname(id, "web")}`);
+          }),
+        { router, projectFile: hostnameProject({ WEB: "{web.url}" }) },
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+  });
+
+  it.effect("fails a start whose daemon cannot join the proxy's network, routing nothing", () => {
+    const driver = makeFakeContainerDriver();
+    driver.failWhen((call) => call.operation === "connect");
+    const router = makeFakePodHostnameRouter();
+    return withPods(
+      driver,
+      (pods) =>
+        Effect.gen(function* () {
+          const { id } = yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          expect(yield* pods.awaitSettled(id)).toMatchObject({
+            state: "start_failed",
+            lastError: {
+              message: "Joining the hostname proxy's network failed: fake connect refused",
+            },
+          });
+          expect(router.routes.size).toBe(0);
+          // Joining is all it ever asks of that network.
+          expect(
+            driver.calls
+              .filter((call) => call.command?.includes("pods"))
+              .map((call) => call.operation),
+          ).toEqual(["connect"]);
+        }),
+      { router, projectFile: hostnameProject() },
+    );
+  });
+
+  it.effect("says a pod built for ports needs Recreate once t3.json asks for hostnames", () => {
+    const driver = makeFakeContainerDriver();
+    const projectFile: T3ProjectFile = { pod: { services: { web: 3000 } } };
+    return withPods(
+      driver,
+      (pods) =>
+        Effect.gen(function* () {
+          const { id } = yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          const restart = Effect.gen(function* () {
+            yield* pods.stop(id);
+            yield* pods.drain;
+            yield* pods.start(id);
+            yield* pods.drain;
+            return yield* pods.awaitSettled(id);
+          });
+          Object.assign(projectFile, { pod: { services: { web: 3000 }, hostnames: true } });
+          const asked = yield* restart;
+          expect(asked.hostnameProblem).toBe(
+            "This pod was built for ports; Recreate it to serve its services on hostnames.",
+          );
+          expect(asked.services[0]?.url).toBe("http://127.0.0.1:20000");
+          Object.assign(projectFile, { pod: { services: { web: 3000 } } });
+          expect(yield* restart).not.toHaveProperty("hostnameProblem");
+        }),
+      { projectFile },
+    );
+  });
+
+  it.effect("keeps the route of a pod that starts while the startup prune waits", () => {
+    const driver = makeFakeContainerDriver();
+    const router = makeFakePodHostnameRouter();
+    const { base } = harness({ driver, router, projectFile: hostnameProject() });
+    return Effect.gen(function* () {
+      const context = yield* Layer.build(base);
+      const startServer = Layer.build(
+        PodRuntimeService.layer.pipe(Layer.provideMerge(PodRuntimeStore.layer)),
+      ).pipe(Effect.provide(context));
+      const first = Context.get(yield* startServer, PodRuntimeService.PodRuntimeService);
+      const { id } = yield* first.create({ projectId, worktreePath });
+      yield* first.drain;
+      yield* first.stop(id);
+      yield* first.drain;
+
+      const gate = yield* Deferred.make<void>();
+      router.holdPrune(gate);
+      const again = Context.get(yield* startServer, PodRuntimeService.PodRuntimeService);
+      // Startup's per-pod pass found it stopped; it starts before the prune reads what to keep.
+      yield* again.start(id);
+      expect((yield* again.awaitSettled(id)).state).toBe("running");
+      expect(router.routes.has(`t3-envtest-${id}`)).toBe(true);
+      yield* Deferred.succeed(gate, undefined);
+      yield* again.drain;
+      expect(router.routes.has(`t3-envtest-${id}`)).toBe(true);
+    }).pipe(Effect.scoped);
+  });
+
+  it.effect(
+    "keeps the hostname links its stack is set up for while the route is not in place",
+    () => {
+      const driver = makeFakeContainerDriver();
+      const router = makeFakePodHostnameRouter();
+      router.failInstall("the proxy rejected the route: unrecognized directive");
+      return Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const worktree = yield* fileSystem.makeTempDirectoryScoped();
+        const { base, discovery } = harness({
+          driver,
+          router,
+          projectFile: hostnameProject({ WEB: "{web.url}" }),
+        });
+        const context = yield* Layer.build(base);
+        const pods = Context.get(
+          yield* Layer.build(PodRuntimeService.layer).pipe(Effect.provide(context)),
+          PodRuntimeService.PodRuntimeService,
+        );
+        const { id } = yield* pods.create({ projectId, worktreePath: worktree });
+        yield* pods.drain;
+        const running = yield* pods.awaitSettled(id);
+        expect(running).toMatchObject({
+          state: "running",
+          lastError: null,
+          hostnameProblem:
+            "Its proxy route is not in place: the proxy rejected the route: unrecognized directive. Its hostnames will not open until the pod starts again with the route.",
+        });
+        // The link and the stack's .env tell the same story; the list waits for the route.
+        expect(running.services[0]?.url).toBe(`https://${hostname(id, "web")}`);
+        expect(yield* fileSystem.readFileString(`${worktree}/.env`)).toBe(
+          `WEB=https://${hostname(id, "web")}\n`,
+        );
+        expect(discovery.has(`pod:${id}`)).toBe(false);
+
+        router.failInstall(null);
+        yield* pods.stop(id);
+        yield* pods.drain;
+        yield* pods.start(id);
+        yield* pods.drain;
+        const routed = yield* pods.awaitSettled(id);
+        expect(routed).not.toHaveProperty("hostnameProblem");
+        expect(routed.services[0]?.url).toBe(`https://${hostname(id, "web")}`);
+        expect(discovery.get(`pod:${id}`)).toHaveLength(2);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+    },
+  );
+
+  it.effect("puts routes back and drops stale ones of this environment on restart", () => {
+    const driver = makeFakeContainerDriver();
+    const router = makeFakePodHostnameRouter();
+    const { base } = harness({ driver, router, projectFile: hostnameProject() });
+    return Effect.gen(function* () {
+      const context = yield* Layer.build(base);
+      const startServer = Layer.build(
+        PodRuntimeService.layer.pipe(Layer.provideMerge(PodRuntimeStore.layer)),
+      ).pipe(Effect.provide(context));
+      const first = Context.get(yield* startServer, PodRuntimeService.PodRuntimeService);
+      const kept = yield* first.create({ projectId, worktreePath });
+      const stopped = yield* first.create({ projectId, worktreePath: "/work/pods/stopped" });
+      yield* first.drain;
+      yield* first.stop(stopped.id);
+      yield* first.drain;
+      // While the server was down: the proxy's directory lost a route and kept stale ones.
+      router.routes.clear();
+      router.routes.set(`t3-envtest-${stopped.id}`, []);
+      router.routes.set("t3-envtest-pod-gone", []);
+      router.routes.set("pod-orch-feature", []);
+
+      const again = Context.get(yield* startServer, PodRuntimeService.PodRuntimeService);
+      yield* again.drain;
+      expect([...router.routes.keys()].toSorted()).toEqual(
+        ["pod-orch-feature", `t3-envtest-${kept.id}`].toSorted(),
+      );
+      expect((yield* again.awaitSettled(kept.id)).services[0]?.url).toBe(
+        `https://${hostname(kept.id, "web")}`,
+      );
+    }).pipe(Effect.scoped);
+  });
+
+  it.effect(
+    "warns only while Tailscale Serve holds :443 and a project with pods on uses hostnames",
+    () => {
+      const projects = [{ id: projectId, workspaceRoot: "/work/repo" }];
+      const warningsFor = (options: {
+        readonly serveOn443: boolean;
+        readonly hostnames: boolean;
+        readonly enabled?: boolean;
+      }) =>
+        withPods(
+          makeFakeContainerDriver(),
+          (pods) => pods.status({}).pipe(Effect.map((status) => status.warnings)),
+          {
+            projects,
+            ...(options.enabled === undefined ? {} : { enabled: options.enabled }),
+            router: makeFakePodHostnameRouter({ tailscaleServeOnProxyPort: options.serveOn443 }),
+            projectFile: { pod: { services: { web: 3000 }, hostnames: options.hostnames } },
+          },
+        );
+      return Effect.gen(function* () {
+        expect(yield* warningsFor({ serveOn443: true, hostnames: true })).toEqual([
+          "tailscale-serve-443",
+        ]);
+        // A project's own status, which the composer reads, never pays for the scan.
+        expect(
+          yield* withPods(
+            makeFakeContainerDriver(),
+            (pods) => pods.status({ projectId }).pipe(Effect.map((status) => status.warnings)),
+            {
+              projects,
+              router: makeFakePodHostnameRouter({ tailscaleServeOnProxyPort: true }),
+              projectFile: { pod: { services: { web: 3000 }, hostnames: true } },
+            },
+          ),
+        ).toBeUndefined();
+        expect(yield* warningsFor({ serveOn443: false, hostnames: true })).toBeUndefined();
+        expect(yield* warningsFor({ serveOn443: true, hostnames: false })).toBeUndefined();
+        expect(
+          yield* warningsFor({ serveOn443: true, hostnames: true, enabled: false }),
+        ).toBeUndefined();
+      });
+    },
+  );
+});
+
+describe("PodRuntimeService resolvers", () => {
+  const HOST_RESOLV_CONF = [
+    "nameserver 127.0.0.53",
+    "nameserver 100.100.100.100",
+    "nameserver 192.168.1.1",
+    "nameserver 2600:4040:ac1c:5400::1",
+  ].join("\n");
+  const dindDns = (options: Omit<Parameters<typeof harness>[0], "driver">) => {
+    const driver = makeFakeContainerDriver();
+    return withPods(
+      driver,
+      (pods) =>
+        Effect.gen(function* () {
+          const { id } = yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          const dind = driver
+            .containers(options.dockerHost)
+            .find((container) => container.name === `t3-envtest-${id}-dind`)?.spec;
+          expect(dind).toBeDefined();
+          return { dns: dind?.dns, command: dind?.command.slice(3) };
+        }),
+      options,
+    );
+  };
+  const network = (resolvConf: string) => ({ ...makeFakeHostNetwork(), resolvConf });
+
+  it.effect(
+    "gives a pod of ports the host's reachable upstreams unless the setting names others",
+    () =>
+      Effect.gen(function* () {
+        expect(yield* dindDns({ network: network(HOST_RESOLV_CONF) })).toEqual({
+          dns: ["192.168.1.1"],
+          command: ["--dns", "192.168.1.1"],
+        });
+        expect(
+          yield* dindDns({ network: network(HOST_RESOLV_CONF), dnsServers: ["9.9.9.9"] }),
+        ).toEqual({ dns: ["9.9.9.9"], command: ["--dns", "9.9.9.9"] });
+        // A remote daemon's network may not reach this host's resolvers: Docker's own DNS.
+        expect(
+          yield* dindDns({ network: network(HOST_RESOLV_CONF), dockerHost: "tcp://10.0.0.5:2375" }),
+        ).toEqual({ dns: undefined, command: [] });
+        // Nothing reachable found: Docker's own DNS, as before.
+        expect(yield* dindDns({ network: network("nameserver 127.0.0.53\n") })).toEqual({
+          dns: undefined,
+          command: [],
+        });
+      }),
+  );
+
+  it.effect("asks the proxy's DNS server first in hostname mode, then the setting only", () =>
+    Effect.gen(function* () {
+      const hostnames: T3ProjectFile = { pod: { services: { web: 3000 }, hostnames: true } };
+      expect(
+        yield* dindDns({ network: network(HOST_RESOLV_CONF), projectFile: hostnames }),
+      ).toEqual({ dns: ["172.21.0.2"], command: ["--dns", "172.21.0.2"] });
+      expect(
+        (yield* dindDns({
+          network: network(HOST_RESOLV_CONF),
+          projectFile: hostnames,
+          dnsServers: ["9.9.9.9"],
+        })).dns,
+      ).toEqual(["172.21.0.2", "9.9.9.9"]);
+    }),
+  );
+});
+
+describe("PodRuntimeService stack output", () => {
+  it.effect("puts the end of a failing stack command's output in the pod's last error", () => {
+    const driver = makeFakeContainerDriver();
+    driver.execExitCode((call) => (call.command?.includes("up") ? 1 : 0));
+    driver.execOutput((call) =>
+      call.command?.includes("up")
+        ? "Pulling web | Error response from daemon: Get https://registry-1.docker.io/v2/: dial tcp: lookup registry-1.docker.io: server misbehaving"
+        : "",
+    );
+    return withPods(driver, (pods) =>
+      Effect.gen(function* () {
+        const { id } = yield* pods.create({ projectId, worktreePath });
+        yield* pods.drain;
+        expect(yield* pods.awaitSettled(id)).toMatchObject({
+          state: "start_failed",
+          lastError: {
+            operation: "create",
+            message:
+              "Stack command 1 of 1 failed (exit 1): Pulling web | Error response from daemon: Get https://registry-1.docker.io/v2/: dial tcp: lookup registry-1.docker.io: server misbehaving",
+          },
+        });
+      }),
     );
   });
 });

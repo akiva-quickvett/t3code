@@ -6,7 +6,7 @@ import * as Option from "effect/Option";
 
 import { renderPodEnv, writePodDotEnv } from "./PodEnv.ts";
 
-const web = { name: "web", hostPort: 20000, url: "http://127.0.0.1:20000" };
+const web = { name: "web", port: 20000, url: "http://127.0.0.1:20000" };
 
 describe("pod env placeholders", () => {
   it.effect("fills url and port placeholders and leaves other braces alone", () =>

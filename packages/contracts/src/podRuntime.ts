@@ -92,9 +92,11 @@ export const podRuntimeRetryRequest = (failure: PodRuntimeFailure): PodRuntimeRe
   failure.operation === "stop" || failure.operation === "remove" ? failure.operation : "start";
 
 /**
- * `port` is the service's port inside the pod. `url` is its loopback address on
- * the server's host while the pod runs, null otherwise; `tailnetUrl` is the same
- * service on the host's tailnet address, when the environment publishes there.
+ * `port` is the service's port inside the pod. `url` is where it opens while the
+ * pod runs, null otherwise: its `https://` hostname once the pod's proxy route
+ * is in place, else its loopback address on the server's host. `tailnetUrl` is
+ * the same service on the host's tailnet address, when the environment
+ * publishes there.
  */
 export const PodRuntimeServiceEndpoint = Schema.Struct({
   name: TrimmedNonEmptyString,
@@ -116,6 +118,13 @@ export const PodRuntimeSnapshot = Schema.Struct({
   containerIds: Schema.Array(TrimmedNonEmptyString),
   volumeIds: Schema.Array(TrimmedNonEmptyString),
   updatedAt: IsoDateTime,
+  /**
+   * Why a pod whose project asks for hostnames is not served on them, or what
+   * went wrong keeping its proxy route; its links then use ports.
+   */
+  hostnameProblem: Schema.optionalKey(
+    Schema.String.check(Schema.isMaxLength(POD_RUNTIME_ERROR_MESSAGE_MAX_LENGTH)),
+  ),
 });
 export type PodRuntimeSnapshot = typeof PodRuntimeSnapshot.Type;
 
@@ -142,12 +151,23 @@ export const PodRuntimeStatusInput = Schema.Struct({
 });
 export type PodRuntimeStatusInput = typeof PodRuntimeStatusInput.Type;
 
+/**
+ * `tailscale-serve-443`: a project serves its pods on hostnames, whose proxy
+ * owns :443 on the tailnet address, and this server was started with Tailscale
+ * Serve on the same port, so tailscaled takes it and other devices cannot reach
+ * the pods. A serve this server did not start is not seen.
+ */
+export const PodRuntimeWarning = Schema.Literals(["tailscale-serve-443"]);
+export type PodRuntimeWarning = typeof PodRuntimeWarning.Type;
+
 export const PodRuntimeStatus = Schema.Struct({
   enabled: Schema.Boolean,
   pods: Schema.Array(PodRuntimeSnapshot),
   orphans: Schema.Array(PodRuntimeOrphan),
   projectConfigured: Schema.optional(Schema.Boolean),
   stats: Schema.optional(Schema.Array(PodRuntimeStats)),
+  /** Absent when there is nothing to warn about. */
+  warnings: Schema.optionalKey(Schema.Array(PodRuntimeWarning)),
 });
 export type PodRuntimeStatus = typeof PodRuntimeStatus.Type;
 
@@ -254,6 +274,76 @@ export type PodRuntimeSnoozeAction = typeof PodRuntimeSnoozeAction.Type;
 export const DEFAULT_POD_RUNTIME_IMAGE = "docker:27-cli";
 export const DEFAULT_POD_RUNTIME_NETWORK = "t3-pods";
 
+const DockerObjectName = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(128),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/),
+);
+const HostPath = TrimmedNonEmptyString.check(Schema.isMaxLength(1024));
+const DnsDomain = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(128),
+  Schema.isPattern(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/),
+);
+
+const HOSTNAME_PROXY_DEFAULTS = {
+  routesDir: "~/.local/state/herdr-orch/routes",
+  proxyContainer: "pods-proxy",
+  caddyfile: "/etc/caddy/Caddyfile",
+  dnsContainer: "pods-dns-int",
+  network: "pods",
+  domain: "pods.internal",
+  caRootPath: "~/.local/state/herdr-orch/caddy/root.crt",
+} as const;
+
+/**
+ * The host's existing hostname proxy that projects with `pod.hostnames` use:
+ * a Caddy container importing one route file per pod from `routesDir`, and a
+ * DNS server answering `domain` with the proxy's address, both on `network`.
+ * The defaults are orch's, whose pods share the same proxy. `~/` is the home
+ * directory of the user running T3 Code.
+ */
+export const PodHostnameProxySettings = Schema.Struct({
+  routesDir: HostPath.pipe(
+    Schema.withDecodingDefault(Effect.succeed(HOSTNAME_PROXY_DEFAULTS.routesDir)),
+  ),
+  proxyContainer: DockerObjectName.pipe(
+    Schema.withDecodingDefault(Effect.succeed(HOSTNAME_PROXY_DEFAULTS.proxyContainer)),
+  ),
+  /** The proxy's Caddyfile, as a path inside its container. */
+  caddyfile: HostPath.pipe(
+    Schema.withDecodingDefault(Effect.succeed(HOSTNAME_PROXY_DEFAULTS.caddyfile)),
+  ),
+  dnsContainer: DockerObjectName.pipe(
+    Schema.withDecodingDefault(Effect.succeed(HOSTNAME_PROXY_DEFAULTS.dnsContainer)),
+  ),
+  network: DockerObjectName.pipe(
+    Schema.withDecodingDefault(Effect.succeed(HOSTNAME_PROXY_DEFAULTS.network)),
+  ),
+  domain: DnsDomain.pipe(
+    Schema.withDecodingDefault(Effect.succeed(HOSTNAME_PROXY_DEFAULTS.domain)),
+  ),
+  /** The proxy CA's root certificate, which pods in hostname mode trust. */
+  caRootPath: HostPath.pipe(
+    Schema.withDecodingDefault(Effect.succeed(HOSTNAME_PROXY_DEFAULTS.caRootPath)),
+  ),
+});
+export type PodHostnameProxySettings = typeof PodHostnameProxySettings.Type;
+
+const PodHostnameProxySettingsPatch = Schema.Struct({
+  routesDir: Schema.optionalKey(HostPath),
+  proxyContainer: Schema.optionalKey(DockerObjectName),
+  caddyfile: Schema.optionalKey(HostPath),
+  dnsContainer: Schema.optionalKey(DockerObjectName),
+  network: Schema.optionalKey(DockerObjectName),
+  domain: Schema.optionalKey(DnsDomain),
+  caRootPath: Schema.optionalKey(HostPath),
+});
+
+const IpAddress = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(45),
+  Schema.isPattern(/^(\d{1,3}(\.\d{1,3}){3}|[0-9A-Fa-f:]+)$/),
+);
+const DnsServers = Schema.Array(IpAddress).check(Schema.isMaxLength(4));
+
 /** Off by default, so stock and dev servers never start containers. */
 export const PodRuntimeSettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -276,16 +366,34 @@ export const PodRuntimeSettings = Schema.Struct({
    * devices reach them directly. Applies to pods created or recreated after.
    */
   publishOnTailnet: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Resolvers for each pod's Docker daemon and its stack. Empty: a pod of
+   * ports on a local Docker daemon asks the host's own upstream resolvers,
+   * since Docker's DNS on the pods network can fail; a remote one keeps Docker's. Pods in hostname mode ask the proxy's DNS server
+   * first. Applies to pods created or recreated after.
+   */
+  dnsServers: DnsServers.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /** Host infrastructure only: it is the environment's, never a project's. */
+  hostnameProxy: PodHostnameProxySettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(PodHostnameProxySettings)({}))),
+  ),
 });
 export type PodRuntimeSettings = typeof PodRuntimeSettings.Type;
 
-export const PodRuntimeSettingsPatch = Schema.Struct({
+/** What a project may override; the environment's Docker host stays live beneath it. */
+export const PodRuntimeProjectSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   dockerHost: Schema.optionalKey(PodRuntimeSettings.fields.dockerHost),
   defaultImage: Schema.optionalKey(TrimmedNonEmptyString),
   network: Schema.optionalKey(PodRuntimeSettings.fields.network),
   snoozeAction: Schema.optionalKey(PodRuntimeSnoozeAction),
   publishOnTailnet: Schema.optionalKey(Schema.Boolean),
+});
+
+export const PodRuntimeSettingsPatch = Schema.Struct({
+  ...PodRuntimeProjectSettingsPatch.fields,
+  dnsServers: Schema.optionalKey(DnsServers),
+  hostnameProxy: Schema.optionalKey(PodHostnameProxySettingsPatch),
 });
 
 /** Where a new thread's worktree runs its agents, terminals and scripts. */

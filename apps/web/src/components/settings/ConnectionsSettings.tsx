@@ -80,6 +80,7 @@ import {
   useRelativeTimeTick,
 } from "./settingsLayout";
 import { LocalEnvironmentSetting } from "./LocalEnvironmentSetting";
+import { PodRuntimeWarnings } from "../pods/PodRuntimeWarnings";
 import { searchableSetting } from "./settingsSearch";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { EnvironmentRoutesList } from "./EnvironmentRoutesList";
@@ -3478,6 +3479,7 @@ export function ConnectionsSettings() {
                 {renderNetworkAccessRow()}
                 {renderEndpointRows("endpoint-rail")}
                 {renderTailscaleRow()}
+                <PodRuntimeWarnings environmentId={primaryEnvironmentId} />
                 {renderWslRow()}
                 {canReadRelay || canManageRelay ? (
                   <CloudLinkRow canReadRelay={canReadRelay} canManageRelay={canManageRelay} />

@@ -4,7 +4,9 @@ import * as NodeOS from "node:os";
 import { isTailscaleIpv4Address } from "@t3tools/tailscale";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 /**
@@ -26,8 +28,50 @@ export class PodHostNetwork extends Context.Service<
     readonly probePort: (address: string, port: number) => Effect.Effect<PortProbe>;
     /** This host's tailnet IPv4 address, if Tailscale is up. */
     readonly tailnetAddress: Effect.Effect<string | null>;
+    /** The resolvers this host asks, as `resolv.conf` text; empty when none can be read. */
+    readonly resolvConf: Effect.Effect<string>;
   }
 >()("t3/pod/PodHostPorts/PodHostNetwork") {}
+
+/** systemd-resolved's list of its real upstreams first: the system one names only its stub. */
+const RESOLV_CONF_PATHS = ["/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"] as const;
+
+const readResolvConf = (fileSystem: FileSystem.FileSystem) =>
+  Effect.gen(function* () {
+    for (const file of RESOLV_CONF_PATHS) {
+      const text = yield* fileSystem.readFileString(file).pipe(Effect.option);
+      if (Option.isSome(text)) return text.value;
+    }
+    return "";
+  });
+
+const UPSTREAM_NAMESERVERS_MAX = 3;
+/** Tailscale's MagicDNS answers only on the host's own tailnet interface. */
+const TAILSCALE_RESOLVER = "100.100.100.100";
+
+/**
+ * The host's real upstream resolvers, for a pod's daemon whose network
+ * Docker's own DNS fails on. Only IPv4: the pods network has no IPv6. A
+ * loopback stub, Tailscale's resolver and link-local addresses cannot be
+ * reached from a container, so they are skipped.
+ */
+export const upstreamNameservers = (resolvConf: string): ReadonlyArray<string> =>
+  resolvConf
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const [keyword, address, ...rest] = line.trim().split(/\s+/);
+      return keyword === "nameserver" && address !== undefined && rest.length === 0
+        ? [address]
+        : [];
+    })
+    .filter(
+      (address) =>
+        NodeNet.isIPv4(address) &&
+        !address.startsWith("127.") &&
+        !address.startsWith("169.254.") &&
+        address !== TAILSCALE_RESOLVER,
+    )
+    .slice(0, UPSTREAM_NAMESERVERS_MAX);
 
 const bindProbe = (address: string, port: number) =>
   Effect.callback<PortProbe>((resume) => {
@@ -51,11 +95,15 @@ const findTailnetAddress = () => {
   return null;
 };
 
-export const layer = Layer.succeed(
+export const layer = Layer.effect(
   PodHostNetwork,
-  PodHostNetwork.of({
-    probePort: bindProbe,
-    tailnetAddress: Effect.sync(findTailnetAddress),
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    return PodHostNetwork.of({
+      probePort: bindProbe,
+      tailnetAddress: Effect.sync(findTailnetAddress),
+      resolvConf: readResolvConf(fileSystem),
+    });
   }),
 );
 
