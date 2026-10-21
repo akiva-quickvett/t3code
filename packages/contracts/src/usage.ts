@@ -1,6 +1,11 @@
 import * as Schema from "effect/Schema";
 
-import { ForwardCompatibleArray, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  ForwardCompatibleArray,
+  NonNegativeInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 
 /**
  * Bumped whenever the shape of {@link UsageSummary} changes incompatibly.
@@ -157,8 +162,46 @@ export const UsageSummary = Schema.Struct({
 });
 export type UsageSummary = typeof UsageSummary.Type;
 
+export const UsageThreadTreeInput = Schema.Struct({ threadId: ThreadId });
+export type UsageThreadTreeInput = typeof UsageThreadTreeInput.Type;
+
+export const UsageThreadTreeRow = Schema.Struct({
+  threadId: ThreadId,
+  /** Null for the thread the tree was read for. */
+  parentThreadId: Schema.NullOr(ThreadId),
+  depth: NonNegativeInt,
+  title: Schema.optional(Schema.String),
+  /** The thread's role preset id. */
+  preset: Schema.optional(Schema.String),
+  /** Input, cache and output tokens; reasoning is part of output. */
+  tokens: NonNegativeInt,
+  costUsd: Schema.Number,
+  /** Records with no known rate; their cost is left out of `costUsd`, never guessed. */
+  unpricedRecords: NonNegativeInt,
+});
+export type UsageThreadTreeRow = typeof UsageThreadTreeRow.Type;
+
+/**
+ * Estimated usage of a thread and every thread it launched or delegated to, transitively.
+ * `threads` is depth-first from the thread itself, so its first row is that thread.
+ */
+export const UsageThreadTree = Schema.Struct({
+  threadId: ThreadId,
+  /** The top of the work tree this thread belongs to, following supervisors and delegations. */
+  rootThreadId: ThreadId,
+  /** First UTC day of history read: the tree's oldest thread, or the retention limit. */
+  sinceDay: UsageDay,
+  tokens: NonNegativeInt,
+  costUsd: Schema.Number,
+  unpricedRecords: NonNegativeInt,
+  threads: Schema.Array(UsageThreadTreeRow),
+  /** Threads past the row limit, in depth-first order; the totals still include them. */
+  omittedThreads: Schema.optional(NonNegativeInt),
+});
+export type UsageThreadTree = typeof UsageThreadTree.Type;
+
 export class UsageReadError extends Schema.TaggedError<UsageReadError>()("UsageReadError", {
-  reason: Schema.Literals(["scanFailed", "invalidWindow"]),
+  reason: Schema.Literals(["scanFailed", "invalidWindow", "threadNotFound"]),
   detail: TrimmedNonEmptyString,
   cause: Schema.optional(Schema.Defect()),
 }) {

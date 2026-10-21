@@ -598,6 +598,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     maxBatchThreads: Schema.Number,
     /** t3_usage_limits. Missing on older servers. */
     usageLimits: Schema.optional(Schema.Boolean),
+    /** t3_usage_thread_tree. Missing on older servers. */
+    usageThreadTree: Schema.optional(Schema.Boolean),
   }),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;

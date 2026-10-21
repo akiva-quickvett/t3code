@@ -8,6 +8,7 @@ export interface T3McpToolPresentation {
 export type T3McpToolSummaryAction =
   | "capabilities"
   | "usage-limits"
+  | "usage-thread-tree"
   | "delegate"
   | "task-status"
   | "task-cancel"
@@ -129,6 +130,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "capabilities",
   ),
   t3_usage_limits: tool(["Read", "Reading", "Read", "usage limits"], "usage-limits"),
+  t3_usage_thread_tree: tool(["Read", "Reading", "Read", "thread tree usage"], "usage-thread-tree"),
   delegate_task: tool(["Delegate", "Delegating", "Delegated", "a child task"], "delegate"),
   task_status: tool(["Get", "Getting", "Got", "delegated task status"], "task-status"),
   task_cancel: tool(

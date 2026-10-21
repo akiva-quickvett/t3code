@@ -1,5 +1,6 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
+import { canReadThreadUsage, openThreadUsageDialog } from "../state/threadUsage";
 import {
   type AtomCommandResult,
   isAtomCommandInterrupted,
@@ -129,6 +130,7 @@ export function useThreadActionMenu(input: {
         pinning: readEnvironmentSupportsPinning(threadRef.environmentId),
         titleRegeneration: readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
         rolePresets: readEnvironmentSupportsRolePresets(threadRef.environmentId),
+        threadUsage: canReadThreadUsage(threadRef.environmentId),
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat);
@@ -249,6 +251,9 @@ export function useThreadActionMenu(input: {
           return;
         case "mark-unread":
           markThreadUnread(threadRef);
+          return;
+        case "usage-cost":
+          openThreadUsageDialog(threadRef);
           return;
         case "copy-path": {
           const workspacePath = thread.worktreePath ?? projectCwd;

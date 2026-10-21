@@ -71,6 +71,7 @@ import {
   MessageSquareDashedIcon,
   LinkIcon,
   ListTreeIcon,
+  CoinsIcon,
   MessageSquareIcon,
   MonitorIcon,
   MoonIcon,
@@ -223,6 +224,7 @@ import { Checkbox } from "./ui/checkbox";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectFilePicker } from "./files/ProjectFilePicker";
 import { openLinkPullRequestDialog } from "./pullRequest/LinkPullRequestDialog";
+import { canReadThreadUsage, openThreadUsageDialog } from "../state/threadUsage";
 import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog";
 import { toggleThemeEditorForTheme } from "./settings/themeEditorStore";
 import { searchSettings, SETTINGS_SECTION_LABELS } from "./settings/settingsSearch";
@@ -1824,6 +1826,20 @@ function OpenCommandPaletteDialog(props: {
         },
       });
     }
+  }
+
+  if (activeThread !== null && canReadThreadUsage(activeThread.environmentId)) {
+    const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
+    actionItems.push({
+      kind: "action",
+      value: "action:thread-usage-cost",
+      searchTerms: ["cost", "usage", "tokens", "spend", "tree", "subagents"],
+      title: "Cost of this work",
+      icon: <CoinsIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        openThreadUsageDialog(threadRef);
+      },
+    });
   }
 
   if (activeThread !== null) {

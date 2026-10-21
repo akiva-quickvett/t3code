@@ -66,6 +66,25 @@ describe("parseClaudeLine", () => {
     expect(text?.totals).toEqual(toolUse?.totals);
   });
 
+  it("keeps a forked session's copied records with the source session", () => {
+    const line = (forkedFrom: unknown) =>
+      parseClaudeLine(
+        JSON.stringify({
+          ...JSON.parse(claudeLine({ messageId: "msg_3", contentType: "text" })),
+          sessionId: "fork-session",
+          forkedFrom,
+        }),
+      );
+
+    expect(line({ sessionId: "source-session", messageUuid: "uuid-1" })?.sessionId).toBe(
+      "source-session",
+    );
+    expect(line({ sessionId: "" })?.sessionId).toBe("fork-session");
+    expect(line({ sessionId: 7 })?.sessionId).toBe("fork-session");
+    expect(line(null)?.sessionId).toBe("fork-session");
+    expect(line(undefined)?.sessionId).toBe("fork-session");
+  });
+
   it("ignores records that are not assistant messages", () => {
     expect(parseClaudeLine(JSON.stringify({ type: "user", message: {} }))).toBeNull();
     expect(parseClaudeLine("not json")).toBeNull();

@@ -53,12 +53,25 @@ function parseClaudeRecord(parsed: unknown): UsageRecord | null {
     messageId === null && requestId === null ? null : `${messageId ?? ""}:${requestId ?? ""}`;
 
   const cost = record["costUSD"];
+  // A forked session starts with copies of its source's records, which keep their message and
+  // request ids. Naming the source session keeps the copy with the session that made the request.
+  const forkedFrom = record["forkedFrom"];
+  const sourceSessionId =
+    typeof forkedFrom === "object" && forkedFrom !== null
+      ? (forkedFrom as Record<string, unknown>)["sessionId"]
+      : undefined;
+  const sessionId =
+    typeof sourceSessionId === "string" && sourceSessionId.length > 0
+      ? sourceSessionId
+      : typeof record["sessionId"] === "string"
+        ? record["sessionId"]
+        : "";
 
   return {
     provider: "claude",
     timestampMs,
     model,
-    sessionId: typeof record["sessionId"] === "string" ? record["sessionId"] : "",
+    sessionId,
     totals: {
       uncachedInputTokens: tokenCount(usageRecord["input_tokens"]),
       cachedInputTokens: tokenCount(usageRecord["cache_read_input_tokens"]),
@@ -82,6 +95,7 @@ export const claudeUsageFormat: TranscriptUsageFormat<void> = {
     timestamp: true,
     requestId: true,
     sessionId: true,
+    forkedFrom: { sessionId: true },
     costUSD: true,
     message: { id: true, model: true, usage: true },
   },
