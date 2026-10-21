@@ -1090,6 +1090,10 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:agent-roles:live",
       tag: WS_METHODS.agentRolesSubscribe,
     }),
+    chatChannelsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:chat-channels:live",
+      tag: WS_METHODS.chatChannelsSubscribe,
+    }),
     // A cold transcript scan is measured in seconds, so keep the result around
     // long enough that switching windows or re-rendering does not rescan.
     usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {
@@ -1299,6 +1303,16 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.agentRolesReset,
       scheduler: configScheduler,
       concurrency: configConcurrency,
+    }),
+    mutateChatChannels: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:chat-channels:mutate",
+      tag: WS_METHODS.chatChannelsMutate,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    checkChatTemplateStatus: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:chat-channels:template-status",
+      tag: WS_METHODS.chatChannelsGetTemplateStatus,
     }),
     upsertScheduledTask: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:scheduled-task:upsert",

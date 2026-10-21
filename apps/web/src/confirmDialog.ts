@@ -96,6 +96,14 @@ export function requestConfirmDialog(
   return confirmation;
 }
 
+/** Asks with the themed dialog, falling back to the browser's own when no host is mounted. */
+export async function confirmDestructive(message: string): Promise<boolean> {
+  return (
+    (await requestConfirmDialog(message, { variant: "destructive" })) ??
+    window.confirm(message.replace("\n", " "))
+  );
+}
+
 export function isConfirmDialogActive(): boolean {
   return state.status !== "idle" || activeConfirmation !== null || queuedConfirmations.length > 0;
 }

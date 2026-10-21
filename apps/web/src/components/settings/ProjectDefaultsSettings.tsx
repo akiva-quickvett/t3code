@@ -27,6 +27,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { toastManager } from "../ui/toast";
 import { Switch } from "../ui/switch";
 import type { ProjectSettingsCategory } from "./ProjectSettingsPanel";
+import { PullRequestLabelRulesSettings } from "./PullRequestLabelRulesSettings";
 import { searchableSetting } from "./settingsSearch";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
@@ -475,6 +476,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
               </Select>
             }
           />
+          <PullRequestLabelRulesSettings />
         </>
       )}
     </SettingsSection>

@@ -3,6 +3,7 @@ import {
   type ProjectId,
   ScheduledTaskId,
   type ScheduledTask,
+  type ScheduledTaskAction,
   type ScheduledTaskUpsertSchedule,
   type ModelSelection,
   type RuntimeMode,
@@ -46,12 +47,15 @@ export function validateScheduledTasksSearch(raw: Record<string, unknown>) {
 
 export type ScheduleMode = "fixed" | "interval" | "webhook";
 export type WorkspaceMode = "root" | "worktree" | "existing_worktree";
+export type ActionMode = ScheduledTaskAction["type"];
 
 export interface DraftState {
   readonly editingId: string | null;
   readonly title: string;
   readonly prompt: string;
   readonly enabled: boolean;
+  readonly actionMode: ActionMode;
+  readonly scriptId: string;
   readonly scheduleMode: ScheduleMode;
   readonly intervalMinutes: string;
   readonly timeOfDay: string;
@@ -115,6 +119,11 @@ export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedul
   };
 }
 
+/** Stock clients show a script task's prompt, so it says what the task does. */
+export function scriptTaskPrompt(scriptName: string): string {
+  return `Runs the project action "${scriptName}".`;
+}
+
 export function taskToDraft(task: ScheduledTask): DraftState {
   const schedule = task.schedule;
   const weekdays =
@@ -126,6 +135,8 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     title: task.title,
     prompt: task.prompt,
     enabled: task.enabled,
+    actionMode: task.action?.type ?? "agentTurn",
+    scriptId: task.action?.type === "script" ? task.action.scriptId : "",
     scheduleMode:
       schedule.type === "interval" ? "interval" : schedule.type === "webhook" ? "webhook" : "fixed",
     intervalMinutes:

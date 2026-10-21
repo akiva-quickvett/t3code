@@ -20,6 +20,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as ScheduledScriptRunner from "./ScheduledScriptRunner.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
 const decodeUpsertInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
@@ -65,12 +66,14 @@ const withService = <A, E>(
     readonly service: ScheduledTaskService.ScheduledTaskService["Service"];
     readonly launches: Queue.Queue<LaunchInput>;
     readonly secretsByRef: Map<string, string>;
+    readonly scriptRuns: Queue.Queue<ScheduledScriptRunner.ScheduledScriptRunInput>;
   }) => Effect.Effect<A, E, never>,
   options: { readonly gate?: Deferred.Deferred<void>; readonly relayHookBaseUrl?: string } = {},
 ) =>
   Effect.gen(function* () {
     const launches = yield* Queue.unbounded<LaunchInput>();
     const secretsByRef = new Map<string, string>();
+    const scriptRuns = yield* Queue.unbounded<ScheduledScriptRunner.ScheduledScriptRunInput>();
     const layerDependencies = Layer.mergeAll(
       NodePlatformCrypto.layer,
       Scheduler.layer,
@@ -91,6 +94,17 @@ const withService = <A, E>(
             : Effect.succeed(value);
         },
       }),
+      Layer.mock(ScheduledScriptRunner.ScheduledScriptRunner)({
+        findScript: ({ scriptId }) =>
+          Effect.succeed({
+            id: scriptId,
+            name: scriptId,
+            command: "true",
+            icon: "play" as const,
+            runOnWorktreeCreate: false,
+          }),
+        run: (input) => Queue.offer(scriptRuns, input).pipe(Effect.as({ failure: null })),
+      }),
       Layer.succeed(
         ScheduledTaskService.ScheduledTaskWebhookOrigin,
         Effect.succeed({ relayHookBaseUrl: options.relayHookBaseUrl ?? null }),
@@ -98,7 +112,7 @@ const withService = <A, E>(
     );
     return yield* Effect.gen(function* () {
       const service = yield* ScheduledTaskService.ScheduledTaskService;
-      return yield* body({ service, launches, secretsByRef });
+      return yield* body({ service, launches, secretsByRef, scriptRuns });
     }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory));
 
@@ -140,6 +154,32 @@ it.effect("dispatches exactly the rendered prompt and logs the delivery", () =>
       assert.notEqual(next, frame);
     }),
   ),
+);
+
+it.effect(
+  "runs a script task's webhook without filling in its prompt or passing request data",
+  () =>
+    withService(({ service, launches, scriptRuns }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(
+          yield* webhookTaskInput({ action: { type: "script", scriptId: "board-sync" } }),
+        );
+        const result = yield* service.triggerWebhook(requestFor(task));
+        assert.equal(result._tag, "accepted");
+        assert.deepEqual(yield* Queue.take(scriptRuns), {
+          projectId: task.projectId,
+          scriptId: "board-sync",
+        });
+        assert.equal(yield* Queue.size(launches), 0);
+        const { deliveries } = yield* service.listWebhookDeliveries({ id: task.id });
+        assert.equal(deliveries[0]?.outcome, "accepted");
+        const { delivery } = yield* service.getWebhookDelivery({
+          id: task.id,
+          deliveryId: deliveries[0]!.id,
+        });
+        assert.isNull(delivery.renderedPrompt);
+      }),
+    ),
 );
 
 it("builds the relay hook URL from the managed tunnel's key, never the environment id", () => {

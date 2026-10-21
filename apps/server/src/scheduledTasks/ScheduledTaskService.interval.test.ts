@@ -12,6 +12,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ScheduledScriptRunner from "./ScheduledScriptRunner.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
@@ -25,6 +26,7 @@ const dependencies = Layer.mergeAll(
   }),
   Layer.mock(ThreadManagementService.ThreadManagementService)({}),
   Layer.mock(SecretRequests.SecretRequests)({}),
+  Layer.mock(ScheduledScriptRunner.ScheduledScriptRunner)({}),
 );
 const serviceLayer = ScheduledTaskService.layer.pipe(Layer.provide(dependencies));
 const decodeInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);

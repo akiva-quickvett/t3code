@@ -5,6 +5,7 @@ import * as Random from "effect/Random";
 import * as Semaphore from "effect/Semaphore";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as PullRequestLabelReactor from "./orchestration-v2/PullRequestLabelReactor.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
@@ -91,6 +92,8 @@ import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.t
 import * as ProviderAdapterRegistry from "./orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as AgentRolePresetService from "./agentRoles/AgentRolePresetService.ts";
+import * as ChatChannelService from "./chat/ChatChannelService.ts";
+import * as WhatsAppCloudAdapter from "./chat/WhatsAppCloudAdapter.ts";
 import * as ProviderUsageLimitsIngestion from "./provider/ProviderUsageLimitsIngestion.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
@@ -553,6 +556,7 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   AgentRolePresetService.layer,
+  ChatChannelService.layer.pipe(Layer.provide(WhatsAppCloudAdapter.layer)),
   AgentAwarenessRelay.layer,
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,
@@ -572,6 +576,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     }),
   ).pipe(
     Layer.provideMerge(PullRequestSyncReactor.layer),
+    Layer.provide(PullRequestLabelReactor.layer),
     Layer.provide(layerPullRequestService),
     Layer.provide(ProjectionStoreV2.layer),
   ),

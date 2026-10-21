@@ -295,6 +295,28 @@ returns to your inbox.
 Cross-repository links use a project on the same host. Azure DevOps reviews require a project checked
 out from the matching organization and repository.
 
+## Agent labels
+
+Turn on **Agent labels on pull requests** in Settings → Source Control, for every project or one
+project, to keep one label on each open pull request a thread links, showing where its work is:
+
+- **Agent Investigating** once it is linked, while no work has started since.
+- **Agent Building** while the thread or a thread it started works.
+- **Agent Reviewing** from the moment a reviewer thread works, including the fixes between review
+  rounds. Reviewer threads are those started with a reviewer role (see [Agent roles](agent-roles.md)).
+- **Agent Done** once they have all gone quiet. A pull request built and opened in a single turn
+  reaches Done when that turn ends.
+- **Agent Revising** for work after the first done, then Reviewing and Done again; it never goes
+  back to Building.
+
+The labels follow the thread that links the pull request and the threads it started, not that
+thread's own parent or siblings, so link the pull request from the thread that owns the work. You
+can rename each label. Only these five labels are added or removed: other labels, including
+**Ready For Human Review**, stay as they are, and merged or closed pull requests keep the label they
+ended with. Labels follow the linked pull request refresh, so a change can take a minute or two to
+show, and a rate limit only delays them. Labels need triage access to the repository and are
+available on GitHub.
+
 ## GitHub stacks
 
 The Pull Requests page shows each PR's position in its GitHub stack. Open the stack badge in a

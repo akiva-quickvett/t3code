@@ -7,6 +7,8 @@ import {
   type ProjectId,
   type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
+  type ProjectSettingsOverridesPatch,
+  projectOverrideClearsWithNull,
   ServerSettings,
   type T3ProjectFile,
   type ServerSettingsPatch,
@@ -167,7 +169,7 @@ function projectOverrideWrites(
     current: ProjectSettingsOverrides,
     settings: ServerSettings,
     projectId: ProjectId,
-  ) => ProjectSettingsOverrides | null,
+  ) => ProjectSettingsOverridesPatch | null,
 ): ScopedServerWrite[] {
   const byId = new Map(environments.map((environment) => [environment.environmentId, environment]));
   const writes = new Map<EnvironmentId, ScopedServerWrite>();
@@ -239,19 +241,22 @@ export function planScopedSettingsPatch(
                   continue;
                 }
                 // A picker's "Inherit" sends null; for keys whose override
-                // cannot store null that means remove the override.
+                // cannot store null that means remove the override. A key the
+                // server keeps when the entry omits it is removed by sending null.
                 if (
                   value === null &&
                   !isNullableProjectSettingsOverride(key as ProjectScopedServerSettingKey)
                 ) {
-                  delete next[key];
+                  if (projectOverrideClearsWithNull(key as ProjectScopedServerSettingKey)) {
+                    next[key] = null;
+                  } else delete next[key];
                   continue;
                 }
                 const base = effective[key as keyof ServerSettings];
                 next[key] =
                   isPlainObject(value) && isPlainObject(base) ? { ...base, ...value } : value;
               }
-              return next as ProjectSettingsOverrides;
+              return next as ProjectSettingsOverridesPatch;
             })
         : scope.kind === "all" || scope.kind === "environment"
           ? connectedEnvironments.flatMap((environment) => {

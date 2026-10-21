@@ -89,7 +89,9 @@ describe("command permissions", () => {
     WS_METHODS.agentRolesSave,
     WS_METHODS.agentRolesRemove,
     WS_METHODS.agentRolesReset,
-  ])("requires the destination settings grant to edit role presets (%s)", (method) =>
+    WS_METHODS.chatChannelsMutate,
+    WS_METHODS.chatChannelsGetTemplateStatus,
+  ])("requires the destination settings grant to edit role presets and messaging (%s)", (method) =>
     Effect.scoped(
       Effect.gen(function* () {
         const registry = yield* setup;

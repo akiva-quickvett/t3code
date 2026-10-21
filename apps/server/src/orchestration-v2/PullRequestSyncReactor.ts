@@ -22,6 +22,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
@@ -34,6 +35,7 @@ import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as PullRequestLabelReactor from "./PullRequestLabelReactor.ts";
 import { isTerminalRunStatus } from "./ThreadManagementService.ts";
 
 const SLOW_SYNC_INTERVAL_MS = 15 * 60 * 1_000;
@@ -150,6 +152,7 @@ export const make = Effect.gen(function* () {
   const pullRequests = yield* PullRequestService.PullRequestService;
   const git = yield* GitManager.GitManager;
   const crypto = yield* Crypto.Crypto;
+  const labelRules = yield* Effect.serviceOption(PullRequestLabelReactor.PullRequestLabelReactor);
 
   const lastSyncedAt = new Map<string, number>();
   const requested = new Map<string, number>();
@@ -208,6 +211,7 @@ export const make = Effect.gen(function* () {
 
     const linkedThisSweep = new Set<string>();
     const persistence = yield* Semaphore.make(1);
+    const observed: Array<PullRequestLabelReactor.PullRequestLabelObservation> = [];
 
     const syncEntry = Effect.fn("PullRequestSyncReactor.syncEntry")(function* (
       entry: LinkEntry,
@@ -330,6 +334,7 @@ export const make = Effect.gen(function* () {
       }
       // The host answered, so the cadence clock ticks even if a dispatch below is rejected.
       lastSyncedAt.set(key, nowMs);
+      observed.push({ summary, entries });
       // A refresh requested while the host read was in flight belongs to the next sweep.
       if (requested.get(key) === generation) requested.delete(key);
       yield* Effect.forEach(
@@ -389,6 +394,9 @@ export const make = Effect.gen(function* () {
     for (const [reason, { count, key }] of skips) {
       yield* Effect.logWarning("pull request sync skipped", { count, key, reason });
     }
+    // After the snapshots are saved, so a label pass sees the same pull request state the
+    // thread shows; it rides this sweep's reads instead of polling the host on its own.
+    if (Option.isSome(labelRules)) yield* labelRules.value.apply(observed);
   });
 
   const worker = yield* makeDrainableWorker((scope: "all" | "requested") =>

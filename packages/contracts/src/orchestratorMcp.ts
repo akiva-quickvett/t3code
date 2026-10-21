@@ -18,6 +18,7 @@ import {
   TurnItemId,
 } from "./baseSchemas.ts";
 import {
+  ScheduledTaskAction,
   ScheduledTaskRunStatus,
   ScheduledTaskSchedule,
   ScheduledTaskUpsertSchedule,
@@ -73,6 +74,17 @@ const OrchestratorMcpSchedule = Schema.Union([
 ]).annotate({
   description:
     "Trigger object: {type:'interval', everyMs}, {type:'fixed_time', timeOfDay, weekdays?}, or {type:'webhook'} to run on each request to a generated URL. Never stringify it unless the provider requires the compatibility form.",
+});
+
+const OrchestratorMcpScheduledTaskAction = Schema.Union([
+  ScheduledTaskAction,
+  Schema.fromJsonString(ScheduledTaskAction).annotate({
+    description:
+      "Compatibility-only JSON encoding of the action object. Prefer a structured object.",
+  }),
+]).annotate({
+  description:
+    "What each run does: {type:'agentTurn'} (the default) sends the prompt to an agent; {type:'script', scriptId} runs that project script in the project root with no agent, model or thread, and records whether it exited 0. A script task's prompt is only its description, and a webhook passes no request data to the script.",
 });
 
 const OrchestratorMcpTargetOptionsFromRecord = Schema.Record(
@@ -593,9 +605,11 @@ export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabiliti
 export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
   projectId: OrchestratorMcpProjectTarget,
   prompt: OrchestratorMcpPrompt.annotate({
-    description: "Prompt executed on every scheduled run.",
+    description:
+      "Prompt executed on every scheduled run. For a script action, a short description of what the script does.",
   }),
   schedule: OrchestratorMcpSchedule,
+  action: Schema.optional(OrchestratorMcpScheduledTaskAction),
   title: Schema.optional(OrchestratorMcpTitle),
   enabled: Schema.optional(
     Schema.Boolean.annotate({ description: "Whether the schedule starts enabled; defaults true." }),
@@ -627,6 +641,9 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
   webhookSignature: Schema.optional(Schema.Literals(["none", "set"])).annotate({
     description: "Whether requests must carry a valid signature.",
   }),
+  action: Schema.optional(ScheduledTaskAction).annotate({
+    description: "Absent for an agent turn.",
+  }),
 });
 export type OrchestratorMcpScheduledTask = typeof OrchestratorMcpScheduledTask.Type;
 
@@ -655,6 +672,7 @@ export const OrchestratorMcpUpdateScheduledTaskInput = Schema.Struct({
   prompt: Schema.optional(OrchestratorMcpPrompt),
   title: Schema.optional(OrchestratorMcpTitle),
   schedule: Schema.optional(OrchestratorMcpSchedule),
+  action: Schema.optional(OrchestratorMcpScheduledTaskAction),
   enabled: Schema.optional(Schema.Boolean),
   bindToCurrentThread: Schema.optional(Schema.Boolean),
 });

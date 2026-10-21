@@ -18,6 +18,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ScheduledScriptRunner from "./ScheduledScriptRunner.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
@@ -197,6 +198,7 @@ it.effect(
                 }),
                 Layer.mock(ThreadManagementService.ThreadManagementService)({}),
                 Layer.mock(SecretRequests.SecretRequests)({}),
+                Layer.mock(ScheduledScriptRunner.ScheduledScriptRunner)({}),
                 NodeCrypto.layer,
                 Scheduler.layer,
               ),
@@ -291,6 +293,7 @@ it.effect(
                 }),
                 Layer.mock(ThreadManagementService.ThreadManagementService)({}),
                 Layer.mock(SecretRequests.SecretRequests)({}),
+                Layer.mock(ScheduledScriptRunner.ScheduledScriptRunner)({}),
                 NodeCrypto.layer,
                 Scheduler.layer,
               ),
