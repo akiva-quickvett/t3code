@@ -233,7 +233,8 @@ sidebar normally hides, appear in the tree. Parents start collapsed; open one
 with its arrow. **Show agent tree** also opens the parents of the current thread
 so you can see where it sits. Press the tree button again, or run **Hide agent
 tree**, to return to the usual list. A thread whose parent was archived or
-deleted shows at the top level.
+deleted shows at the top level. So does active work under a settled or snoozed
+parent, and a pinned thread, each in its own section.
 
 **Go to parent** in the command palette (`mod+alt+arrowup`) opens the thread
 it was delegated or forked from, or the thread supervising it.

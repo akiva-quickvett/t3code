@@ -359,17 +359,24 @@ export function deriveAgentTree<T extends AgentTreeThread>(
     }
   };
   for (const key of rootKeys) reachFrom(key);
-  // Whatever no root reaches hangs off a cycle. Cutting the edge into its first
-  // thread makes that thread a root and the rest of the cycle its descendants.
+  // Whatever no root reaches is on a cycle or hangs off one. Walking up from it
+  // finds a thread on the cycle; cutting the edge into that thread makes it a
+  // root, with the rest of the cycle and anything hanging off it below.
   if (reached.size < byKey.size) {
-    for (const [key, thread] of byKey) {
+    for (const key of byKey.keys()) {
       if (reached.has(key)) continue;
-      const parentKey = parentKeyByKey.get(key)!;
-      parentKeyByKey.delete(key);
+      const walked = new Set<string>();
+      let onCycle = key;
+      while (!walked.has(onCycle)) {
+        walked.add(onCycle);
+        onCycle = parentKeyByKey.get(onCycle)!;
+      }
+      const parentKey = parentKeyByKey.get(onCycle)!;
+      parentKeyByKey.delete(onCycle);
       const siblings = childrenByKey.get(parentKey)!;
-      siblings.splice(siblings.indexOf(thread), 1);
-      rootKeys.add(key);
-      reachFrom(key);
+      siblings.splice(siblings.indexOf(byKey.get(onCycle)!), 1);
+      rootKeys.add(onCycle);
+      reachFrom(onCycle);
     }
   }
 
@@ -379,6 +386,39 @@ export function deriveAgentTree<T extends AgentTreeThread>(
     childrenByKey,
     parentKeyByKey,
   };
+}
+
+/**
+ * Makes a root of each thread that `outranks` says should not sit under the
+ * root it currently hangs from, such as live work under a parked parent. Its
+ * own descendants follow it. Parents are decided before their children.
+ */
+export function liftAgentTreeThreads<T extends AgentTreeThread>(
+  tree: AgentTree<T>,
+  outranks: (thread: T, root: T) => boolean,
+): AgentTree<T> {
+  const childrenByKey = new Map<string, T[]>();
+  const parentKeyByKey = new Map(tree.parentKeyByKey);
+  const lifted: T[] = [];
+  const pending = tree.roots.map((root) => ({ thread: root, root }));
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    const key = agentTreeKey(next.thread);
+    const kept: T[] = [];
+    for (const child of tree.childrenByKey.get(key) ?? []) {
+      if (outranks(child, next.root)) {
+        parentKeyByKey.delete(agentTreeKey(child));
+        lifted.push(child);
+        pending.push({ thread: child, root: child });
+      } else {
+        kept.push(child);
+        pending.push({ thread: child, root: next.root });
+      }
+    }
+    if (kept.length > 0) childrenByKey.set(key, kept);
+  }
+  return lifted.length === 0
+    ? tree
+    : { roots: [...tree.roots, ...lifted], childrenByKey, parentKeyByKey };
 }
 
 /**

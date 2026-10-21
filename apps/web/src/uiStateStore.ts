@@ -46,8 +46,15 @@ export interface UiAgentTreeState {
    * collapsed, and a persisted set would only grow.
    */
   agentTreeExpandedKeys: Readonly<Record<string, true>>;
-  /** Bumped by "Show agent tree" so the sidebar opens and scrolls to the thread. */
-  agentTreeReveal: { readonly threadKey: string; readonly request: number } | null;
+  /**
+   * Bumped by "Show agent tree" so the sidebar opens and scrolls to the thread.
+   * `scrolled` keeps a remounted sidebar (the mobile sheet) from scrolling again.
+   */
+  agentTreeReveal: {
+    readonly threadKey: string;
+    readonly request: number;
+    readonly scrolled: boolean;
+  } | null;
 }
 
 export interface UiThreadState {
@@ -386,8 +393,14 @@ export function showAgentTree(
     agentTreeReveal:
       threadKey === null
         ? state.agentTreeReveal
-        : { threadKey, request: (state.agentTreeReveal?.request ?? 0) + 1 },
+        : { threadKey, request: (state.agentTreeReveal?.request ?? 0) + 1, scrolled: false },
   };
+}
+
+export function markAgentTreeRevealScrolled(state: UiState): UiState {
+  return state.agentTreeReveal === null || state.agentTreeReveal.scrolled
+    ? state
+    : { ...state, agentTreeReveal: { ...state.agentTreeReveal, scrolled: true } };
 }
 
 function setPullRequestMergeMethod(state: UiState, method: PullRequestMergeMethod): UiState {
@@ -482,6 +495,7 @@ interface UiStateStore extends UiState {
   setSidebarAgentTreeEnabled: (enabled: boolean) => void;
   setAgentTreeExpanded: (threadKey: string, expanded: boolean) => void;
   showAgentTree: (threadKey: string | null, ancestorKeys: readonly string[]) => void;
+  markAgentTreeRevealScrolled: () => void;
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
@@ -509,6 +523,7 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setAgentTreeExpanded(state, threadKey, expanded)),
   showAgentTree: (threadKey, ancestorKeys) =>
     set((state) => showAgentTree(state, threadKey, ancestorKeys)),
+  markAgentTreeRevealScrolled: () => set((state) => markAgentTreeRevealScrolled(state)),
   setPullRequestMergeMethod: (method) => set((state) => setPullRequestMergeMethod(state, method)),
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),

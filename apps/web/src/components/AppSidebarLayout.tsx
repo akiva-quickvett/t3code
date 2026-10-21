@@ -40,6 +40,7 @@ import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import { useProjects } from "../state/entities";
 import { useUiStateStore } from "../uiStateStore";
+import { showThreadInAgentTree } from "../state/agentTree";
 import {
   clampThreadSidebarWidth,
   resolveInitialThreadSidebarWidth,
@@ -257,9 +258,18 @@ function ProjectProjectionRetention() {
 
 // "Show agent tree" also comes from the command palette, which renders outside
 // the sidebar provider, so the reveal request opens the sidebar from in here.
-function AgentTreeRevealSidebarOpener() {
+// A focused desktop preview forwards the shortcut as a menu action.
+function AgentTreeSidebarControl() {
   const request = useUiStateStore((state) => state.agentTreeReveal?.request ?? null);
   const { isMobile, setOpen, setOpenMobile } = useSidebar();
+  const legacySidebarEnabled = useLegacySidebarEnabled();
+  const routeThreadRef = useThreadRouteRef();
+  useEffect(() => {
+    if (legacySidebarEnabled) return;
+    return window.desktopBridge?.onMenuAction((action) => {
+      if (action === "sidebar.showAgentTree") showThreadInAgentTree(routeThreadRef);
+    });
+  }, [legacySidebarEnabled, routeThreadRef]);
   const handledRequestRef = useRef(request);
   useEffect(() => {
     if (request === null || handledRequestRef.current === request) return;
@@ -373,7 +383,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         </Sidebar>
         {children}
         <SidebarControl />
-        <AgentTreeRevealSidebarOpener />
+        <AgentTreeSidebarControl />
         <NavigationHistoryShortcuts />
         <MainAppLocationTracker />
       </SidebarProvider>

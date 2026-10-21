@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import {
   legacyProjectCwdPreferenceKey,
+  markAgentTreeRevealScrolled,
   markThreadUnread,
   markThreadVisited,
   parsePersistedState,
@@ -175,11 +176,24 @@ describe("agent tree state", () => {
       "environment:broker": true,
       "environment:slice": true,
     });
-    expect(first.agentTreeReveal).toEqual({ threadKey: "environment:cell", request: 1 });
+    expect(first.agentTreeReveal).toEqual({
+      threadKey: "environment:cell",
+      request: 1,
+      scrolled: false,
+    });
+
+    // A sidebar that mounts later, such as the mobile sheet, must not scroll again.
+    const scrolled = markAgentTreeRevealScrolled(first);
+    expect(scrolled.agentTreeReveal?.scrolled).toBe(true);
+    expect(markAgentTreeRevealScrolled(scrolled)).toBe(scrolled);
 
     // Showing the same thread again must still scroll to it, so the request moves.
-    const again = showAgentTree(first, "environment:cell", []);
-    expect(again.agentTreeReveal).toEqual({ threadKey: "environment:cell", request: 2 });
+    const again = showAgentTree(scrolled, "environment:cell", []);
+    expect(again.agentTreeReveal).toEqual({
+      threadKey: "environment:cell",
+      request: 2,
+      scrolled: false,
+    });
     expect(again.agentTreeExpandedKeys).toEqual(first.agentTreeExpandedKeys);
   });
 

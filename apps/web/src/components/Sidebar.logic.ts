@@ -8,6 +8,11 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
+import {
+  type AgentTree,
+  type AgentTreeThread,
+  liftAgentTreeThreads,
+} from "@t3tools/client-runtime/state/thread-relationships";
 import { isProviderNativeSubagentThread } from "@t3tools/contracts";
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
@@ -52,10 +57,12 @@ export function resolveSidebarRowAccessibility(input: {
   readonly statusLabel: string | null;
   readonly projectDisplayName: string | null;
   readonly isActive: boolean;
-}): { readonly label: string; readonly current: "page" | undefined } {
+  /** A collapsed agent-tree row whose subtree holds the open thread. */
+  readonly holdsActive?: boolean;
+}): { readonly label: string; readonly current: "page" | "true" | undefined } {
   return {
     label: [input.title, input.statusLabel, input.projectDisplayName].filter(Boolean).join(", "),
-    current: input.isActive ? "page" : undefined,
+    current: input.isActive ? "page" : input.holdsActive === true ? "true" : undefined,
   };
 }
 
@@ -554,6 +561,30 @@ export function filterSidebarAgentTreeThreads<
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
+}
+
+const AGENT_TREE_SECTION_RANK: Record<SidebarSection, number> = {
+  pinned: 2,
+  active: 1,
+  working: 1,
+  snoozed: 0,
+  settled: 0,
+};
+
+/**
+ * A thread nests under its root only when the root's section shows it at
+ * least as prominently. Live work under a settled or snoozed parent, or a
+ * pinned subagent, gets its own row in its own section instead of hiding.
+ */
+export function liftSidebarAgentTree<T extends AgentTreeThread>(
+  tree: AgentTree<T>,
+  sectionOf: (thread: T) => SidebarSection | undefined,
+): AgentTree<T> {
+  const rank = (thread: T) => {
+    const section = sectionOf(thread);
+    return section === undefined ? 0 : AGENT_TREE_SECTION_RANK[section];
+  };
+  return liftAgentTreeThreads(tree, (thread, root) => rank(thread) > rank(root));
 }
 
 export function getSidebarForkParentThreadId(

@@ -202,6 +202,7 @@ import {
   applySidebarThreadDrop,
   filterSidebarAgentTreeThreads,
   filterSidebarV2VisibleThreads,
+  liftSidebarAgentTree,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
   deleteSelectedThreadEntries,
@@ -534,9 +535,26 @@ function useSidebarThreads(input: {
   const partitionNextWakeAt = partition.snoozedThreads[0]?.snoozedUntil ?? null;
   if (partitionNextWakeAt !== nextSnoozeWakeAt) setNextSnoozeWakeAt(partitionNextWakeAt);
 
+  // Each thread's own section, children included, so menus and sweeps read
+  // a nested row's real state.
+  const sectionByThreadKey = new Map<string, SidebarSection>();
+  for (const [list, section] of [
+    [partition.pinnedThreads, "pinned"],
+    [partition.activeThreads, "active"],
+    [partition.workingThreads, "working"],
+    [partition.snoozedThreads, "snoozed"],
+    [partition.settledThreads, "settled"],
+  ] as const) {
+    for (const thread of list) sectionByThreadKey.set(threadShellKey(thread), section);
+  }
   // Sections list every visible thread in its own section; in tree mode only
   // roots get a row there, and their descendants follow them.
-  const { agentTree } = partition;
+  const agentTree =
+    partition.agentTree === null
+      ? null
+      : liftSidebarAgentTree(partition.agentTree, (thread) =>
+          sectionByThreadKey.get(threadShellKey(thread)),
+        );
   const rootsOf = (list: readonly EnvironmentThreadShell[]) =>
     agentTree === null
       ? list
@@ -604,17 +622,16 @@ function useSidebarThreads(input: {
           ...(agentTreeDescendantsByRootKey.get(threadShellKey(thread)) ?? []),
         ]),
   );
-  // Each thread's own section, children included, so menus and sweeps read
-  // a nested row's real state.
-  const sectionByThreadKey = new Map<string, SidebarSection>();
-  for (const [list, section] of [
-    [partition.pinnedThreads, "pinned"],
-    [partition.activeThreads, "active"],
-    [partition.workingThreads, "working"],
-    [partition.snoozedThreads, "snoozed"],
-    [partition.settledThreads, "settled"],
-  ] as const) {
-    for (const thread of list) sectionByThreadKey.set(threadShellKey(thread), section);
+  // The open thread can sit inside a collapsed parent; that row says so.
+  let agentTreeRouteHolderKey: string | null = null;
+  if (agentTree !== null && routeThreadKey !== null && !agentTreeRowByKey.has(routeThreadKey)) {
+    for (
+      let key = agentTree.parentKeyByKey.get(routeThreadKey);
+      key !== undefined && agentTreeRouteHolderKey === null;
+      key = agentTree.parentKeyByKey.get(key)
+    ) {
+      if (agentTreeRowByKey.has(key)) agentTreeRouteHolderKey = key;
+    }
   }
   return {
     ...partition,
@@ -625,6 +642,7 @@ function useSidebarThreads(input: {
     settledThreads,
     agentTreeDescendantsByRootKey,
     agentTreeRowByKey,
+    agentTreeRouteHolderKey,
     threads,
     workingShelfEnabled,
     searchableThreads: [
@@ -1665,6 +1683,8 @@ type SidebarThreadRowProps = {
   treeDepth: number | null;
   treeChildCount: number;
   treeExpanded: boolean;
+  /** Collapsed, with the open thread somewhere below it. */
+  treeHoldsRoute: boolean;
   onToggleAgentTree: (threadKey: string, expanded: boolean) => void;
 };
 
@@ -2028,11 +2048,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       ? "bg-sidebar-row-active text-sidebar-foreground"
       : isSelected || props.sweepAction !== null
         ? "bg-sidebar-row-selected text-sidebar-foreground"
-        : hasUnsentDraft
-          ? cn(draftSurfaceClassName, "text-sidebar-foreground")
-          : shouldRecede
-            ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
-            : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
+        : props.treeHoldsRoute
+          ? "bg-sidebar-row-hover text-sidebar-foreground"
+          : hasUnsentDraft
+            ? cn(draftSurfaceClassName, "text-sidebar-foreground")
+            : shouldRecede
+              ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+              : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
     shouldRecede &&
       status === "working" &&
       "opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none",
@@ -2095,6 +2117,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     statusLabel: topStatus?.label ?? null,
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
+    holdsActive: props.treeHoldsRoute,
   });
 
   const title =
@@ -3156,6 +3179,7 @@ export default function Sidebar() {
     activeKeysById,
     agentTreeDescendantsByRootKey,
     agentTreeRowByKey,
+    agentTreeRouteHolderKey,
   } = useSidebarThreads({
     projectScopeKey,
     scopedProjectKeys,
@@ -3202,12 +3226,13 @@ export default function Sidebar() {
       ?.scrollIntoView({ block: "nearest" });
   }, [activeSearchResultKey]);
   // The reveal lands in the same store update that expands the ancestors, so
-  // the row is already rendered when this runs.
+  // the row is already rendered when this runs, even in a sheet that just opened.
   useEffect(() => {
-    if (agentTreeReveal === null) return;
+    if (agentTreeReveal === null || agentTreeReveal.scrolled) return;
     document
       .querySelector(`li[data-thread-item="${globalThis.CSS.escape(agentTreeReveal.threadKey)}"]`)
       ?.scrollIntoView({ block: "nearest" });
+    useUiStateStore.getState().markAgentTreeRevealScrolled();
   }, [agentTreeReveal]);
 
   const orderedThreadKeysRef = useRef(orderedThreadKeys);
@@ -5022,6 +5047,7 @@ export default function Sidebar() {
                             treeDepth={treeRow?.depth ?? null}
                             treeChildCount={treeRow?.childCount ?? 0}
                             treeExpanded={treeRow?.expanded ?? false}
+                            treeHoldsRoute={agentTreeRouteHolderKey === threadKey}
                             onToggleAgentTree={setAgentTreeExpanded}
                             thread={thread}
                             variant={rowVariant}

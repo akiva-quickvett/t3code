@@ -10,6 +10,7 @@ import {
   deriveAgentTree,
   deriveThreadRelationshipGraph,
   flattenAgentTree,
+  liftAgentTreeThreads,
   immediateThreadRelationships,
   orderWebThreadLineageRows,
   relatedThreadIds,
@@ -666,6 +667,37 @@ describe("agent tree", () => {
       "    tail",
       "self",
     ]);
+  });
+
+  it("cuts a cycle on the cycle itself, even when a thread hanging off it comes first", () => {
+    const tree = deriveAgentTree([
+      node("tail", { subagentOf: "b" }),
+      node("a", { subagentOf: "c" }),
+      node("b", { subagentOf: "a" }),
+      node("c", { subagentOf: "b" }),
+    ]);
+
+    expect(ids(tree.roots)).toEqual(["b"]);
+    expect(rowIds(tree, ["b", "c"])).toEqual(["b", "  tail", "  c", "    a"]);
+  });
+
+  it("lifts a thread out from under its root, with its own descendants", () => {
+    const parked = new Set(["meta"]);
+    const tree = liftAgentTreeThreads(
+      deriveAgentTree([
+        node("meta"),
+        node("slice", { supervisedBy: "meta" }),
+        node("broker", { subagentOf: "slice" }),
+        node("done", { supervisedBy: "meta" }),
+      ]),
+      (thread, root) => parked.has(root.id) && thread.id === "slice",
+    );
+
+    expect(ids(tree.roots)).toEqual(["meta", "slice"]);
+    expect(childIds(tree, "meta")).toEqual(["done"]);
+    expect(childIds(tree, "slice")).toEqual(["broker"]);
+    expect(tree.parentKeyByKey.has(keyOf("slice"))).toBe(false);
+    expect(tree.parentKeyByKey.get(keyOf("broker"))).toBe(keyOf("slice"));
   });
 
   it("walks ancestors through supervisors and stops at a missing thread or a cycle", () => {
