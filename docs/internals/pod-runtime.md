@@ -78,9 +78,10 @@ namespace per launch would be tighter, but the agent container is unprivileged a
 The stop catches what a session leaves behind, not a session that evades it: one that rewrites its
 pid file or its own mark, or double-forks a child with a cleaned environment, can outlive its stop.
 It runs as the user, in that pod's agent container only, and ends with the pod's stop or an
-agent-container recreate. Closing a session waits for the stop, so server shutdown leaves nothing
-behind. A server that crashed never ran its stops, so each running pod is swept once per start of
-its containers for marks the current server did not make.
+agent-container recreate; the next server's sweep matches only marks, so it does not see such a
+process either. Closing a session, server shutdown included, waits for the stop script. A server
+that crashed never ran its stops, so each running pod is swept once per start of its containers
+for marks the current server did not make.
 
 A session in a pod never inherits the server's environment. `docker exec` names only the
 instance's own variables, its config-dir variable and the role's context window; inherited
