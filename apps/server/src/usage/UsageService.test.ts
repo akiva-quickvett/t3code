@@ -31,7 +31,6 @@ import * as Context from "effect/Context";
 import * as Layer from "effect/Layer";
 import * as Scheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
 
@@ -2685,32 +2684,30 @@ describe("UsageService.readThreadTree", () => {
       yield* writeTranscript(home, "claude", "b", second);
     });
 
-  for (const forkFileFirst of [true, false]) {
-    it.effect(
-      `keeps a forked session's copied history with its source (fork file ${forkFileFirst ? "a" : "b"})`,
-      () =>
-        withTree("usage-thread-tree-fork", ({ home, service }) =>
-          Effect.gen(function* () {
-            yield* seedForkedSession(home, forkFileFirst);
+  it.effect.each(["a", "b"] as const)(
+    "keeps a forked session's copied history with its source (fork file %s)",
+    (forkFile) =>
+      withTree("usage-thread-tree-fork", ({ home, service }) =>
+        Effect.gen(function* () {
+          yield* seedForkedSession(home, forkFile === "a");
 
-            const slice = yield* service.readThreadTree({ threadId: ThreadId.make("slice") });
-            assert.deepStrictEqual(
-              slice.threads.map((row) => [row.threadId, row.tokens]),
-              [
-                ["slice", 320],
-                ["broker", 410],
-              ],
-            );
-            assert.strictEqual(slice.tokens, 730);
-            assert.closeTo(slice.costUsd, costOf(100) + costOf(200) + costOf(400), 1e-9);
+          const slice = yield* service.readThreadTree({ threadId: ThreadId.make("slice") });
+          assert.deepStrictEqual(
+            slice.threads.map((row) => [row.threadId, row.tokens]),
+            [
+              ["slice", 320],
+              ["broker", 410],
+            ],
+          );
+          assert.strictEqual(slice.tokens, 730);
+          assert.closeTo(slice.costUsd, costOf(100) + costOf(200) + costOf(400), 1e-9);
 
-            const broker = yield* service.readThreadTree({ threadId: ThreadId.make("broker") });
-            assert.strictEqual(broker.tokens, 410);
-            assert.closeTo(broker.costUsd, costOf(400), 1e-9);
-          }),
-        ),
-    );
-  }
+          const broker = yield* service.readThreadTree({ threadId: ThreadId.make("broker") });
+          assert.strictEqual(broker.tokens, 410);
+          assert.closeTo(broker.costUsd, costOf(400), 1e-9);
+        }),
+      ),
+  );
 
   it.effect("re-parses live Claude transcripts from a v5 cache and keeps deleted ones", () =>
     withTree("usage-thread-tree-v5-upgrade", ({ home }) =>
