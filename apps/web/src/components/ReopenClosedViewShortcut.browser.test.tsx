@@ -327,6 +327,7 @@ describe("root reopen shortcut", () => {
     await render();
     expect(state.setShortcuts).toHaveBeenLastCalledWith([
       expect.objectContaining({ command: "sidebar.toggle" }),
+      expect.objectContaining({ command: "sidebar.showAgentTree" }),
       expect.objectContaining({ command: "rightPanel.toggle" }),
     ]);
   });
