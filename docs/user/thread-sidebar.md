@@ -224,6 +224,21 @@ Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent
 thread asks for it.
 
+### Show the agent tree
+
+On web and desktop, press the tree button at the top of the sidebar, or run
+**Show agent tree** from the command palette (`mod+alt+shift+b`), to nest each
+agent's subagents and supervised threads under it. Subagent threads, which the
+sidebar normally hides, appear in the tree. Parents start collapsed; open one
+with its arrow. **Show agent tree** also opens the parents of the current thread
+so you can see where it sits. Press the tree button again, or run **Hide agent
+tree**, to return to the usual list. A thread whose parent was archived or
+deleted shows at the top level. So does active work under a settled or snoozed
+parent, and a pinned thread, each in its own section.
+
+**Go to parent** in the command palette (`mod+alt+arrowup`) opens the thread
+it was delegated or forked from, or the thread supervising it.
+
 Expand a tool call in the conversation to see its full command and output.
 Summaries shorten shell wrappers and can still describe the latest call after it
 finishes; the call's own result shows its status.

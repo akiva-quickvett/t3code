@@ -41,7 +41,9 @@ import {
   ArrowRightIcon,
   BotIcon,
   CornerLeftUpIcon,
+  EyeIcon,
   GitForkIcon,
+  ListTreeIcon,
   LoaderCircleIcon,
   MoreHorizontalIcon,
   PlusIcon,
@@ -51,6 +53,8 @@ import {
 import { useState, type ReactNode } from "react";
 
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
+import { useLegacySidebarEnabled } from "../../hooks/useSettings";
+import { showThreadInAgentTree } from "../../state/agentTree";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import {
   useProjects,
@@ -219,6 +223,7 @@ export function ThreadRelationshipsPanel(props: {
   const allProjects = useProjects();
   const archived = useArchivedThreadSnapshots([props.environmentId]);
   const navigate = useNavigate();
+  const legacySidebarEnabled = useLegacySidebarEnabled();
   const mergeBack = useAtomCommand(threadEnvironment.mergeBack);
   const stopSession = useAtomCommand(threadEnvironment.stopSession);
   const interruptTurn = useAtomCommand(threadEnvironment.interruptTurn);
@@ -286,6 +291,9 @@ export function ThreadRelationshipsPanel(props: {
   });
   const canMerge = mergeTargetThreadId !== null && latestMergeBackRun !== null;
   const canDetach = projection ? canDetachThreadProviderSession(projection) : false;
+  const canShowAgentTree =
+    !legacySidebarEnabled &&
+    relationshipRows.some(({ edge }) => edge.kind === "subagent" || edge.kind === "supervised");
 
   const {
     related = [],
@@ -389,7 +397,7 @@ export function ThreadRelationshipsPanel(props: {
       title={runningCount > 0 ? `Lineage · ${runningCount} running` : "Lineage"}
       data-thread-relationships-panel
       actions={
-        canDetach ? (
+        canDetach || canShowAgentTree ? (
           <Menu>
             <MenuTrigger
               render={
@@ -405,10 +413,18 @@ export function ThreadRelationshipsPanel(props: {
               <MoreHorizontalIcon className="size-3.5" />
             </MenuTrigger>
             <MenuPopup align="end" className="min-w-60 max-w-(--available-width)">
-              <MenuItem onClick={() => void detach()}>
-                <UnplugIcon className="size-3.5" />
-                Disconnect agent session
-              </MenuItem>
+              {canShowAgentTree ? (
+                <MenuItem onClick={() => showThreadInAgentTree(ref)}>
+                  <ListTreeIcon className="size-3.5" />
+                  Show in agent tree
+                </MenuItem>
+              ) : null}
+              {canDetach ? (
+                <MenuItem onClick={() => void detach()}>
+                  <UnplugIcon className="size-3.5" />
+                  Disconnect agent session
+                </MenuItem>
+              ) : null}
             </MenuPopup>
           </Menu>
         ) : null
@@ -427,7 +443,9 @@ export function ThreadRelationshipsPanel(props: {
                 ? CornerLeftUpIcon
                 : isSubagent
                   ? BotIcon
-                  : GitForkIcon;
+                  : edge.kind === "supervised"
+                    ? EyeIcon
+                    : GitForkIcon;
               const relationship = relationshipLabel(edge, props.threadId);
               const projectedAgent =
                 isSubagent && !isParent ? subagentsByThreadId.get(threadId) : undefined;
@@ -507,19 +525,23 @@ export function ThreadRelationshipsPanel(props: {
                     fallbackIcon={RelationshipIcon}
                     status={rowStatus}
                   />
-                  <span className="min-w-0 flex-1">
+                  {/* The title keeps room first; the role badge truncates before it. */}
+                  <span className="min-w-16 flex-1">
                     <span className="block truncate text-left text-sm font-medium leading-4 text-foreground/85">
                       {threadTitle}
                     </span>
                   </span>
                   {node?.thread ? (
-                    <ThreadRoleBadge
-                      thread={{
-                        environmentId: ref.environmentId,
-                        projectId: node.thread.projectId,
-                        rolePreset: node.thread.rolePreset,
-                      }}
-                    />
+                    <span className="flex min-w-0 max-w-[45%]">
+                      <ThreadRoleBadge
+                        thread={{
+                          environmentId: ref.environmentId,
+                          projectId: node.thread.projectId,
+                          rolePreset: node.thread.rolePreset,
+                        }}
+                        shrink
+                      />
+                    </span>
                   ) : null}
                   {agent ? null : (
                     <ArrowRightIcon className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />

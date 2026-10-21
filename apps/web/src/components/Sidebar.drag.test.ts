@@ -36,8 +36,10 @@ function layout(
   let top = 100;
   const rects = items.map((item) => {
     const height =
-      item.kind === "thread"
-        ? (item.section === "pinned" || item.section === "active" ? cardHeight : 36) * scale
+      item.kind !== "marker"
+        ? (item.kind === "thread" && (item.section === "pinned" || item.section === "active")
+            ? cardHeight
+            : 36) * scale
         : item.marker === "pinned-header" || item.marker === "pinned-divider"
           ? 0
           : (item.marker.endsWith("placeholder") ? 0 : 32) * scale;
@@ -252,6 +254,22 @@ describe("sidebar collision detection", () => {
 });
 
 describe("sidebar drag projection", () => {
+  it("moves nested agent rows with their root instead of hiding them", () => {
+    const items: SidebarListItem[] = [
+      pinnedHeader,
+      divider,
+      thread("a1", "active"),
+      { kind: "child", key: "a1-child", section: "active" },
+      thread("a2", "active"),
+      settledHeader,
+      marker("settled-placeholder"),
+    ];
+    const result = preview({ items, settledOrder: [], settledExpanded: true }, "a2", "a1");
+
+    expect(result.get("a1")?.y).toBeGreaterThan(0);
+    expect(result.get("a1-child")).toEqual(result.get("a1"));
+  });
+
   it.each([
     ["a2", "a1"],
     ["p", "a1"],

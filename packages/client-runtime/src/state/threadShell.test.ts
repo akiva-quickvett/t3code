@@ -16,7 +16,11 @@ import { PrimaryConnectionTarget } from "../connection/model.ts";
 import { v2Now, v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 import { applyShellStreamEvent } from "./shellReducer.ts";
 import { isThreadWorking } from "./threadInbox.ts";
-import { childThreadInputsTitle, createEnvironmentThreadShellAtoms } from "./threadShell.ts";
+import {
+  childThreadInputsTitle,
+  createEnvironmentThreadShellAtoms,
+  pendingSubagentRequestsByThread,
+} from "./threadShell.ts";
 
 const environmentId = EnvironmentId.make("environment-v2");
 const remoteEnvironmentId = EnvironmentId.make("remote-environment-v2");
@@ -213,6 +217,104 @@ describe("v2 thread shell lists", () => {
     disposeInputs();
     disposeParent();
     registry.dispose();
+  });
+
+  it("bubbles a request through a supervised thread to its supervisor", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const meta = { ...v2ThreadShell, id: ThreadId.make("meta") };
+    const slice = {
+      ...v2ThreadShell,
+      id: ThreadId.make("slice"),
+      status: "running" as const,
+      activityRunStatus: "running" as const,
+      lineage: {
+        ...v2ThreadShell.lineage,
+        rootThreadId: ThreadId.make("slice"),
+        supervisorThreadId: meta.id,
+      },
+    };
+    const broker = {
+      ...slice,
+      id: ThreadId.make("broker"),
+      creationSource: "mcp" as const,
+      lineage: {
+        ...v2ThreadShell.lineage,
+        parentThreadId: slice.id,
+        relationshipToParent: "subagent" as const,
+      },
+    };
+    const question = {
+      id: RuntimeRequestId.make("which-base"),
+      kind: "user_input" as const,
+      createdAt: v2Now,
+    };
+    const metaShell = threads.threadShellAtom({ environmentId, threadId: meta.id });
+    const sliceShell = threads.threadShellAtom({ environmentId, threadId: slice.id });
+    const metaInputs = threads.childThreadInputsAtom({ environmentId, threadId: meta.id });
+    const disposers = [
+      registry.mount(metaShell),
+      registry.mount(sliceShell),
+      registry.mount(metaInputs),
+    ];
+
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
+      threads: [meta, slice, { ...broker, pendingRuntimeRequest: question }],
+    });
+    expect(registry.get(sliceShell)?.pendingSubagentRequest).toBe("user_input");
+    expect(registry.get(metaShell)?.pendingSubagentRequest).toBe("user_input");
+    expect(registry.get(metaInputs).map((thread) => thread.id)).toEqual([broker.id]);
+
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
+      threads: [meta, { ...slice, pendingRuntimeRequest: question }, broker],
+    });
+    expect(registry.get(metaShell)?.pendingSubagentRequest).toBe("user_input");
+    const asking = registry.get(metaInputs);
+    expect(asking.map((thread) => thread.id)).toEqual([slice.id]);
+    expect(childThreadInputsTitle(asking)).toBe("Agent needs input");
+
+    for (const dispose of disposers) dispose();
+    registry.dispose();
+  });
+
+  it("stops notification bubbling at a supervised thread, which notifies for itself", () => {
+    const meta = { ...v2ThreadShell, id: ThreadId.make("meta") };
+    const slice = {
+      ...v2ThreadShell,
+      id: ThreadId.make("slice"),
+      status: "running" as const,
+      activityRunStatus: "running" as const,
+      lineage: {
+        ...v2ThreadShell.lineage,
+        rootThreadId: ThreadId.make("slice"),
+        supervisorThreadId: meta.id,
+      },
+    };
+    const broker = {
+      ...slice,
+      id: ThreadId.make("broker"),
+      creationSource: "mcp" as const,
+      lineage: {
+        ...v2ThreadShell.lineage,
+        parentThreadId: slice.id,
+        relationshipToParent: "subagent" as const,
+      },
+      pendingRuntimeRequest: {
+        id: RuntimeRequestId.make("approve"),
+        kind: "command" as const,
+        createdAt: v2Now,
+      },
+    };
+    const threads: ReadonlyArray<OrchestrationV2ThreadShell> = [meta, slice, broker];
+
+    expect([...pendingSubagentRequestsByThread(threads)]).toEqual([
+      [slice.id, "approval"],
+      [meta.id, "approval"],
+    ]);
+    expect([...pendingSubagentRequestsByThread(threads, { throughSupervisors: false })]).toEqual([
+      [slice.id, "approval"],
+    ]);
   });
 
   it("leaves switched-off environments out of navigation", () => {

@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
   useEffect,
+  useRef,
   useState,
   useSyncExternalStore,
   type CSSProperties,
@@ -38,6 +39,8 @@ import { SidebarBrandWidthProbe, SidebarChromeHeader } from "./sidebar/SidebarCh
 import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import { useProjects } from "../state/entities";
+import { useUiStateStore } from "../uiStateStore";
+import { showThreadInAgentTree } from "../state/agentTree";
 import {
   clampThreadSidebarWidth,
   resolveInitialThreadSidebarWidth,
@@ -253,6 +256,30 @@ function ProjectProjectionRetention() {
   return null;
 }
 
+// "Show agent tree" also comes from the command palette, which renders outside
+// the sidebar provider, so the reveal request opens the sidebar from in here.
+// A focused desktop preview forwards the shortcut as a menu action.
+function AgentTreeSidebarControl() {
+  const request = useUiStateStore((state) => state.agentTreeReveal?.request ?? null);
+  const { isMobile, setOpen, setOpenMobile } = useSidebar();
+  const legacySidebarEnabled = useLegacySidebarEnabled();
+  const routeThreadRef = useThreadRouteRef();
+  useEffect(() => {
+    if (legacySidebarEnabled) return;
+    return window.desktopBridge?.onMenuAction((action) => {
+      if (action === "sidebar.showAgentTree") showThreadInAgentTree(routeThreadRef);
+    });
+  }, [legacySidebarEnabled, routeThreadRef]);
+  const handledRequestRef = useRef(request);
+  useEffect(() => {
+    if (request === null || handledRequestRef.current === request) return;
+    handledRequestRef.current = request;
+    if (isMobile) setOpenMobile(true);
+    else void setOpen(true);
+  }, [isMobile, request, setOpen, setOpenMobile]);
+  return null;
+}
+
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const legacySidebarEnabled = useLegacySidebarEnabled();
@@ -356,6 +383,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         </Sidebar>
         {children}
         <SidebarControl />
+        <AgentTreeSidebarControl />
         <NavigationHistoryShortcuts />
         <MainAppLocationTracker />
       </SidebarProvider>

@@ -71,6 +71,8 @@ import {
   AlarmClockOffIcon,
   ArrowRightLeftIcon,
   CheckIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
   CircleAlertIcon,
   CircleCheckIcon,
   CircleDashedIcon,
@@ -79,6 +81,7 @@ import {
   FolderIcon,
   GitBranchIcon,
   ListFilterIcon,
+  ListTreeIcon,
   MessageCircleQuestionIcon,
   PinIcon,
   PinOffIcon,
@@ -136,6 +139,13 @@ import {
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 import { useUiStateStore } from "../uiStateStore";
+import { showThreadInAgentTree } from "../state/agentTree";
+import {
+  type AgentTree,
+  type AgentTreeRow,
+  deriveAgentTree,
+  flattenAgentTree,
+} from "@t3tools/client-runtime/state/thread-relationships";
 import {
   getThreadKeysToDeselectAfterDelete,
   useThreadSelectionStore,
@@ -190,7 +200,9 @@ import {
 import {
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
+  filterSidebarAgentTreeThreads,
   filterSidebarV2VisibleThreads,
+  liftSidebarAgentTree,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
   deleteSelectedThreadEntries,
@@ -388,6 +400,7 @@ interface SidebarThreadPartitionInput {
   readonly serverConfigs: ReadonlyMap<EnvironmentId, EnvironmentServerConfig>;
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly workingShelfEnabled: boolean;
+  readonly agentTreeEnabled: boolean;
   // Snooze wakes and the queued-turn grace depend on the clock, so the minute
   // tick and the precise snooze-wake tick are inputs: a new key repartitions.
   readonly clockKey: string;
@@ -431,6 +444,22 @@ function resolveDraggedOrders(input: {
   };
 }
 
+const NO_AGENT_TREE_EXPANDED_KEYS: Readonly<Record<string, true>> = Object.freeze({});
+/** Visual nesting stops here so deep trees keep room for their titles. */
+const AGENT_TREE_MAX_INDENT_DEPTH = 4;
+
+function agentTreeRootKey(
+  tree: Pick<AgentTree<EnvironmentThreadShell>, "parentKeyByKey">,
+  key: string,
+): string {
+  let root = key;
+  for (let parent = tree.parentKeyByKey.get(root); parent !== undefined;) {
+    root = parent;
+    parent = tree.parentKeyByKey.get(root);
+  }
+  return root;
+}
+
 function routeThreadOnly(
   threads: readonly EnvironmentThreadShell[],
   routeThreadKey: string | null,
@@ -455,6 +484,10 @@ function useSidebarThreads(input: {
     input;
   const threads = useThreadShells();
   const workingShelfEnabled = useClientSettings((s) => s.sidebarWorkingShelfEnabled);
+  const agentTreeEnabled = useUiStateStore((state) => state.sidebarAgentTreeEnabled);
+  const agentTreeExpandedKeys = useUiStateStore((state) =>
+    state.sidebarAgentTreeEnabled ? state.agentTreeExpandedKeys : NO_AGENT_TREE_EXPANDED_KEYS,
+  );
   const nowMinute = useNowMinute();
   // Snooze wake times are second-precise, so classifying with the quantized
   // minute would hold a woken thread on the shelf for up to a minute.
@@ -496,60 +529,145 @@ function useSidebarThreads(input: {
     serverConfigs,
     optimisticDrop,
     workingShelfEnabled,
+    agentTreeEnabled,
     clockKey: `${nowMinute}:${snoozeWakeTick}`,
   });
   const partitionNextWakeAt = partition.snoozedThreads[0]?.snoozedUntil ?? null;
   if (partitionNextWakeAt !== nextSnoozeWakeAt) setNextSnoozeWakeAt(partitionNextWakeAt);
 
-  const { pinnedThreads, activeThreads, workingThreads, snoozedThreads, settledThreads } =
-    partition;
+  // Each thread's own section, children included, so menus and sweeps read
+  // a nested row's real state.
+  const sectionByThreadKey = new Map<string, SidebarSection>();
+  for (const [list, section] of [
+    [partition.pinnedThreads, "pinned"],
+    [partition.activeThreads, "active"],
+    [partition.workingThreads, "working"],
+    [partition.snoozedThreads, "snoozed"],
+    [partition.settledThreads, "settled"],
+  ] as const) {
+    for (const thread of list) sectionByThreadKey.set(threadShellKey(thread), section);
+  }
+  // Sections list every visible thread in its own section; in tree mode only
+  // roots get a row there, and their descendants follow them.
+  const agentTree =
+    partition.agentTree === null
+      ? null
+      : liftSidebarAgentTree(partition.agentTree, (thread) =>
+          sectionByThreadKey.get(threadShellKey(thread)),
+        );
+  const rootsOf = (list: readonly EnvironmentThreadShell[]) =>
+    agentTree === null
+      ? list
+      : list.filter((thread) => !agentTree.parentKeyByKey.has(threadShellKey(thread)));
+  const pinnedThreads = rootsOf(partition.pinnedThreads);
+  const activeThreads = rootsOf(partition.activeThreads);
+  const workingThreads = rootsOf(partition.workingThreads);
+  const snoozedThreads = rootsOf(partition.snoozedThreads);
+  const settledThreads = rootsOf(partition.settledThreads);
+  const routeRowKey =
+    agentTree === null || routeThreadKey === null
+      ? routeThreadKey
+      : agentTreeRootKey(agentTree, routeThreadKey);
   const visibleSettledThreads = (() => {
     if (settledThreads.length <= settledVisibleCount) return settledThreads;
     const visible = settledThreads.slice(0, settledVisibleCount);
-    if (routeThreadKey !== null) {
+    if (routeRowKey !== null) {
       const routeThread = settledThreads
         .slice(settledVisibleCount)
-        .find((thread) => threadShellKey(thread) === routeThreadKey);
+        .find((thread) => threadShellKey(thread) === routeRowKey);
       if (routeThread !== undefined) visible.push(routeThread);
     }
     return visible;
   })();
   const renderedSettledThreads = settledShelfExpanded
     ? visibleSettledThreads
-    : routeThreadOnly(visibleSettledThreads, routeThreadKey);
+    : routeThreadOnly(visibleSettledThreads, routeRowKey);
   const visibleSnoozedThreads = snoozedShelfExpanded
     ? snoozedThreads
-    : routeThreadOnly(snoozedThreads, routeThreadKey);
+    : routeThreadOnly(snoozedThreads, routeRowKey);
   const visibleWorkingThreads = workingShelfExpanded
     ? workingThreads
-    : routeThreadOnly(workingThreads, routeThreadKey);
-  const orderedThreads = [
-    ...pinnedThreads,
-    ...activeThreads,
-    ...visibleWorkingThreads,
-    ...visibleSnoozedThreads,
-    ...renderedSettledThreads,
+    : routeThreadOnly(workingThreads, routeRowKey);
+  const renderedRootLists = [
+    pinnedThreads,
+    activeThreads,
+    visibleWorkingThreads,
+    visibleSnoozedThreads,
+    renderedSettledThreads,
   ];
-  const sectionByThreadKey = new Map<string, SidebarSection>();
-  for (const [list, section] of [
-    [pinnedThreads, "pinned"],
-    [activeThreads, "active"],
-    [workingThreads, "working"],
-    [snoozedThreads, "snoozed"],
-    [settledThreads, "settled"],
-  ] as const) {
-    for (const thread of list) sectionByThreadKey.set(threadShellKey(thread), section);
+  // Tree mode only: each rendered root's expanded descendants, and the
+  // disclosure state of every rendered row.
+  const agentTreeDescendantsByRootKey = new Map<string, EnvironmentThreadShell[]>();
+  const agentTreeRowByKey = new Map<string, AgentTreeRow<EnvironmentThreadShell>>();
+  if (agentTree !== null) {
+    const isExpanded = (key: string) => agentTreeExpandedKeys[key] === true;
+    for (const list of renderedRootLists) {
+      let descendants: EnvironmentThreadShell[] = [];
+      for (const row of flattenAgentTree(agentTree, list, isExpanded)) {
+        agentTreeRowByKey.set(row.key, row);
+        if (row.depth === 0) {
+          descendants = [];
+          agentTreeDescendantsByRootKey.set(row.key, descendants);
+        } else {
+          descendants.push(row.thread);
+        }
+      }
+    }
+  }
+  const orderedThreads = renderedRootLists.flatMap((list) =>
+    agentTree === null
+      ? list
+      : list.flatMap((thread) => [
+          thread,
+          ...(agentTreeDescendantsByRootKey.get(threadShellKey(thread)) ?? []),
+        ]),
+  );
+  // A nested row in its tree parent's project can skip the project cue. A
+  // supervised or delegated thread may live in another project, so it keeps it.
+  const agentTreeKeysInParentProject = new Set<string>();
+  if (agentTree !== null) {
+    for (const row of agentTreeRowByKey.values()) {
+      const parentKey = agentTree.parentKeyByKey.get(row.key);
+      const parent = parentKey === undefined ? undefined : agentTreeRowByKey.get(parentKey);
+      if (
+        parent !== undefined &&
+        parent.thread.environmentId === row.thread.environmentId &&
+        parent.thread.projectId === row.thread.projectId
+      ) {
+        agentTreeKeysInParentProject.add(row.key);
+      }
+    }
+  }
+  // The open thread can sit inside a collapsed parent; that row says so.
+  let agentTreeRouteHolderKey: string | null = null;
+  if (agentTree !== null && routeThreadKey !== null && !agentTreeRowByKey.has(routeThreadKey)) {
+    for (
+      let key = agentTree.parentKeyByKey.get(routeThreadKey);
+      key !== undefined && agentTreeRouteHolderKey === null;
+      key = agentTree.parentKeyByKey.get(key)
+    ) {
+      if (agentTreeRowByKey.has(key)) agentTreeRouteHolderKey = key;
+    }
   }
   return {
     ...partition,
+    pinnedThreads,
+    activeThreads,
+    workingThreads,
+    snoozedThreads,
+    settledThreads,
+    agentTreeDescendantsByRootKey,
+    agentTreeRowByKey,
+    agentTreeRouteHolderKey,
+    agentTreeKeysInParentProject,
     threads,
     workingShelfEnabled,
     searchableThreads: [
-      ...pinnedThreads,
-      ...activeThreads,
-      ...workingThreads,
-      ...snoozedThreads,
-      ...settledThreads,
+      ...partition.pinnedThreads,
+      ...partition.activeThreads,
+      ...partition.workingThreads,
+      ...partition.snoozedThreads,
+      ...partition.settledThreads,
     ],
     settledVisibleCount,
     hiddenSettledCount: settledThreads.length - visibleSettledThreads.length,
@@ -569,8 +687,8 @@ function useSidebarThreads(input: {
     visibleWorkingThreads,
     orderedThreadKeys: orderedThreads.map(threadShellKey),
     threadByKey: new Map(orderedThreads.map((thread) => [threadShellKey(thread), thread] as const)),
-    settledThreadKeys: new Set(settledThreads.map(threadShellKey)),
-    snoozedThreadKeys: new Set(snoozedThreads.map(threadShellKey)),
+    settledThreadKeys: new Set(partition.settledThreads.map(threadShellKey)),
+    snoozedThreadKeys: new Set(partition.snoozedThreads.map(threadShellKey)),
     sectionByThreadKey,
     pinnedKeys: pinnedThreads.map(threadShellKey),
     activeKeys: activeThreads.map(threadShellKey),
@@ -586,7 +704,11 @@ function useSidebarThreads(input: {
 function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const { threads, scopedProjectKeys, serverConfigs, optimisticDrop, workingShelfEnabled } = input;
   const preciseNow = new Date().toISOString();
-  const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys);
+  // Flat mode never builds the tree.
+  const visible = input.agentTreeEnabled
+    ? filterSidebarAgentTreeThreads(threads, scopedProjectKeys)
+    : filterSidebarV2VisibleThreads(threads, scopedProjectKeys);
+  const agentTree = input.agentTreeEnabled ? deriveAgentTree(visible) : null;
   inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];
   const active: EnvironmentThreadShell[] = [];
@@ -673,6 +795,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     ),
     settledThreads: sortSettledThreads(settled),
     snoozeNow: preciseNow,
+    agentTree,
   };
 }
 
@@ -1573,7 +1696,44 @@ type SidebarThreadRowProps = {
   onUnpin: (threadRef: ScopedThreadRef) => void;
   onAcknowledgeWoke: (threadRef: ScopedThreadRef, visitedAt: string) => void;
   onFileDropThreads?: ((threadRef: ScopedThreadRef, files: File[]) => void) | undefined;
+  /** Agent tree mode only; null in flat mode. */
+  treeDepth: number | null;
+  treeChildCount: number;
+  treeExpanded: boolean;
+  /** Collapsed, with the open thread somewhere below it. */
+  treeHoldsRoute: boolean;
+  /** Nested in a row of the same project, which already shows the project. */
+  treeInParentProject: boolean;
+  onToggleAgentTree: (threadKey: string, expanded: boolean) => void;
 };
+
+function AgentTreeDisclosure(props: {
+  readonly threadKey: string;
+  readonly childCount: number;
+  readonly expanded: boolean;
+  readonly showCount: boolean;
+  readonly onToggle: (threadKey: string, expanded: boolean) => void;
+}) {
+  const Icon = props.expanded ? ChevronDownIcon : ChevronRightIcon;
+  return (
+    <button
+      type="button"
+      aria-expanded={props.expanded}
+      aria-label={`${props.expanded ? "Hide" : "Show"} ${props.childCount} ${props.childCount === 1 ? "agent" : "agents"}`}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        props.onToggle(props.threadKey, !props.expanded);
+      }}
+      // Keeps a press on the toggle from starting a row drag or sweep.
+      onPointerDown={(event) => event.stopPropagation()}
+      className="inline-flex shrink-0 cursor-pointer items-center gap-0.5 rounded-sm text-xs text-muted-foreground tabular-nums outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+    >
+      <Icon aria-hidden className="size-3.5 shrink-0" />
+      {props.showCount ? props.childCount : null}
+    </button>
+  );
+}
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
   const {
@@ -1907,11 +2067,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       ? "bg-sidebar-row-active text-sidebar-foreground"
       : isSelected || props.sweepAction !== null
         ? "bg-sidebar-row-selected text-sidebar-foreground"
-        : hasUnsentDraft
-          ? cn(draftSurfaceClassName, "text-sidebar-foreground")
-          : shouldRecede
-            ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
-            : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
+        : props.treeHoldsRoute
+          ? "bg-sidebar-row-hover text-sidebar-foreground"
+          : hasUnsentDraft
+            ? cn(draftSurfaceClassName, "text-sidebar-foreground")
+            : shouldRecede
+              ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+              : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
     shouldRecede &&
       status === "working" &&
       "opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none",
@@ -1921,22 +2083,42 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       "bg-sidebar bg-linear-to-b from-sidebar-row-active to-sidebar-row-active text-sidebar-foreground opacity-100 shadow-lg",
   );
   const sortable = props.sortable;
-  const sortableRootProps = sortable
+  const sortableStyle = sortable
     ? {
-        ref: sortable.setNodeRef,
-        style: {
-          transform: CSS.Translate.toString(sortable.transform),
-          transition: sortable.transition,
-          // A zero-height boundary also makes dnd-kit scale the source to
-          // zero. Only projected peers use scaleY as a visibility sentinel.
-          visibility:
-            !sortable.isDragging && sortable.transform?.scaleY === 0
-              ? ("hidden" as const)
-              : undefined,
-        },
-        ...sortable.listeners,
+        transform: CSS.Translate.toString(sortable.transform),
+        transition: sortable.transition,
+        // A zero-height boundary also makes dnd-kit scale the source to
+        // zero. Only projected peers use scaleY as a visibility sentinel.
+        visibility:
+          !sortable.isDragging && sortable.transform?.scaleY === 0
+            ? ("hidden" as const)
+            : undefined,
       }
+    : undefined;
+  const sortableRootProps = sortable
+    ? { ref: sortable.setNodeRef, style: sortableStyle, ...sortable.listeners }
     : {};
+  // Nested rows give their width to the title: the root row carries recency,
+  // and the role badge gets a small cap.
+  const isNestedTreeRow = props.treeDepth !== null && props.treeDepth > 0;
+  const treeIndentStyle =
+    props.treeDepth !== null && props.treeDepth > 0
+      ? {
+          paddingInlineStart: `${Math.min(props.treeDepth, AGENT_TREE_MAX_INDENT_DEPTH) * 0.5}rem`,
+        }
+      : undefined;
+  const rootStyle =
+    treeIndentStyle === undefined ? sortableStyle : { ...sortableStyle, ...treeIndentStyle };
+  const treeDisclosure =
+    props.treeDepth !== null && props.treeChildCount > 0 ? (
+      <AgentTreeDisclosure
+        threadKey={threadKey}
+        childCount={props.treeChildCount}
+        expanded={props.treeExpanded}
+        showCount={variant === "card"}
+        onToggle={props.onToggleAgentTree}
+      />
+    ) : null;
   const destinationVerb = sortable?.isDragging
     ? props.dropVerb
     : props.sweepAction === "unsnooze"
@@ -1957,6 +2139,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     statusLabel: topStatus?.label ?? null,
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
+    holdsActive: props.treeHoldsRoute,
   });
 
   const title =
@@ -1978,6 +2161,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         aria-hidden
         className={cn(
           "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
+          // Tree rows are indented and carry a role badge; the title keeps room first.
+          props.treeDepth !== null && "min-w-16",
           shouldRecede ? "font-normal" : "font-medium",
           variant === "card"
             ? cn(
@@ -2092,6 +2277,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       <li
         data-thread-item={threadKey}
         {...sortableRootProps}
+        style={rootStyle}
         {...(fileDropHandlers ?? {})}
         className={cn(
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
@@ -2118,18 +2304,34 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             }
           >
             {accessibleTitle}
-            <span
-              className={cn(
-                "flex shrink-0 items-center transition-opacity",
-                (!props.isActive || variantAction === "unsettle") &&
-                  "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
-              )}
-            >
-              {props.project ? <ProjectFavicon project={props.project} className="size-4" /> : null}
-            </span>
+            {props.treeDepth === null ? null : (
+              <span className="flex size-3.5 shrink-0 items-center justify-center">
+                {treeDisclosure}
+              </span>
+            )}
+            {props.treeInParentProject ? null : (
+              <span
+                className={cn(
+                  "flex shrink-0 items-center transition-opacity",
+                  (!props.isActive || variantAction === "unsettle") &&
+                    "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
+                )}
+              >
+                {props.project ? (
+                  <ProjectFavicon project={props.project} className="size-4" />
+                ) : null}
+              </span>
+            )}
             {draftIndicator}
             {title}
-            <ThreadRoleBadge thread={thread} />
+            {props.treeDepth === null ? (
+              <ThreadRoleBadge thread={thread} />
+            ) : (
+              <span className={cn("flex min-w-0", isNestedTreeRow ? "max-w-[30%]" : "max-w-[45%]")}>
+                <ThreadRoleBadge thread={thread} shrink />
+              </span>
+            )}
+            {/* M8's pod chip for broker rows goes here; brokers are subagents, so always slim. */}
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -2144,6 +2346,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               <span
                 className={cn(
                   "relative ml-auto flex h-6 min-w-8 shrink-0 items-center justify-end",
+                  isNestedTreeRow && "min-w-0",
                   props.sweepAction !== null && "hidden",
                 )}
               >
@@ -2174,7 +2377,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       />
                       <TooltipPopup side="top">Dismiss Woke notification</TooltipPopup>
                     </Tooltip>
-                  ) : (
+                  ) : isNestedTreeRow ? null : (
                     <span className="text-xs">
                       <RelativeTimeLabel
                         timestamp={
@@ -2252,6 +2455,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     <li
       data-thread-item={threadKey}
       {...sortableRootProps}
+      style={rootStyle}
       {...(fileDropHandlers ?? {})}
       className={cn(
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
@@ -2467,6 +2671,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ) : (
                 <span className="flex-1" />
               )}
+              {treeDisclosure}
               <ThreadRoleBadge thread={thread} />
               {terminalStatusIcon}
               {prBadge}
@@ -2826,6 +3031,10 @@ export default function Sidebar() {
   const clearPendingFileDrop = useSidebarPendingFileDropStore((s) => s.clearPendingFileDrop);
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
+  const agentTreeEnabled = useUiStateStore((state) => state.sidebarAgentTreeEnabled);
+  const setAgentTreeEnabled = useUiStateStore((state) => state.setSidebarAgentTreeEnabled);
+  const setAgentTreeExpanded = useUiStateStore((state) => state.setAgentTreeExpanded);
+  const agentTreeReveal = useUiStateStore((state) => state.agentTreeReveal);
   const settlingThreadKeysRef = useRef(new Set<string>());
   const threadListRef = useRef<HTMLUListElement | null>(null);
   const dragLabelOffsetRef = useRef(0);
@@ -3003,6 +3212,10 @@ export default function Sidebar() {
     activeKeys,
     pinnedKeysById,
     activeKeysById,
+    agentTreeDescendantsByRootKey,
+    agentTreeRowByKey,
+    agentTreeRouteHolderKey,
+    agentTreeKeysInParentProject,
   } = useSidebarThreads({
     projectScopeKey,
     scopedProjectKeys,
@@ -3048,6 +3261,15 @@ export default function Sidebar() {
       .querySelector(`[data-search-result-key="${globalThis.CSS.escape(activeSearchResultKey)}"]`)
       ?.scrollIntoView({ block: "nearest" });
   }, [activeSearchResultKey]);
+  // The reveal lands in the same store update that expands the ancestors, so
+  // the row is already rendered when this runs, even in a sheet that just opened.
+  useEffect(() => {
+    if (agentTreeReveal === null || agentTreeReveal.scrolled) return;
+    document
+      .querySelector(`li[data-thread-item="${globalThis.CSS.escape(agentTreeReveal.threadKey)}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+    useUiStateStore.getState().markAgentTreeRevealScrolled();
+  }, [agentTreeReveal]);
 
   const orderedThreadKeysRef = useRef(orderedThreadKeys);
   // Handlers read these through refs: depending on per-update Map/Set
@@ -3535,9 +3757,17 @@ export default function Sidebar() {
       list: readonly EnvironmentThreadShell[],
       section: SidebarSection,
     ): SidebarListItem[] =>
-      list.map((thread) => {
+      list.flatMap((thread): SidebarListItem[] => {
         const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-        return { kind: "thread", key, section };
+        const descendants = agentTreeDescendantsByRootKey.get(key) ?? [];
+        return [
+          { kind: "thread", key, section },
+          ...descendants.map((child) => ({
+            kind: "child" as const,
+            key: scopedThreadKey(scopeThreadRef(child.environmentId, child.id)),
+            section,
+          })),
+        ];
       });
     if (
       pinnedThreads.length +
@@ -3574,7 +3804,9 @@ export default function Sidebar() {
   // list's identity until its order changes, so the sorting strategy, the
   // sortable context and every sortable row stay memoized meanwhile.
   const sidebarListItemsKey = sidebarListItemsFresh
-    .map((item) => (item.kind === "thread" ? item.section + ":" + item.key : item.marker))
+    .map((item) =>
+      item.kind === "marker" ? item.marker : item.kind + ":" + item.section + ":" + item.key,
+    )
     .join("\n");
   const [sidebarListItemsState, setSidebarListItems] = useState(sidebarListItemsFresh);
   const [sidebarListItemsKeyState, setSidebarListItemsKeyState] = useState(sidebarListItemsKey);
@@ -3590,7 +3822,7 @@ export default function Sidebar() {
   useEffect(() => {
     if (
       dragState !== null &&
-      !sidebarListItems.some((item) => item.kind === "thread" && item.key === dragState.activeKey)
+      !sidebarListItems.some((item) => item.kind !== "marker" && item.key === dragState.activeKey)
     ) {
       cancelThreadDrag();
     }
@@ -4544,6 +4776,7 @@ export default function Sidebar() {
     shortcutLabelForCommand(keybindings, "chat.new") ??
     (projectGroups.length <= 1 ? shortcutLabelForCommand(keybindings, "chat.newLocal") : undefined);
   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
+  const agentTreeShortcutLabel = shortcutLabelForCommand(keybindings, "sidebar.showAgentTree");
   return (
     <>
       <ThreadContextDragGhost />
@@ -4555,6 +4788,24 @@ export default function Sidebar() {
             <SidebarThreadHeader
               searchFieldRef={headerSearchRef}
               hasProjects={projectGroups.length > 0}
+              agentTreeToggle={
+                <SidebarHeaderIconButton
+                  label="Agent tree"
+                  tooltip={
+                    agentTreeShortcutLabel
+                      ? `${agentTreeEnabled ? "Hide" : "Show"} agent tree (${agentTreeShortcutLabel})`
+                      : `${agentTreeEnabled ? "Hide" : "Show"} agent tree`
+                  }
+                  pressed={agentTreeEnabled}
+                  onClick={() =>
+                    agentTreeEnabled
+                      ? setAgentTreeEnabled(false)
+                      : showThreadInAgentTree(routeThreadRef)
+                  }
+                >
+                  <ListTreeIcon className="size-4" />
+                </SidebarHeaderIconButton>
+              }
               projectScope={
                 <Combobox
                   items={projectScopeItems}
@@ -4804,12 +5055,19 @@ export default function Sidebar() {
                       const renderThreadRow = (
                         thread: EnvironmentThreadShell,
                         section: SidebarSection,
+                        nested = false,
                       ) => {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
                         );
+                        const treeRow = agentTreeRowByKey.get(threadKey);
+                        // A nested row sits in its root's section but acts on its own.
+                        const ownSection = nested
+                          ? (sectionByThreadKey.get(threadKey) ?? section)
+                          : section;
                         const isCard =
-                          section === "active" || section === "pinned" || section === "working";
+                          !nested &&
+                          (section === "active" || section === "pinned" || section === "working");
                         const rowVariant = isCard ? "card" : "slim";
                         return (
                           <SortableThreadRow
@@ -4817,16 +5075,23 @@ export default function Sidebar() {
                             sortableId={threadKey}
                             contextDrag={isContextDrag}
                             sortableDisabled={
+                              nested ||
                               renamingThreadKey === threadKey ||
                               !draggableThreadKeys.has(threadKey) ||
                               optimisticDrop !== null
                             }
+                            treeDepth={treeRow?.depth ?? null}
+                            treeChildCount={treeRow?.childCount ?? 0}
+                            treeExpanded={treeRow?.expanded ?? false}
+                            treeHoldsRoute={agentTreeRouteHolderKey === threadKey}
+                            treeInParentProject={agentTreeKeysInParentProject.has(threadKey)}
+                            onToggleAgentTree={setAgentTreeExpanded}
                             thread={thread}
                             variant={rowVariant}
                             variantAction={
-                              section === "snoozed"
+                              ownSection === "snoozed"
                                 ? "unsnooze"
-                                : section === "settled"
+                                : ownSection === "settled"
                                   ? "unsettle"
                                   : "settle"
                             }
@@ -4855,7 +5120,7 @@ export default function Sidebar() {
                               actionSweep?.keys.has(threadKey) ? actionSweep.action : null
                             }
                             snoozeWakeLabelText={
-                              section === "snoozed" && thread.snoozedUntil != null
+                              ownSection === "snoozed" && thread.snoozedUntil != null
                                 ? snoozeWakeLabel(thread.snoozedUntil, {
                                     now: new Date().toISOString(),
                                   })
@@ -4922,8 +5187,14 @@ export default function Sidebar() {
                         />,
                       ];
                       for (const item of sidebarListItems) {
-                        if (item.kind === "thread") {
-                          items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                        if (item.kind !== "marker") {
+                          items.push(
+                            renderThreadRow(
+                              threadByKey.get(item.key)!,
+                              item.section,
+                              item.kind === "child",
+                            ),
+                          );
                           continue;
                         }
                         switch (item.marker) {

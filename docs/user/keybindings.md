@@ -156,6 +156,11 @@ terminals so native undo keeps working there.
 `navigation.back` (`mod+[` by default) and `navigation.forward` (`mod+]`) move
 through the pages you have visited, like a browser's back and forward buttons.
 
+`sidebar.showAgentTree` (`mod+alt+shift+b`) turns on the sidebar's
+[agent tree](./thread-sidebar.md#show-the-agent-tree) and reveals the current
+thread in it. `thread.goToParent` (`mod+alt+arrowup`) opens the thread the
+current one was delegated or forked from, or the thread supervising it.
+
 `chat.new` may ask you to choose a project when there is more than one.
 `chat.newLocal` skips that chooser. Both use your
 [new-thread defaults](./thread-sidebar.md#start-a-thread). `chat.newWithoutProject`
