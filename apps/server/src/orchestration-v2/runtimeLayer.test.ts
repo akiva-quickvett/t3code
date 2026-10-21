@@ -129,7 +129,9 @@ const providerInstance = {
   },
   displayName: "Codex test",
   enabled: true,
-  snapshot: { getSnapshot: Effect.succeed({}) } as unknown as ProviderInstance["snapshot"],
+  snapshot: {
+    getSnapshot: Effect.succeed({ auth: { status: "unknown" } }),
+  } as unknown as ProviderInstance["snapshot"],
   orchestrationAdapter,
   textGeneration: {} as ProviderInstance["textGeneration"],
 } satisfies ProviderInstance;

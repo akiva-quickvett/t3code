@@ -14,10 +14,12 @@ import {
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ServerProvider,
   UsageDay,
   type UsageSource,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -40,6 +42,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as ProviderHostLive from "../provider/ProviderHostLive.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { totalTokens, type UsageRecord } from "@t3tools/provider-core/server/usage";
 import * as UsageService from "./UsageService.ts";
 
@@ -123,10 +126,15 @@ const layerService = (input: {
   ) => Effect.Effect<Response, HttpClientError.HttpClientError>;
   readonly environment?: NodeJS.ProcessEnv;
   readonly platform?: NodeJS.Platform;
+  readonly providerRegistry?: Layer.Layer<ProviderRegistry.ProviderRegistry>;
 }) =>
   layerCursorUsageAccounts(
     CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer)),
   ).pipe(
+    Layer.provideMerge(
+      input.providerRegistry ??
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+    ),
     Layer.provideMerge(AntigravityUsage.layer),
     Layer.provideMerge(ProviderHostLive.layer),
     Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
@@ -2262,4 +2270,206 @@ describe("UsageService", () => {
       );
     }).pipe(Effect.scoped),
   );
+});
+
+describe("UsageService.readLimitsForAgent", () => {
+  const MINUTE_MS = 60_000;
+  const NOW = Date.parse("2026-09-05T12:00:00.000Z");
+  const isoAt = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+  const minutesAgo = (minutes: number) => isoAt(NOW - minutes * MINUTE_MS);
+
+  const limitedProvider = (input: {
+    readonly id: string;
+    readonly driver?: string;
+    readonly checkedMinutesAgo: number;
+    readonly sessionPercent?: number;
+    readonly enabled?: boolean;
+    readonly unsupported?: boolean;
+  }): ServerProvider => ({
+    instanceId: ProviderInstanceId.make(input.id),
+    driver: ProviderDriverKind.make(input.driver ?? "claudeAgent"),
+    enabled: input.enabled ?? true,
+    installed: true,
+    version: null,
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: minutesAgo(input.checkedMinutesAgo),
+    models: [],
+    slashCommands: [],
+    skills: [],
+    usageLimits: input.unsupported
+      ? {
+          checkedAt: minutesAgo(input.checkedMinutesAgo),
+          windows: [],
+          unavailable: { reason: "unsupported" },
+        }
+      : {
+          checkedAt: minutesAgo(input.checkedMinutesAgo),
+          windows: [
+            {
+              id: "five_hour",
+              kind: "session",
+              label: "Session",
+              usedPercent: input.sessionPercent ?? 20,
+              resetsAt: isoAt(NOW + 120 * MINUTE_MS),
+            },
+          ],
+        },
+  });
+
+  /**
+   * `probe` stands in for the instance's limits probe; returning the provider
+   * unchanged is what a failed probe publishes (the last good snapshot stays).
+   */
+  const fakeRegistry = (
+    initial: readonly ServerProvider[],
+    probe: (provider: ServerProvider) => ServerProvider = (provider) => ({
+      ...provider,
+      usageLimits: provider.usageLimits && {
+        ...provider.usageLimits,
+        checkedAt: isoAt(NOW),
+      },
+    }),
+  ) => {
+    let providers = initial;
+    const probes: string[] = [];
+    const layer = Layer.mock(ProviderRegistry.ProviderRegistry)({
+      getProviders: Effect.sync(() => providers),
+      refreshInstance: (instanceId) =>
+        Effect.sync(() => {
+          probes.push(instanceId);
+          providers = providers.map((provider) =>
+            provider.instanceId === instanceId ? probe(provider) : provider,
+          );
+          return providers;
+        }),
+    });
+    return { layer, probes };
+  };
+
+  const withService = <A, E>(
+    prefix: string,
+    registry: Layer.Layer<ProviderRegistry.ProviderRegistry>,
+    use: (service: Effect.Success<typeof UsageService.make>) => Effect.Effect<A, E>,
+    settings: Parameters<typeof ServerSettings.layerTest>[0] = {},
+  ) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const { home } = yield* setup;
+      return yield* Effect.flatMap(UsageService.make, use).pipe(
+        Effect.provide(layerService({ prefix, home, settings, providerRegistry: registry })),
+      );
+    }).pipe(Effect.scoped);
+
+  it.effect("answers from the snapshots without probing, filtered by driver and instance", () => {
+    const registry = fakeRegistry([
+      limitedProvider({ id: "claude_a", checkedMinutesAgo: 30 }),
+      limitedProvider({ id: "claude_b", checkedMinutesAgo: 1, sessionPercent: 90 }),
+      limitedProvider({ id: "codex", driver: "codex", checkedMinutesAgo: 1 }),
+      limitedProvider({ id: "claude_off", checkedMinutesAgo: 1, enabled: false }),
+    ]);
+    return withService("usage-agent-limits-read", registry.layer, (service) =>
+      Effect.gen(function* () {
+        const all = yield* service.readLimitsForAgent({});
+        assert.deepStrictEqual(
+          all.instances.map(({ instanceId, status, headroom }) => [
+            String(instanceId),
+            status,
+            headroom,
+          ]),
+          [
+            ["claude_a", "stale", "ok"],
+            ["claude_b", "ok", "low"],
+            ["codex", "ok", "ok"],
+          ],
+        );
+        const claude = yield* service.readLimitsForAgent({
+          driver: ProviderDriverKind.make("claudeAgent"),
+        });
+        assert.deepStrictEqual(
+          claude.instances.map(({ instanceId }) => instanceId),
+          ["claude_a", "claude_b"],
+        );
+        const one = yield* service.readLimitsForAgent({
+          instanceId: ProviderInstanceId.make("claude_b"),
+        });
+        assert.deepStrictEqual(
+          one.instances.map(({ instanceId }) => instanceId),
+          ["claude_b"],
+        );
+        assert.deepStrictEqual(registry.probes, []);
+      }),
+    );
+  });
+
+  it.effect("refresh probes only instances last checked five or more minutes ago", () => {
+    const registry = fakeRegistry([
+      limitedProvider({ id: "recent", checkedMinutesAgo: 4 }),
+      limitedProvider({ id: "old", checkedMinutesAgo: 6 }),
+      limitedProvider({ id: "api_key", checkedMinutesAgo: 60, unsupported: true }),
+    ]);
+    return withService("usage-agent-limits-refresh", registry.layer, (service) =>
+      Effect.gen(function* () {
+        const result = yield* service.readLimitsForAgent({ refresh: true });
+        assert.deepStrictEqual(registry.probes, ["old"]);
+        const old = result.instances.find(({ instanceId }) => instanceId === "old");
+        assert.strictEqual(old?.status, "ok");
+        assert.strictEqual(old?.checkedAt, isoAt(NOW));
+
+        yield* service.readLimitsForAgent({ refresh: true });
+        assert.deepStrictEqual(registry.probes, ["old"]);
+      }),
+    );
+  });
+
+  it.effect("a failed probe does not let refresh probe again inside five minutes", () => {
+    const registry = fakeRegistry(
+      [limitedProvider({ id: "flaky", checkedMinutesAgo: 20 })],
+      (provider) => provider,
+    );
+    return withService("usage-agent-limits-failed-probe", registry.layer, (service) =>
+      Effect.gen(function* () {
+        yield* service.readLimitsForAgent({ refresh: true });
+        yield* service.readLimitsForAgent({ refresh: true });
+        yield* service.readLimitsForAgent({ refresh: true });
+        assert.deepStrictEqual(registry.probes, ["flaky"]);
+      }),
+    );
+  });
+
+  it.effect("refresh probes an instance with no snapshot yet once per five minutes", () => {
+    const { usageLimits: _none, ...unprobed } = limitedProvider({
+      id: "unprobed",
+      checkedMinutesAgo: 1,
+    });
+    const registry = fakeRegistry([unprobed]);
+    return withService("usage-agent-limits-unprobed", registry.layer, (service) =>
+      Effect.gen(function* () {
+        yield* service.readLimitsForAgent({});
+        assert.deepStrictEqual(registry.probes, []);
+        yield* service.readLimitsForAgent({ refresh: true });
+        yield* service.readLimitsForAgent({ refresh: true });
+        assert.deepStrictEqual(registry.probes, ["unprobed"]);
+        yield* TestClock.adjust(Duration.minutes(5));
+        yield* service.readLimitsForAgent({ refresh: true });
+        assert.deepStrictEqual(registry.probes, ["unprobed", "unprobed"]);
+      }),
+    );
+  });
+
+  it.effect("rates headroom with the thresholds in server settings", () => {
+    const registry = fakeRegistry([
+      limitedProvider({ id: "half", checkedMinutesAgo: 1, sessionPercent: 60 }),
+    ]);
+    return withService(
+      "usage-agent-limits-thresholds",
+      registry.layer,
+      (service) =>
+        Effect.gen(function* () {
+          const result = yield* service.readLimitsForAgent({});
+          assert.strictEqual(result.instances[0]?.headroom, "low");
+        }),
+      { usageHeadroom: { sessionLowPercent: 50, weeklyLowPercent: 95 } },
+    );
+  });
 });

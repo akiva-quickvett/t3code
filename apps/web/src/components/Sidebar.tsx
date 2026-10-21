@@ -281,6 +281,8 @@ import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrom
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+import { ThreadRoleBadge } from "./roles/RoleBadge";
+import { useStartTicketThread } from "../hooks/useStartTicketThread";
 import { MiddleTruncate } from "./ui/middle-truncate";
 import {
   composerDraftHasUserContent,
@@ -2127,6 +2129,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </span>
             {draftIndicator}
             {title}
+            <ThreadRoleBadge thread={thread} />
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -2464,6 +2467,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ) : (
                 <span className="flex-1" />
               )}
+              <ThreadRoleBadge thread={thread} />
               {terminalStatusIcon}
               {prBadge}
               {diff ? (
@@ -2816,6 +2820,8 @@ export default function Sidebar() {
   const searchEnvironmentIds = useConnectedEnvironmentIds();
   const threadSearch = useThreadSearch(searchEnvironmentIds, threadSearchQuery);
   const handleNewThreadRef = useRef(newThreadContext.handleNewThread);
+  const startTicketThread = useStartTicketThread();
+  const startTicketThreadRef = useRef(startTicketThread);
   const queuePendingFileDrop = useSidebarPendingFileDropStore((s) => s.queuePendingFileDrop);
   const clearPendingFileDrop = useSidebarPendingFileDropStore((s) => s.clearPendingFileDrop);
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
@@ -3387,6 +3393,7 @@ export default function Sidebar() {
     orderedThreadKeysRef.current = orderedThreadKeys;
     threadByKeyRef.current = threadByKey;
     handleNewThreadRef.current = newThreadContext.handleNewThread;
+    startTicketThreadRef.current = startTicketThread;
     settledThreadKeysRef.current = settledThreadKeys;
     snoozedThreadKeysRef.current = snoozedThreadKeys;
     sectionByThreadKeyRef.current = sectionByThreadKey;
@@ -4202,6 +4209,9 @@ export default function Sidebar() {
         const supportsTitleRegeneration =
           serverConfigs.get(thread.environmentId)?.environment.capabilities
             .threadTitleRegeneration === true;
+        const supportsRolePresets =
+          serverConfigs.get(thread.environmentId)?.environment.capabilities.agentRolePresets ===
+          true;
         const isRegeneratingTitle = thread.titleRegeneration != null;
         const isSettled = settledThreadKeysRef.current.has(threadKey);
         const isSnoozed = snoozedThreadKeysRef.current.has(threadKey);
@@ -4242,6 +4252,7 @@ export default function Sidebar() {
                 snooze: supportsSnooze,
                 pinning: supportsPinning,
                 titleRegeneration: supportsTitleRegeneration,
+                rolePresets: supportsRolePresets,
               },
               snoozePresets,
             }),
@@ -4296,6 +4307,11 @@ export default function Sidebar() {
             }
             return;
           }
+          case "new-ticket":
+            await startTicketThreadRef.current(
+              scopeProjectRef(thread.environmentId, thread.projectId),
+            );
+            return;
           case "settle":
             attemptSettle(threadRef);
             return;

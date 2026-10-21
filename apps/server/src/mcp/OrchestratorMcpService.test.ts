@@ -15,10 +15,12 @@ import {
   type OrchestrationV2ThreadProjection,
   type ServerProvider,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import { projectAgentUsageLimits } from "@t3tools/shared/usageLimits";
 
 import {
   DispatchModeLimit,
@@ -1122,6 +1124,93 @@ describe("OrchestratorMcpService provider resolution", () => {
           ]);
         }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
       }),
+  );
+
+  it.effect("reports the same headroom as t3_usage_limits and no account emails", () =>
+    Effect.gen(function* () {
+      const thresholds = { sessionLowPercent: 70, weeklyLowPercent: 95 };
+      const sessionAt = (usedPercent: number) => ({
+        checkedAt: "2026-09-13T00:00:00.000Z",
+        windows: [
+          {
+            id: "five_hour",
+            kind: "session" as const,
+            label: "Session",
+            usedPercent,
+            resetsAt: "2026-09-14T00:00:00.000Z",
+          },
+        ],
+      });
+      const unavailable = (reason: "unsupported" | "probeFailed") => ({
+        checkedAt: "2026-09-13T00:00:00.000Z",
+        windows: [],
+        unavailable: { reason },
+      });
+      const instance = (
+        id: string,
+        usageLimits?: ServerProvider["usageLimits"],
+        displayName?: string,
+      ): ServerProvider => ({
+        ...providerSnapshot({
+          instanceId: ProviderInstanceId.make(id),
+          driver: ProviderDriverKind.make("codex"),
+          model: "gpt-5.4",
+        }),
+        ...(usageLimits === undefined ? {} : { usageLimits }),
+        ...(displayName === undefined ? {} : { displayName }),
+      });
+      const providers = [
+        instance("codex", sessionAt(10), "Codex work"),
+        instance("codex_low", sessionAt(70), "me@example.com"),
+        instance("codex_full", sessionAt(100)),
+        instance("codex_api_key", unavailable("unsupported")),
+        instance("codex_flaky", unavailable("probeFailed")),
+        instance("codex_unprobed"),
+      ];
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(parentProjection([])),
+        }),
+        ServerSettings.layerTest({ usageHeadroom: thresholds }),
+        providerRegistryLayer(providers),
+        adapterRegistryLayer(providers.map((provider) => provider.instanceId)),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const capabilities = yield* service.capabilities(scope);
+        const now = yield* Clock.currentTimeMillis;
+        const toolHeadroom = providers.map((provider) => [
+          String(provider.instanceId),
+          projectAgentUsageLimits(provider, thresholds, now).headroom,
+        ]);
+        assert.deepEqual(toolHeadroom, [
+          ["codex", "ok"],
+          ["codex_low", "low"],
+          ["codex_full", "exhausted"],
+          ["codex_api_key", "ok"],
+          ["codex_flaky", "unknown"],
+          ["codex_unprobed", "ok"],
+        ]);
+        assert.deepEqual(
+          capabilities.providers.map((provider) => [
+            String(provider.providerInstanceId),
+            provider.headroom,
+          ]),
+          toolHeadroom,
+        );
+        assert.deepEqual(
+          capabilities.providers.slice(0, 2).map((provider) => provider.displayName),
+          ["Codex work", null],
+        );
+        assert.notInclude(JSON.stringify(capabilities), "example.com");
+        assert.isTrue(capabilities.features.usageLimits);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
   );
 
   it.effect("leaves models the user hid out of the capability catalog", () =>
@@ -2397,6 +2486,252 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(
           yield* OrchestratorMcpService.resolveRuntimeMode("auto", undefined, muse),
           "approval-required",
+        );
+      }),
+    );
+  });
+
+  describe("role presets", () => {
+    const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
+    const claude: ServerProvider = {
+      ...providerSnapshot({
+        instanceId: claudeInstanceId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+      }),
+      models: ["claude-sonnet-5-5", "claude-opus-5-5"].map((slug) => ({
+        slug,
+        name: slug,
+        isCustom: false,
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "effort",
+              label: "Reasoning",
+              type: "select" as const,
+              options: [
+                { id: "high", label: "High" },
+                { id: "xhigh", label: "Extra High" },
+              ],
+            },
+          ],
+        },
+      })),
+    };
+    const codex = providerSnapshot({
+      instanceId: codexInstanceId,
+      driver: ProviderDriverKind.make("codex"),
+      model: "gpt-5.4",
+    });
+    const presetTask = {
+      id: taskId,
+      threadId: parentThreadId,
+      runId: parentRunId,
+      parentNodeId,
+      origin: "app_owned",
+      createdBy: "agent",
+      driver: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: claudeInstanceId,
+      providerThreadId: null,
+      childThreadId,
+      nativeTaskRef: null,
+      prompt: "Review the diff.",
+      title: null,
+      model: "claude-sonnet-5-5",
+      status: "running",
+      result: null,
+      startedAt: null,
+      completedAt: null,
+    };
+
+    const presetHarness = (input: {
+      readonly providers: ReadonlyArray<ServerProvider>;
+      readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+      readonly parent?: OrchestrationV2ThreadProjection;
+    }) =>
+      Effect.gen(function* () {
+        const dispatched = yield* Ref.make<ReadonlyArray<Record<string, unknown>>>([]);
+        let delegated = false;
+        const parent = () => input.parent ?? parentProjection(delegated ? [presetTask] : []);
+        const layerDependencies = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasReceipt: () => Effect.succeed(false),
+            assertProviderInstanceEnabled: () => Effect.void,
+            isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+            getThreadRecords: (threadId) =>
+              Effect.succeed(
+                threadId === parentThreadId
+                  ? parent()
+                  : threadId === childThreadId
+                    ? childProjection
+                    : ({
+                        thread: {
+                          id: threadId,
+                          title: "Created",
+                          createdBy: "agent",
+                          creationSource: "mcp",
+                        },
+                        runs: [],
+                      } as unknown as OrchestrationV2ThreadProjection),
+              ),
+            dispatch: (command) =>
+              Ref.update(dispatched, (commands) => [
+                ...commands,
+                command as unknown as Record<string, unknown>,
+              ]).pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    if (command.type === "delegated_task.request") delegated = true;
+                  }),
+                ),
+                Effect.as({
+                  sequence: 1,
+                  storedEvents:
+                    command.type === "delegated_task.request"
+                      ? [
+                          {
+                            sequence: 1,
+                            commandId: null,
+                            event: { type: "subagent.updated", payload: presetTask },
+                          },
+                        ]
+                      : [],
+                } as never),
+              ),
+          }),
+          ServerSettings.layerTest(input.settings),
+          providerRegistryLayer(input.providers),
+          adapterRegistryLayer(input.providers.map((provider) => provider.instanceId)),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        );
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))),
+        );
+        return { service, dispatched };
+      });
+
+    it.effect("delegates with a preset's model and role, keeping its text out of the task", () =>
+      Effect.gen(function* () {
+        const { service, dispatched } = yield* presetHarness({ providers: [codex, claude] });
+        yield* service.delegateTask(scope, {
+          task: "Review the diff.",
+          preset: " Review-T1 ",
+          mode: "async",
+          clientRequestId: "preset-review",
+        });
+        const [request] = yield* Ref.get(dispatched);
+        assert.deepEqual(request?.modelSelection, {
+          instanceId: claudeInstanceId,
+          model: "claude-sonnet-5-5",
+          options: [{ id: "effort", value: "high" }],
+        });
+        assert.deepEqual(request?.rolePreset, { id: "review-t1", label: "Reviewer (tier 1)" });
+        assert.equal(request?.task, "Review the diff.");
+        assert.isUndefined(request?.workspaceStrategy);
+      }),
+    );
+
+    it.effect("lets a request's own model win and drops the preset's options with it", () =>
+      Effect.gen(function* () {
+        const { service, dispatched } = yield* presetHarness({ providers: [codex, claude] });
+        yield* service.delegateTask(scope, {
+          task: "Review the diff.",
+          preset: "review-t1",
+          target: { model: "claude-opus-5-5" },
+          mode: "async",
+          clientRequestId: "preset-review-opus",
+        });
+        const [request] = yield* Ref.get(dispatched);
+        assert.deepEqual(request?.modelSelection, {
+          instanceId: claudeInstanceId,
+          model: "claude-opus-5-5",
+        });
+      }),
+    );
+
+    it.effect("keeps a preset's broader modes under the caller's and refuses explicit ones", () =>
+      Effect.gen(function* () {
+        const base = parentProjection([]);
+        const narrowParent = {
+          ...base,
+          thread: { ...base.thread, runtimeMode: "approval-required", interactionMode: "plan" },
+        } as OrchestrationV2ThreadProjection;
+        const { service, dispatched } = yield* presetHarness({
+          providers: [codex],
+          parent: narrowParent,
+          settings: {
+            agentRolePresets: {
+              environment: {
+                overrides: {
+                  wide: {
+                    id: "wide",
+                    label: "Wide",
+                    target: { driverKind: ProviderDriverKind.make("codex"), model: "gpt-5.4" },
+                    runtimeMode: "full-access",
+                    interactionMode: "default",
+                    instructions: "",
+                  },
+                },
+              },
+            },
+          },
+        });
+        yield* service.createThreads(scope, {
+          threads: [{ preset: "wide" }],
+          clientRequestId: "preset-wide",
+        });
+        const [created] = yield* Ref.get(dispatched);
+        assert.equal(created?.runtimeMode, "approval-required");
+        assert.equal(created?.interactionMode, "plan");
+        assert.deepEqual(created?.rolePreset, { id: "wide", label: "Wide" });
+        const escalation = yield* service
+          .createThreads(scope, {
+            threads: [{ preset: "wide", runtimeMode: "full-access" }],
+            clientRequestId: "preset-wide-explicit",
+          })
+          .pipe(Effect.flip);
+        assert.equal(escalation.code, "runtime_mode_escalation_denied");
+      }),
+    );
+
+    it.effect("refuses an unknown preset by naming the known ones", () =>
+      Effect.gen(function* () {
+        const { service, dispatched } = yield* presetHarness({ providers: [codex, claude] });
+        const error = yield* service
+          .delegateTask(scope, { task: "Review.", preset: "reviewr", mode: "async" })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.include(error.message, "review-t1");
+        assert.deepEqual(yield* Ref.get(dispatched), []);
+      }),
+    );
+
+    it.effect("reports a preset whose provider is missing as unavailable", () =>
+      Effect.gen(function* () {
+        const { service } = yield* presetHarness({ providers: [codex] });
+        const error = yield* service
+          .delegateTask(scope, { task: "Review.", preset: "review-t1", mode: "async" })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "provider_unavailable");
+      }),
+    );
+
+    it.effect("lists presets in capabilities without their instructions", () =>
+      Effect.gen(function* () {
+        const { service } = yield* presetHarness({ providers: [codex, claude] });
+        const capabilities = yield* service.capabilities(scope);
+        const grok = capabilities.rolePresets?.find((preset) => preset.id === "review-t3-grok");
+        assert.deepEqual(grok, {
+          id: "review-t3-grok",
+          label: "Reviewer (tier 3, Grok)",
+          target: { driverKind: ProviderDriverKind.make("cursor"), model: "grok-4.7" },
+          runsIn: "host",
+          unavailableReason: "No cursor provider is configured.",
+        });
+        assert.isFalse(
+          capabilities.rolePresets?.some((preset) => "instructions" in preset) ?? true,
         );
       }),
     );

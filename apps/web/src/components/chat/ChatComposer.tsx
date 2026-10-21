@@ -26,6 +26,7 @@ import type {
   AssistantCitation,
   ChatAttachment as ContractChatAttachment,
   ChatFileAttachment,
+  EffectiveAgentRolePreset,
   EnvironmentId,
   ModelSelection,
   ProjectId,
@@ -40,6 +41,7 @@ import type {
   ScopedThreadRef,
   ServerProvider,
   ThreadId,
+  ThreadRolePreset,
   SnapShotSource,
 } from "@t3tools/contracts";
 import {
@@ -261,6 +263,7 @@ import {
 import { matchComposerThreadItems } from "@t3tools/client-runtime/composerThreadItems";
 import { useThreadContextDrop, threadContextDropTargetProps } from "./threadContextDrag";
 import { readThreadShell, useThreadShells } from "~/state/entities";
+import { ComposerRolePicker } from "../roles/RolePresetPicker";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
 import type {
@@ -1641,6 +1644,10 @@ export interface ChatComposerProps {
   ) => void;
   onOpenProviderSetup: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason: (instanceId: ProviderInstanceId, model: string) => string | null;
+  /** Set only for a new thread on an environment that has role presets. */
+  rolePresetProjectId: ProjectId | null;
+  draftRolePreset: ThreadRolePreset | null;
+  onRolePresetSelect: (preset: EffectiveAgentRolePreset | null) => void;
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
@@ -1981,6 +1988,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onProviderModelSelect,
     onOpenProviderSetup,
     getModelDisabledReason,
+    rolePresetProjectId,
+    draftRolePreset,
+    onRolePresetSelect,
     toggleInteractionMode,
     handleRuntimeModeChange,
     handleInteractionModeChange,
@@ -5050,6 +5060,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     hidden: composerControlsHidden || restingHiddenBlockCount > 1,
   });
   const restingBlockDefs = [
+    // First, so it is the last block to fold away on a narrow composer.
+    ...(rolePresetProjectId !== null
+      ? [
+          {
+            id: "role",
+            content: (
+              <>
+                <ComposerControlSeparator size={composerControlsCollapsed ? "xs" : "sm"} />
+                <ComposerRolePicker
+                  environmentId={environmentId}
+                  projectId={rolePresetProjectId}
+                  value={draftRolePreset}
+                  size={composerControlsCollapsed ? "xs" : "sm"}
+                  disabled={isSendBusy}
+                  onSelect={onRolePresetSelect}
+                />
+              </>
+            ),
+          },
+        ]
+      : []),
     ...(providerTraitsPicker
       ? [
           {

@@ -37,7 +37,9 @@ import {
   latestExecutedRun,
   latestRootProviderFailure,
 } from "@t3tools/shared/orchestrationV2ThreadError";
-import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import type { EffectiveAgentRolePreset, UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import { applyRolePresetToDraft } from "../lib/rolePresetDraft";
+import { useEnvironmentSupportsRolePresets } from "../state/agentRoles";
 import { isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
@@ -5357,6 +5359,69 @@ export default function ChatView(props: ChatViewProps) {
     });
     return item ? [item] : [];
   });
+  const onProviderModelSelect = (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: { focusComposer?: boolean },
+  ) => {
+    if (!activeThread) return;
+    const entry = providerInstanceEntries.find((candidate) => candidate.instanceId === instanceId);
+    if (
+      !supportsProviderSwitchingViaHandoff &&
+      entry !== undefined &&
+      !isProviderInstanceAllowedByLock(providerLock, entry)
+    ) {
+      if (options?.focusComposer !== false) scheduleComposerFocus();
+      return;
+    }
+    const resolvedModel = resolveAppModelSelectionForInstance(
+      instanceId,
+      settings,
+      providerStatuses,
+      model,
+    );
+    if (!resolvedModel) {
+      if (options?.focusComposer !== false) scheduleComposerFocus();
+      return;
+    }
+    const rememberedOptions =
+      useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[resolvedModel];
+    const nextModelSelection: ModelSelection =
+      rememberedOptions !== undefined && rememberedOptions.length > 0
+        ? { instanceId, model: resolvedModel, options: [...rememberedOptions] }
+        : { instanceId, model: resolvedModel };
+    const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
+      providers: providerStatuses,
+      hasStartedSession: activeRuntime !== null,
+      supportsProviderSwitchingViaHandoff,
+      currentModelSelection: activeThread.modelSelection,
+      currentProviderInstanceId: activeRuntime?.providerInstanceId ?? null,
+      nextModelSelection,
+    });
+    if (modelChangeBlockReason) {
+      toastManager.add({
+        type: "warning",
+        title: modelChangeBlockReason.title,
+        description: modelChangeBlockReason.description,
+      });
+      if (options?.focusComposer !== false) scheduleComposerFocus();
+      return;
+    }
+    setComposerDraftModelSelection(
+      scopeThreadRef(activeThread.environmentId, activeThread.id),
+      nextModelSelection,
+      { explicit: true, replaceOptions: true },
+    );
+    setStickyComposerModelSelection(nextModelSelection);
+    if (options?.focusComposer !== false) scheduleComposerFocus();
+  };
+  const onProviderModelSelectStable = useStableCallback(onProviderModelSelect);
+  // Same switch as picking the instance in the model picker, keeping the model.
+  const switchLimitedThreadAccount = useStableCallback((instanceId: ProviderInstanceId) => {
+    if (activeThread) onProviderModelSelectStable(instanceId, activeThread.modelSelection.model);
+  });
+  const limitedInstanceId =
+    activeRuntime?.providerInstanceId ?? activeThread?.modelSelection.instanceId ?? null;
   const limitRecoveryBanner =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -5374,6 +5439,15 @@ export default function ChatView(props: ChatViewProps) {
             });
             if (result._tag === "Failure") throw squashAtomCommandFailure(result);
           },
+          switchAccount:
+            limitedInstanceId === null
+              ? null
+              : {
+                  providers: providerStatuses,
+                  currentInstanceId: limitedInstanceId,
+                  thresholds: settings.usageHeadroom,
+                  onSwitch: switchLimitedThreadAccount,
+                },
         })
       : null;
   const composerBannerItems = (() => {
@@ -6647,6 +6721,9 @@ export default function ChatView(props: ChatViewProps) {
                         branch: activeThreadBranch,
                         worktreePath: null,
                         createdAt: messageCreatedAt,
+                        ...(draftThread?.rolePreset == null
+                          ? {}
+                          : { rolePreset: draftThread.rolePreset }),
                       },
                       prepareWorktree: {
                         projectCwd: activeProject.workspaceRoot,
@@ -6927,6 +7004,9 @@ export default function ChatView(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      ...(draftThread?.rolePreset == null
+                        ? {}
+                        : { rolePreset: draftThread.rolePreset }),
                     },
                   }
                 : {}),
@@ -7449,63 +7529,14 @@ export default function ChatView(props: ChatViewProps) {
       : null,
   );
 
-  const onProviderModelSelect = (
-    instanceId: ProviderInstanceId,
-    model: string,
-    options?: { focusComposer?: boolean },
-  ) => {
-    if (!activeThread) return;
-    const entry = providerInstanceEntries.find((candidate) => candidate.instanceId === instanceId);
-    if (
-      !supportsProviderSwitchingViaHandoff &&
-      entry !== undefined &&
-      !isProviderInstanceAllowedByLock(providerLock, entry)
-    ) {
-      if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
-    }
-    const resolvedModel = resolveAppModelSelectionForInstance(
-      instanceId,
-      settings,
-      providerStatuses,
-      model,
-    );
-    if (!resolvedModel) {
-      if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
-    }
-    const rememberedOptions =
-      useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[resolvedModel];
-    const nextModelSelection: ModelSelection =
-      rememberedOptions !== undefined && rememberedOptions.length > 0
-        ? { instanceId, model: resolvedModel, options: [...rememberedOptions] }
-        : { instanceId, model: resolvedModel };
-    const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
-      providers: providerStatuses,
-      hasStartedSession: activeRuntime !== null,
-      supportsProviderSwitchingViaHandoff,
-      currentModelSelection: activeThread.modelSelection,
-      currentProviderInstanceId: activeRuntime?.providerInstanceId ?? null,
-      nextModelSelection,
-    });
-    if (modelChangeBlockReason) {
-      toastManager.add({
-        type: "warning",
-        title: modelChangeBlockReason.title,
-        description: modelChangeBlockReason.description,
-      });
-      if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
-    }
-    setComposerDraftModelSelection(
-      scopeThreadRef(activeThread.environmentId, activeThread.id),
-      nextModelSelection,
-      { explicit: true, replaceOptions: true },
-    );
-    setStickyComposerModelSelection(nextModelSelection);
-    if (options?.focusComposer !== false) scheduleComposerFocus();
+  const supportsRolePresets = useEnvironmentSupportsRolePresets(environmentId);
+  const rolePresetProjectId =
+    supportsRolePresets && isLocalDraftThread && draftThread ? draftThread.projectId : null;
+  const onRolePresetSelect = (preset: EffectiveAgentRolePreset | null) => {
+    applyRolePresetToDraft(composerDraftTarget, preset);
+    scheduleComposerFocus();
   };
-  const onProviderModelSelectStable = useStableCallback(onProviderModelSelect);
+  const onRolePresetSelectStable = useStableCallback(onRolePresetSelect);
   const onEnvModeChange = (mode: DraftThreadEnvMode) => {
     if (multipleModelSelections !== null) return;
     if (canOverrideServerThreadEnvMode) {
@@ -8302,6 +8333,9 @@ export default function ChatView(props: ChatViewProps) {
                               onProviderModelSelect={onProviderModelSelectStable}
                               onOpenProviderSetup={openProviderSetupStable}
                               getModelDisabledReason={getModelDisabledReason}
+                              rolePresetProjectId={rolePresetProjectId}
+                              draftRolePreset={draftThread?.rolePreset ?? null}
+                              onRolePresetSelect={onRolePresetSelectStable}
                               toggleInteractionMode={toggleInteractionModeStable}
                               handleRuntimeModeChange={handleRuntimeModeChangeStable}
                               handleInteractionModeChange={handleInteractionModeChangeStable}

@@ -99,6 +99,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  ServerSettings as ServerSettingsSchema,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import {
@@ -122,6 +123,7 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
+import * as AgentRolePresetService from "./agentRoles/AgentRolePresetService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import {
   archivedShellStreamItemFromThreadShell,
@@ -255,6 +257,20 @@ import {
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+
+const clientSettingsEqual = Schema.toEquivalence(ServerSettingsSchema);
+
+/** A role preset edit changes nothing clients see here; agentRoles.subscribe carries it. */
+export const clientSettingsUpdates = <E, R>(changes: Stream.Stream<ServerSettingsSchema, E, R>) =>
+  changes.pipe(
+    Stream.map((settings) => ServerSettings.redactServerSettingsForClient(settings)),
+    Stream.changesWith(clientSettingsEqual),
+    Stream.map((settings) => ({
+      version: 1 as const,
+      type: "settingsUpdated" as const,
+      payload: { settings },
+    })),
+  );
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
 const isProviderUploadFeedbackError = Schema.is(ProviderUploadFeedbackError);
@@ -1200,6 +1216,7 @@ const layerWsRpc = (
       const commandOutputHub = yield* CommandOutputHub.CommandOutputHub;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const agentRoles = yield* AgentRolePresetService.AgentRolePresetService;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -1945,6 +1962,7 @@ const layerWsRpc = (
                     runtimeMode: input.runtimeMode,
                     interactionMode: input.interactionMode,
                     workspaceStrategy: input.workspaceStrategy,
+                    ...(input.rolePreset === undefined ? {} : { rolePreset: input.rolePreset }),
                     ...(input.initialMessage === undefined
                       ? {}
                       : {
@@ -2029,6 +2047,10 @@ const layerWsRpc = (
               Effect.as(commandOutputHub.subscribe(input)),
             ),
           ),
+        [WS_METHODS.agentRolesSubscribe]: (input) => agentRoles.subscribe(input.projectId),
+        [WS_METHODS.agentRolesSave]: (input) => agentRoles.save(input),
+        [WS_METHODS.agentRolesRemove]: (input) => agentRoles.remove(input),
+        [WS_METHODS.agentRolesReset]: (input) => agentRoles.reset(input),
         [WS_METHODS.scheduledTasksList]: (_input) =>
           scheduledTasks.list().pipe(Effect.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
@@ -2990,14 +3012,7 @@ const layerWsRpc = (
                       })),
                     )
                   : Stream.empty;
-              const settingsUpdates = serverSettings.streamChanges.pipe(
-                Stream.map((settings) => ServerSettings.redactServerSettingsForClient(settings)),
-                Stream.map((settings) => ({
-                  version: 1 as const,
-                  type: "settingsUpdated" as const,
-                  payload: { settings },
-                })),
-              );
+              const settingsUpdates = clientSettingsUpdates(serverSettings.streamChanges);
 
               const liveUpdates = Stream.merge(
                 keybindingsUpdates,

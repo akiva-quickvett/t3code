@@ -1,4 +1,6 @@
 import {
+  AgentUsageLimitsInput,
+  AgentUsageLimitsResult,
   OrchestratorMcpCapabilitiesResult,
   OrchestrationV2StopWorkflowInput,
   OrchestratorMcpCreateThreadsInput,
@@ -35,6 +37,7 @@ import { Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
 
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as UsageService from "../../../usage/UsageService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
@@ -52,13 +55,27 @@ const threadMetadataDependencies = [
 
 const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   description:
-    "List the V2 provider instances and their current models from the same live catalog as the composer, including configured custom models, inherited runtime settings, and app-owned orchestration features available to this caller. features.supervisedWakes says whether t3_thread_launch accepts supervise. For a separate top-level thread in a new or existing worktree, use t3_thread_launch with workspaceStrategy.",
+    "List the V2 provider instances and their current models from the same live catalog as the composer, including configured custom models, inherited runtime settings, and app-owned orchestration features available to this caller. headroom (ok, low, unknown, exhausted) summarizes an instance's subscription limits; t3_usage_limits has the windows and reset times. features.supervisedWakes says whether t3_thread_launch accepts supervise. For a separate top-level thread in a new or existing worktree, use t3_thread_launch with workspaceStrategy.",
   success: OrchestratorMcpCapabilitiesResult,
   failure: OrchestratorMcpFailure,
   failureMode: "return",
   dependencies,
 })
   .annotate(Tool.Title, "Get orchestration capabilities")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const UsageLimitsTool = Tool.make("t3_usage_limits", {
+  description:
+    "Read the subscription limits of this environment's provider instances: each window's used percent and reset time, plus a headroom verdict (ok, low, unknown, exhausted). Before delegating work, launching a thread, or switching a thread's account, prefer an instance whose headroom is ok; when none is, report it rather than start the work. Answers from the last check without probing. refresh: true re-checks instances not checked in the last five minutes. status stale means the reading is old or a window has reset since. unavailable unsupported means the account reports no limits, such as an API key, and its headroom is ok. unavailable probeFailed means the last check failed and headroom is unknown; refresh, or treat the account as unknown, never as ok.",
+  parameters: AgentUsageLimitsInput,
+  success: AgentUsageLimitsResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: [McpInvocationContext.McpInvocationContext, UsageService.UsageService],
+})
+  .annotate(Tool.Title, "Read usage limits")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
@@ -273,6 +290,7 @@ const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
 
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
+  UsageLimitsTool,
   DelegateTaskTool,
   TaskStatusTool,
   TaskCancelTool,

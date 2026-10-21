@@ -128,8 +128,13 @@ const normalizeServerSettings = (
     ),
   );
 
+/**
+ * Role presets reach clients merged, through agentRoles.subscribe, so the raw
+ * layers stay out of every settings push.
+ */
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
-  return mapSettingsSecrets(settings, (secret) =>
+  const withoutRoles = { ...settings, agentRolePresets: DEFAULT_SERVER_SETTINGS.agentRolePresets };
+  return mapSettingsSecrets(withoutRoles, (secret) =>
     secret.sensitive
       ? { value: "", redacted: secret.redacted || secret.value.length > 0 }
       : { value: secret.value, redacted: false },
@@ -185,6 +190,10 @@ export class ServerSettingsService extends Context.Service<
     readonly updateProviderInstance: (
       mutation: ProviderInstanceMutation,
       patch?: ServerSettingsPatch,
+    ) => Effect.Effect<ServerSettings, ServerSettingsError>;
+
+    readonly updateAgentRolePresets: (
+      update: (current: ServerSettings["agentRolePresets"]) => ServerSettings["agentRolePresets"],
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
     readonly withSettingsSnapshot: <A, E, R>(
@@ -251,6 +260,13 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
             );
             const patched = applyServerSettingsPatch(currentSettings, patch);
             return applyProviderInstanceMutation(patched, mutation);
+          }),
+        ),
+      updateAgentRolePresets: (update) =>
+        updateTestSettings((currentSettings) =>
+          Effect.succeed({
+            ...currentSettings,
+            agentRolePresets: update(currentSettings.agentRolePresets),
           }),
         ),
       withSettingsSnapshot: (use) =>
@@ -1159,6 +1175,10 @@ const make = Effect.gen(function* () {
           const patched = applyServerSettingsPatch(current, patch);
           return applyProviderInstanceMutation(patched, mutation);
         }),
+      ),
+    updateAgentRolePresets: (update) =>
+      updateAndPersistSettings((current) =>
+        Effect.succeed({ ...current, agentRolePresets: update(current.agentRolePresets) }),
       ),
     withSettingsSnapshot,
     get streamChanges() {

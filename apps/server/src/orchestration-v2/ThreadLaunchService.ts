@@ -18,6 +18,7 @@ import {
   type RuntimeMode,
   type ScheduledTaskId,
   ThreadId,
+  type ThreadRolePreset,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -86,6 +87,7 @@ export interface ThreadLaunchInput {
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly workspaceStrategy: ThreadLaunchWorkspaceStrategy;
+  readonly rolePreset?: ThreadRolePreset;
   readonly initialMessage?: ThreadLaunchInitialMessage;
   /** Supervises the new thread; an initial message it sent wakes it when that run ends. */
   readonly supervisorThreadId?: ThreadId;
@@ -921,6 +923,7 @@ const make = Effect.gen(function* () {
                 commandId: input.commandId,
                 threadId: candidateThreadId,
                 expectedEmpty: true,
+                ...(input.rolePreset === undefined ? {} : { rolePreset: input.rolePreset }),
               })
             : threads.dispatch({
                 type: "thread.create",
@@ -936,6 +939,7 @@ const make = Effect.gen(function* () {
                 ...(input.supervisorThreadId === undefined
                   ? {}
                   : { supervisorThreadId: input.supervisorThreadId }),
+                ...(input.rolePreset === undefined ? {} : { rolePreset: input.rolePreset }),
                 ...(input.importedNativeThread === undefined
                   ? {}
                   : { importedNativeThread: input.importedNativeThread }),

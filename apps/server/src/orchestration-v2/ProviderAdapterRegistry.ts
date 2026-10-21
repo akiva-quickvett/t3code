@@ -154,7 +154,7 @@ export const layerFromProviderInstanceRegistry: Layer.Layer<
           return {
             driver: instance.driverKind,
             continuationKey: instance.continuationIdentity.continuationKey,
-            organizationKey: snapshot.auth.workspaceId,
+            organizationKey: snapshot.auth?.workspaceId,
             enabled: instance.enabled,
             capabilities,
           };
