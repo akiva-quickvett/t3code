@@ -305,6 +305,15 @@ export function summarizeT3ToolCalls(
     case "worktree-status":
       label = phrase("Checked", "check", `worktree status ${times}`);
       break;
+    case "pod-status":
+      label = phrase("Checked", "check", `pod status ${times}`);
+      break;
+    case "pod-start":
+      label = phrase("Started", "start", `a pod ${times}`);
+      break;
+    case "pod-stop":
+      label = phrase("Stopped", "stop", `a pod ${times}`);
+      break;
     case "project-list":
       label = phrase("Listed", "list", `projects ${times}`);
       break;

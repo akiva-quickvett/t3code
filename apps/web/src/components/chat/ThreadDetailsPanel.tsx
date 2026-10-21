@@ -16,6 +16,7 @@ import ProjectScriptsControl, {
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
 import { memo, type ComponentProps } from "react";
+import { ThreadPodChip } from "../pods/PodChip";
 import { ThreadDetailsCard } from "./ThreadDetailsCard";
 import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
@@ -118,6 +119,9 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                   onAutoEnvironment={props.onAutoEnvironment}
                   {...branchToolbarProps}
                 />
+              ) : null}
+              {density === "full" ? (
+                <ThreadPodChip environmentId={props.environmentId} threadId={props.threadId} row />
               ) : null}
 
               {density !== "essential" && props.showOpenInPicker ? (

@@ -58,6 +58,7 @@ import {
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
+  BoxIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronRightIcon,
@@ -80,6 +81,8 @@ import {
   TextSearchIcon,
   TicketIcon,
 } from "lucide-react";
+import { useWorktreePod } from "../state/podRuntime";
+import { usePodActions } from "./pods/usePodActions";
 import { requestThreadFindOpen } from "./chat/threadFindActionBus";
 import {
   useDeferredValue,
@@ -199,6 +202,7 @@ import {
   getCommandPaletteInputPlaceholder,
   getCommandPaletteMode,
   ITEM_ICON_CLASS,
+  buildPodActionItems,
   RECENT_THREAD_LIMIT,
   reduceCommandPaletteUiState,
   type SearchOverlayMode,
@@ -752,6 +756,8 @@ function OpenCommandPaletteDialog(props: {
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
+  const activePod = useWorktreePod(activeThread?.environmentId ?? null, activeThread?.worktreePath);
+  const podActions = usePodActions(activeThread?.environmentId ?? null);
   const startTicketThread = useStartTicketThread();
   const paletteRouteTarget = useThreadRouteTarget();
   const projects = useProjects();
@@ -1851,6 +1857,18 @@ function OpenCommandPaletteDialog(props: {
         if (refreshed._tag === "Failure") throw squashAtomCommandFailure(refreshed);
       },
     });
+  }
+
+  if (activeThread !== null && activePod !== undefined) {
+    const threadId = activeThread.id;
+    actionItems.push(
+      ...buildPodActionItems({
+        pod: activePod,
+        icon: <BoxIcon className={ITEM_ICON_CLASS} />,
+        allowed: podActions.allowed,
+        run: (action) => podActions.run(activePod.id, action, threadId),
+      }),
+    );
   }
 
   actionItems.push({

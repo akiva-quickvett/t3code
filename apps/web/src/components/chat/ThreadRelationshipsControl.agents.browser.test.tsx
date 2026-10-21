@@ -40,9 +40,16 @@ vi.mock(import("../../state/entities"), async (original) => ({
 }));
 vi.mock(import("../../state/environments"), async (original) => ({
   ...(await original()),
+  // `auth` is required on a provider snapshot; the fixtures only spell out what each test varies.
   useEnvironmentProviders: (() =>
     new Map(
-      [...state.configs].map(([id, config]) => [id, (config as { providers: unknown }).providers]),
+      [...state.configs].map(([id, config]) => [
+        id,
+        (config as { providers: ReadonlyArray<object> }).providers.map((provider) => ({
+          auth: { status: "authenticated" },
+          ...provider,
+        })),
+      ]),
     )) as never,
 }));
 vi.mock(import("../../lib/archivedThreadsState"), async (original) => ({

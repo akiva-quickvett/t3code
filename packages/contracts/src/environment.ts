@@ -157,6 +157,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   scheduledTaskScripts: Schema.optionalKey(Schema.Boolean),
   /** Server answers the chatChannels.* RPCs (Messaging settings); absent on stock servers. */
   chatChannels: Schema.optionalKey(Schema.Boolean),
+  /** Server answers the podRuntime.* RPCs; absent on stock servers, whose clients hide pod UI. */
+  podRuntime: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

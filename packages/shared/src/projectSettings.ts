@@ -156,7 +156,8 @@ function resolveProjectOverrides(
     ) {
       continue;
     }
-    effective[key] = value;
+    effective[key] =
+      key === "podRuntime" ? { ...settings.podRuntime, ...overrides.podRuntime } : value;
     sources[key] = "project";
   }
   const textGeneration = effective.textGenerationModelSelection as ModelSelection;

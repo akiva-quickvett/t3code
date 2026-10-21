@@ -27,6 +27,7 @@ import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment"
 import { useLogicalProjectEnvironments } from "../hooks/useLogicalProjectEnvironments";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { useStableCallback } from "../hooks/useStableCallback";
+import { useProjectOffersPods } from "../state/podRuntime";
 import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
 import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
 import { useThreadTerminalActions } from "./terminal/useThreadTerminalActions";
@@ -1791,6 +1792,12 @@ export default function ChatView(props: ChatViewProps) {
       ? scopeProjectRef(activeThreadEnvironmentId, activeThreadProjectId)
       : null;
   const activeProject = useProject(activeProjectRef);
+  const projectOffersPods = useProjectOffersPods(
+    activeThreadEnvironmentId ?? null,
+    activeProject?.id ?? null,
+  );
+  // The same check that shows the Runtime picker: a choice it no longer offers is not sent.
+  const sendsContainerRuntime = draftThread?.worktreeRuntime === "container" && projectOffersPods;
   const activeProjectSettings = resolveProjectSettings(
     settings,
     activeProject?.id ?? null,
@@ -7016,6 +7023,7 @@ export default function ChatView(props: ChatViewProps) {
                       projectCwd: activeProject.workspaceRoot,
                       baseBranch: baseBranchForWorktree,
                       ...(startFromOrigin ? { startFromOrigin: true } : {}),
+                      ...(sendsContainerRuntime ? { runtime: "container" as const } : {}),
                     },
                     runSetupScript: true,
                   }

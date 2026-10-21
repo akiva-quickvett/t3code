@@ -16,6 +16,9 @@ import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   DEFAULT_SERVER_SETTINGS,
+  PodRuntimeId,
+  type PodRuntimeSnapshot,
+  type PodRuntimeState,
   StorageCleanupReport,
   type ProjectScript,
   type WorktreeKeepWhen,
@@ -35,6 +38,8 @@ import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as WorktreeLifecycle from "./workspace/WorktreeLifecycle.ts";
+import * as PodRuntimeService from "./pod/PodRuntimeService.ts";
+import { layerWithoutPods } from "./pod/testkit/layerWithoutPods.ts";
 import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ServerActivation } from "./serverActivation.ts";
 import { describe, expect, it } from "@effect/vitest";
@@ -280,9 +285,43 @@ const cleanupFixture = (
     let fullStatusCalls = 0;
     let snapshotReads = 0;
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
+    // The worktree's pod, if it has one, and the state a removal leaves it in.
+    let pod: { state: PodRuntimeState; removeEndsIn: PodRuntimeState } | null = null;
+    const podSnapshot = (worktreePath: string): PodRuntimeSnapshot | undefined =>
+      pod === null || pod.state === "removed"
+        ? undefined
+        : {
+            id: PodRuntimeId.make("pod-cleanup1"),
+            projectId: ProjectId.make("project-1"),
+            worktreePath,
+            state: pod.state,
+            services: [],
+            image: "image",
+            startedAt: null,
+            lastError: null,
+            containerIds: [],
+            volumeIds: [],
+            updatedAt: "2026-10-21T00:00:00.000Z",
+          };
+    const layerPods = Layer.mergeAll(
+      layerWithoutPods,
+      Layer.mock(PodRuntimeService.PodRuntimeService)({
+        forPath: (path) => Effect.sync(() => podSnapshot(path)),
+        remove: () =>
+          Effect.sync(() => {
+            if (pod !== null) pod.state = pod.removeEndsIn;
+            return podSnapshot(worktree) ?? null;
+          }),
+        releaseWorktree: () => Effect.void,
+        awaitSettled: () =>
+          Effect.sync(
+            () => podSnapshot(worktree) ?? { ...podSnapshot("")!, state: "removed" as const },
+          ),
+      }),
+    );
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(
-      StorageCleanup.layer.pipe(Layer.provide(WorktreeLifecycle.layer)),
+      StorageCleanup.layer.pipe(Layer.provide(WorktreeLifecycle.layer), Layer.provide(layerPods)),
     ).pipe(
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
         ...git,
@@ -378,6 +417,9 @@ const cleanupFixture = (
     );
     return {
       service: Context.get(context, StorageCleanup.StorageCleanup),
+      setPod: (next: typeof pod) => {
+        pod = next;
+      },
       setProjectScripts: (scripts: ReadonlyArray<ProjectScript>) => {
         projectScripts = scripts;
       },
@@ -1371,6 +1413,48 @@ describe("storage cleanup reports and local file policies", () => {
         expect(removed.entries[0]).toMatchObject({ outcome: "removed" });
         expect(removed.entries[0]?.bytes).toBeGreaterThan(0);
         expect(walked).toContain(root);
+      }),
+    ),
+  );
+  it.live("keeps a live pod's worktree and tears a stopped pod down with it", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        for (const state of ["running", "creating", "frozen", "stopping"] as const) {
+          fixture.setPod({ state, removeEndsIn: "removed" });
+          const kept = yield* fixture.service.runNow;
+          expect(kept.entries[0], state).toMatchObject({
+            outcome: "kept",
+            reason: "Its pod is running",
+          });
+        }
+        fixture.setPod({ state: "stopped", removeEndsIn: "removed" });
+        const removed = yield* fixture.service.runNow;
+        expect(removed.entries[0]).toMatchObject({ outcome: "removed" });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+      }),
+    ),
+  );
+  it.live("reports a refused pod teardown and keeps the worktree for a retry", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        fixture.setPod({ state: "stopped", removeEndsIn: "stop_failed" });
+        const report = yield* fixture.service.runNow;
+        expect(report.entries[0]).toMatchObject({
+          outcome: "failed",
+          reason: expect.stringMatching(/^Teardown failed: The pod could not be removed/),
+        });
+        expect(yield* fixture.fs.exists(`${fixture.worktree}/tracked.txt`)).toBe(true);
+        // The refusal left the pod failed, which holds the worktree until someone acts.
+        const held = yield* fixture.service.runNow;
+        expect(held.entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Its pod failed; retry, stop or remove it first",
+        });
+        fixture.setPod({ state: "stopped", removeEndsIn: "removed" });
+        const retried = yield* fixture.service.runNow;
+        expect(retried.entries[0]).toMatchObject({ outcome: "removed" });
       }),
     ),
   );

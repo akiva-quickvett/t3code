@@ -16,6 +16,7 @@ import {
   AuthRelayWriteScope,
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
+  RpcScopeAuthorization,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -32,6 +33,13 @@ import {
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
+  it("checks the scope of every RPC, including those merged in from feature groups", () => {
+    const unguarded = [...WsRpcGroup.requests.values()]
+      .filter((rpc) => !rpc.middlewares.has(RpcScopeAuthorization))
+      .map((rpc) => rpc._tag);
+    expect(unguarded).toEqual([]);
+  });
+
   it("declares exactly one scope for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });
@@ -59,6 +67,25 @@ describe("RPC authorization scopes", () => {
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthSettingsWriteScope);
     }
+  });
+
+  it("lets readers watch pods and only operators change them or open a pod shell", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.podRuntimeSubscribe)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.podRuntimeStatus)).toBe(AuthOrchestrationReadScope);
+    for (const method of [
+      WS_METHODS.podRuntimeStart,
+      WS_METHODS.podRuntimeStop,
+      WS_METHODS.podRuntimeRecreate,
+      WS_METHODS.podRuntimeRecreateAgentContainer,
+      WS_METHODS.podRuntimeRemove,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+    }
+    expect(requiredScopeForRpcMethod(WS_METHODS.podRuntimeOpenShell)).toBe(
+      AuthTerminalOperateScope,
+    );
   });
 
   it("requires operate access to stop a workflow", () => {

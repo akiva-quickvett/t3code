@@ -100,6 +100,7 @@ import {
   WS_METHODS,
   WsRpcGroup,
   ChatChannelRpcGroup,
+  PodRuntimeRpcGroup,
   ServerSettings as ServerSettingsSchema,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
@@ -126,6 +127,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as AgentRolePresetService from "./agentRoles/AgentRolePresetService.ts";
 import * as ChatChannelService from "./chat/ChatChannelService.ts";
+import * as PodRuntimeService from "./pod/PodRuntimeService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import {
   archivedShellStreamItemFromThreadShell,
@@ -563,11 +565,19 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-// Chat channel RPCs have their own handler layer; see ChatChannelRpcGroup.
+// Chat channel and pod RPCs have their own handler layers; see ChatChannelRpcGroup.
 const ServerCoreWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.chatChannelsSubscribe,
   WS_METHODS.chatChannelsMutate,
   WS_METHODS.chatChannelsGetTemplateStatus,
+  WS_METHODS.podRuntimeSubscribe,
+  WS_METHODS.podRuntimeStatus,
+  WS_METHODS.podRuntimeStart,
+  WS_METHODS.podRuntimeStop,
+  WS_METHODS.podRuntimeRecreate,
+  WS_METHODS.podRuntimeRecreateAgentContainer,
+  WS_METHODS.podRuntimeOpenShell,
+  WS_METHODS.podRuntimeRemove,
 );
 const ServerChatChannelRpcGroup = ChatChannelRpcGroup.middleware(RpcInstrumentation);
 
@@ -581,6 +591,7 @@ const layerChatChannelRpc = ServerChatChannelRpcGroup.toLayer(
     });
   }),
 );
+const ServerPodRuntimeRpcGroup = PodRuntimeRpcGroup.middleware(RpcInstrumentation);
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
@@ -2861,6 +2872,7 @@ const layerWsRpc = (
               projectRoot: input.cwd,
               worktreePath: input.path,
               force: input.force ?? false,
+              ...(input.skipPodTeardown === true ? { skipPodTeardown: true } : {}),
             })
             .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.vcsCreateRef]: (input) =>
@@ -3120,6 +3132,23 @@ const layerWsRpc = (
     }),
   );
 
+const layerPodRuntimeRpc = ServerPodRuntimeRpcGroup.toLayer(
+  Effect.gen(function* () {
+    const pods = yield* PodRuntimeService.PodRuntimeService;
+    return ServerPodRuntimeRpcGroup.of({
+      [WS_METHODS.podRuntimeSubscribe]: (_input) => pods.subscribe,
+      [WS_METHODS.podRuntimeStatus]: (input) => pods.status(input),
+      [WS_METHODS.podRuntimeStart]: (input) => pods.start(input.podId),
+      [WS_METHODS.podRuntimeStop]: (input) => pods.stop(input.podId),
+      [WS_METHODS.podRuntimeRecreate]: (input) => pods.recreate(input.podId),
+      [WS_METHODS.podRuntimeRecreateAgentContainer]: (input) =>
+        pods.recreateAgentContainer(input.podId),
+      [WS_METHODS.podRuntimeOpenShell]: (input) => pods.openShell(input),
+      [WS_METHODS.podRuntimeRemove]: (input) => pods.remove(input),
+    });
+  }),
+);
+
 // RpcServer's default sends a socket-level Defect frame instead, and the client
 // ends every pending request on the socket with it.
 export const WS_RPC_SERVER_OPTIONS = {
@@ -3199,7 +3228,7 @@ export const layer = Layer.unwrap(
           return httpEffect;
         }).pipe(
           Effect.provide(
-            Layer.merge(
+            Layer.mergeAll(
               layerWsRpc(
                 session,
                 clientOrigin,
@@ -3208,6 +3237,7 @@ export const layer = Layer.unwrap(
                 serverBrowser,
               ),
               layerChatChannelRpc,
+              layerPodRuntimeRpc,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Request fibers run in the handlers' context, so this reporter sees

@@ -1,4 +1,10 @@
-import { GitCommandError, type ProjectId, type ThreadId } from "@t3tools/contracts";
+import {
+  GitCommandError,
+  type PodRuntimeSnapshot,
+  type ProjectId,
+  type ThreadId,
+  WorktreePodTeardownError,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   projectScriptRuntimeEnv,
@@ -21,6 +27,8 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
+import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { createTerminalSpawnEnv, terminalShellCandidates } from "../terminal/Manager.ts";
@@ -39,16 +47,21 @@ export interface WorktreeRemoveInput {
    * Git still refuses a tracked edit made after the sweep's last check, and report Git's reason.
    */
   readonly sweep?: { readonly cleanUntrackedFiles: boolean };
+  /** "Remove anyway" for a pod's worktree: no teardown script, and the pod is forgotten even if Docker refuses. */
+  readonly skipPodTeardown?: boolean;
 }
 
 export class WorktreeLifecycle extends Context.Service<
   WorktreeLifecycle,
   {
     /**
-     * Runs the project's teardown script in the worktree, then removes the worktree. The script's
-     * failure or timeout is logged and never stops the removal.
+     * Runs the project's teardown script in the worktree, then removes the worktree. On the host
+     * the script's failure or timeout is logged and never stops the removal. A pod's worktree runs
+     * the script inside the pod, then removes the pod, and keeps the worktree if either fails.
      */
-    readonly remove: (input: WorktreeRemoveInput) => Effect.Effect<void, GitCommandError>;
+    readonly remove: (
+      input: WorktreeRemoveInput,
+    ) => Effect.Effect<void, GitCommandError | WorktreePodTeardownError>;
   }
 >()("t3/workspace/WorktreeLifecycle") {}
 
@@ -77,6 +90,8 @@ const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const pods = yield* PodRuntimeService.PodRuntimeService;
+  const executionTarget = yield* WorkspaceExecutionTarget.WorkspaceExecutionTarget;
 
   // Two removers of one path would run its teardown twice, the second in a
   // directory the first is deleting.
@@ -142,7 +157,7 @@ const make = Effect.gen(function* () {
    * only a timeout kills the tree; children of a script that exits on its own
    * keep running.
    */
-  const runTeardown = Effect.fn("WorktreeLifecycle.runTeardown")(function* (
+  const resolveTeardown = Effect.fn("WorktreeLifecycle.resolveTeardown")(function* (
     input: WorktreeRemoveInput,
     worktreePath: string,
   ) {
@@ -152,11 +167,11 @@ const make = Effect.gen(function* () {
         threadId: input.threadId ?? null,
         worktreePath,
       });
-      return false;
+      return null;
     }
     const settings = yield* serverSettings.getSettings;
     const script = teardownProjectScript(resolveProjectScripts(settings, project));
-    if (script === null || !(yield* fileSystem.exists(worktreePath))) return false;
+    if (script === null || !(yield* fileSystem.exists(worktreePath))) return null;
     const logContext = {
       threadId: input.threadId ?? null,
       worktreePath,
@@ -168,8 +183,32 @@ const make = Effect.gen(function* () {
         "skipped worktree teardown: path is not a linked worktree of the project",
         logContext,
       );
-      return false;
+      return null;
     }
+    return {
+      script,
+      logContext,
+      timeoutMs: settings.worktreeRemovePolicy.timeoutMs,
+      env: projectScriptRuntimeEnv({ project: { cwd: project.workspaceRoot }, worktreePath }),
+    };
+  });
+
+  /**
+   * A child process rather than a ProjectSetupScriptRunner terminal: opening a
+   * terminal takes the worktree's workspace lease, which storage cleanup holds
+   * while it removes, so a terminal here would deadlock the sweep. On POSIX the
+   * spawner kills the script's whole process group when it exits or times out,
+   * so nothing it started keeps running in the deleted directory. On Windows
+   * only a timeout kills the tree; children of a script that exits on its own
+   * keep running.
+   */
+  const runTeardown = Effect.fn("WorktreeLifecycle.runTeardown")(function* (
+    input: WorktreeRemoveInput,
+    worktreePath: string,
+  ) {
+    const teardown = yield* resolveTeardown(input, worktreePath);
+    if (teardown === null) return false;
+    const { script, logContext } = teardown;
     const options = {
       cwd: worktreePath,
       // The terminal's env, as setup gets: no T3 server variables such as
@@ -177,7 +216,7 @@ const make = Effect.gen(function* () {
       env: createTerminalSpawnEnv(
         hostEnv,
         {
-          ...projectScriptRuntimeEnv({ project: { cwd: project.workspaceRoot }, worktreePath }),
+          ...teardown.env,
           COLORTERM: "",
           NO_COLOR: "1",
           FORCE_COLOR: "0",
@@ -189,7 +228,7 @@ const make = Effect.gen(function* () {
       stdin: "ignore",
       forceKillAfter: TEARDOWN_KILL_GRACE,
     } satisfies ChildProcess.CommandOptions;
-    const timeoutMs = settings.worktreeRemovePolicy.timeoutMs;
+    const timeoutMs = teardown.timeoutMs;
     const startedAt = yield* Clock.currentTimeMillis;
     let outputBytes = 0;
     const result = yield* Effect.scoped(
@@ -240,6 +279,76 @@ const make = Effect.gen(function* () {
       yield* Effect.logWarning("worktree teardown script failed; removing anyway", outcome);
     }
     return true;
+  });
+
+  /**
+   * The script runs inside the pod, which is started for it if it is not
+   * running, then the pod is removed. Any failure keeps the worktree.
+   */
+  const teardownPod = Effect.fn("WorktreeLifecycle.teardownPod")(function* (
+    input: WorktreeRemoveInput,
+    worktreePath: string,
+    pod: PodRuntimeSnapshot,
+  ) {
+    const failed = (
+      step: WorktreePodTeardownError["step"],
+      extra?: Partial<Pick<WorktreePodTeardownError, "state" | "exitCode" | "cause">>,
+    ) => new WorktreePodTeardownError({ podId: pod.id, step, ...extra });
+    const teardown =
+      input.skipPodTeardown === true
+        ? null
+        : yield* resolveTeardown(input, worktreePath).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.interrupt
+                : Effect.fail(failed("script", { exitCode: null, cause: Cause.squash(cause) })),
+            ),
+          );
+    if (teardown !== null) {
+      yield* pods.ensureRunning(pod.id, { forTeardown: true }).pipe(
+        Effect.catchTags({
+          PodRuntimeError: (error) =>
+            Effect.fail(
+              failed("start", { ...(error.state ? { state: error.state } : {}), cause: error }),
+            ),
+        }),
+      );
+      const target = yield* executionTarget.resolve(worktreePath);
+      if (target.type === "pod") {
+        const result = yield* executionTarget
+          .exec(target, {
+            command: ["sh", "-c", teardown.script.command],
+            cwd: worktreePath,
+            env: { ...teardown.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+            timeoutMs: teardown.timeoutMs,
+          })
+          .pipe(
+            Effect.catchTags({
+              ContainerDriverError: (error) =>
+                Effect.fail(failed("script", { exitCode: null, cause: error })),
+            }),
+          );
+        if (result.exitCode !== 0) {
+          yield* Effect.logWarning("pod teardown script failed; keeping the worktree", {
+            ...teardown.logContext,
+            podId: pod.id,
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+          });
+          return yield* failed("script", { exitCode: result.exitCode });
+        }
+      }
+    }
+    const removed = yield* pods
+      .remove({ podId: pod.id, ...(input.skipPodTeardown === true ? { force: true } : {}) })
+      .pipe(
+        Effect.andThen(pods.awaitSettled(pod.id)),
+        Effect.catchTags({
+          PodRuntimeError: (error) => Effect.fail(failed("remove", { cause: error })),
+        }),
+      );
+    if (removed.state !== "removed") return yield* failed("remove", { state: removed.state });
+    return teardown !== null;
   });
 
   const sweepGit = Effect.fn("WorktreeLifecycle.sweepGit")(function* (
@@ -300,21 +409,47 @@ const make = Effect.gen(function* () {
       const lockKey = yield* fileSystem
         .realPath(worktreePath)
         .pipe(Effect.orElseSucceed(() => worktreePath));
+      const pod = yield* pods.forPath(worktreePath, { includeRemoved: true });
       yield* withRemovalLock(
         lockKey,
-        runTeardown(input, worktreePath).pipe(
-          Effect.catchCause((cause) =>
-            Cause.hasInterruptsOnly(cause)
-              ? Effect.interrupt
-              : Effect.logWarning("worktree teardown failed; removing anyway", {
-                  threadId: input.threadId ?? null,
-                  worktreePath,
-                  projectId: input.projectId ?? null,
-                  // Platform errors quote the script's command line, so only the tag.
-                  error: failureTag(Cause.squash(cause)),
-                }).pipe(Effect.as(false)),
-          ),
+        (pod?.state === "removed"
+          ? // Its script was written for the pod; on the host it would act on the host's Docker.
+            Effect.logInfo("skipped worktree teardown: its pod was removed earlier", {
+              threadId: input.threadId ?? null,
+              worktreePath,
+              podId: pod.id,
+            }).pipe(Effect.as(false))
+          : pod === undefined
+            ? runTeardown(input, worktreePath).pipe(
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.interrupt
+                    : Effect.logWarning("worktree teardown failed; removing anyway", {
+                        threadId: input.threadId ?? null,
+                        worktreePath,
+                        projectId: input.projectId ?? null,
+                        // Platform errors quote the script's command line, so only the tag.
+                        error: failureTag(Cause.squash(cause)),
+                      }).pipe(Effect.as(false)),
+                ),
+              )
+            : teardownPod(input, worktreePath, pod)
+        ).pipe(
           Effect.flatMap((teardownRan) => removeCheckout(input, worktreePath, teardownRan)),
+          // The pod is removed by now; the path is free for a host worktree again.
+          Effect.tap(() =>
+            pod === undefined
+              ? Effect.void
+              : pods.releaseWorktree(worktreePath).pipe(
+                  Effect.catchTags({
+                    PodRuntimeError: (error) =>
+                      Effect.logWarning("could not record a pod worktree as removed", {
+                        podId: pod.id,
+                        reason: error.reason,
+                      }),
+                  }),
+                ),
+          ),
         ),
       );
     },

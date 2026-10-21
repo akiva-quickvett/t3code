@@ -2,6 +2,7 @@ import { remapComposerContextAttachments } from "@t3tools/shared/composerContext
 import {
   type ThreadLinkedPullRequest,
   type ThreadRolePreset,
+  type ThreadWorktreeRuntime,
   CommandId,
   CheckpointId,
   CheckpointScopeId,
@@ -159,6 +160,7 @@ interface StartThreadBootstrap {
     readonly baseBranch: string;
     readonly branch?: string;
     readonly startFromOrigin?: boolean;
+    readonly runtime?: ThreadWorktreeRuntime;
   };
   readonly runSetupScript?: boolean;
 }
@@ -654,6 +656,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
             ...(prepareWorktree.startFromOrigin === undefined
               ? {}
               : { startFromOrigin: prepareWorktree.startFromOrigin }),
+            ...(prepareWorktree.runtime === undefined ? {} : { runtime: prepareWorktree.runtime }),
           }
         : bootstrap?.worktreePath
           ? {

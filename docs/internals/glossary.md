@@ -12,6 +12,7 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
 | Project        | An environment-local workspace record rooted at a directory.                                      |
 | Workspace root | The project's base filesystem directory on the environment.                                       |
 | Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                  |
+| Pod            | A worktree's private Docker daemon and agent container; its terminals and scripts run inside it.  |
 | Thread         | The durable conversation and work history for a project. It survives provider process exits.      |
 | Turn           | One user-to-agent cycle, a V2 run. Provider work can end before checkpoint and diff work settles. |
 | Activity       | A non-message timeline item, such as a tool action, approval, or failure.                         |

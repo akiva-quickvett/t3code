@@ -65,6 +65,7 @@ import {
 } from "./providerPolicy.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ThreadRolePreset } from "./agentRole.ts";
+import { ThreadWorktreeRuntime } from "./podRuntime.ts";
 import { OrchestrationProjectShell } from "./orchestrationProject.ts";
 import {
   TurnTokenUsage,
@@ -518,6 +519,8 @@ export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
     baseRef: TrimmedNonEmptyString,
     branch: Schema.optional(TrimmedNonEmptyString),
     startFromOrigin: Schema.optional(Schema.Boolean),
+    /** "container" puts the new worktree in a pod; stock servers ignore it. */
+    runtime: Schema.optional(ThreadWorktreeRuntime),
   }),
 ]);
 export type OrchestrationV2ThreadLaunchWorkspaceStrategy =

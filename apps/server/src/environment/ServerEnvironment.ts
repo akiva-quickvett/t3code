@@ -268,6 +268,7 @@ export const make = Effect.gen(function* () {
       pullRequestLabelRules: true,
       scheduledTaskScripts: true,
       chatChannels: true,
+      podRuntime: true,
     },
   };
 

@@ -4,9 +4,15 @@ import {
   type EnvironmentId,
   type FilesystemBrowseEntry,
   type KeybindingCommand,
+  type PodRuntimeRequest,
+  type PodRuntimeSnapshot,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
+import {
+  type PodRuntimeAction,
+  podRuntimeActions,
+} from "@t3tools/client-runtime/state/pod-runtime";
 import type { SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
@@ -36,6 +42,40 @@ export function buildLinkedThreadActionItems(
     icon: input.icon,
     run: () => input.runThread({ environmentId: input.environmentId, id: thread.id }),
   }));
+}
+
+// Removal belongs with the worktree or Diagnostics, not a quick command.
+const PALETTE_POD_REQUESTS = new Set<PodRuntimeRequest>(["start", "stop", "recreate"]);
+
+/**
+ * The active thread's pod actions. Matching reads only search terms, so each
+ * item carries its own title's words.
+ */
+export function buildPodActionItems(input: {
+  readonly pod: PodRuntimeSnapshot;
+  readonly icon: ReactNode;
+  readonly allowed: (action: PodRuntimeAction) => boolean;
+  readonly run: (action: PodRuntimeAction) => Promise<void>;
+}): CommandPaletteActionItem[] {
+  return podRuntimeActions(input.pod).flatMap((action) => {
+    if (action.kind === "request" && !PALETTE_POD_REQUESTS.has(action.request)) return [];
+    const title = action.label === "Retry" ? "Retry pod" : action.label;
+    return [
+      {
+        kind: "action",
+        value: `action:pod:${action.label}`,
+        searchTerms: [
+          title,
+          "pod container docker",
+          action.kind === "openShell" ? "terminal shell" : "compose stack",
+        ],
+        title,
+        disabled: !input.allowed(action),
+        icon: input.icon,
+        run: () => input.run(action),
+      },
+    ];
+  });
 }
 
 export function browseInputEndPaddingClass(input: {

@@ -98,6 +98,10 @@ import * as ProviderUsageLimitsIngestion from "./provider/ProviderUsageLimitsIng
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
+import * as ContainerDriver from "./pod/ContainerDriver.ts";
+import * as PodRuntimeService from "./pod/PodRuntimeService.ts";
+import * as PodRuntimeStore from "./pod/PodRuntimeStore.ts";
+import * as WorkspaceExecutionTarget from "./pod/WorkspaceExecutionTarget.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
@@ -388,9 +392,37 @@ const layerReview = ReviewService.layer.pipe(
   Layer.provideMerge(layerVcsDriverRegistry),
 );
 
+const layerPortScanner = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
+
+// One store: the pod projection lives in its memory, which every reader shares.
+const layerPodRuntimeCore = Layer.mergeAll(
+  PodRuntimeStore.layer,
+  ContainerDriver.layerDocker.pipe(Layer.provide(ProcessRunner.layer)),
+);
+
+const layerWorkspaceExecutionTarget = WorkspaceExecutionTarget.layer.pipe(
+  Layer.provideMerge(layerPodRuntimeCore),
+);
+
+const layerTerminal = TerminalManager.layer.pipe(
+  Layer.provide(layerPtyAdapter),
+  Layer.provide(layerPortScanner),
+  Layer.provide(layerNativeTelemetry),
+  Layer.provide(layerWorkspaceExecutionTarget),
+);
+
+const layerPodRuntime = PodRuntimeService.layer.pipe(
+  Layer.provideMerge(layerWorkspaceExecutionTarget),
+  Layer.provide(layerTerminal),
+  Layer.provide(T3ProjectFileLoader.layer),
+  Layer.provide(RuntimeLayer.layerProjectService),
+  Layer.provide(GitVcsDriver.layer),
+);
+
 const layerWorktreeLifecycle = WorktreeLifecycle.layer.pipe(
   Layer.provide(layerGitWorkflow),
   Layer.provide(RuntimeLayer.layerProjectService),
+  Layer.provide(layerPodRuntime),
 );
 
 const layerVcs = Layer.empty.pipe(
@@ -416,14 +448,6 @@ const layerVcs = Layer.empty.pipe(
 );
 
 const layerCheckpointStore = CheckpointStore.layer.pipe(Layer.provide(layerVcsDriverRegistry));
-
-const layerPortScanner = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
-
-const layerTerminal = TerminalManager.layer.pipe(
-  Layer.provide(layerPtyAdapter),
-  Layer.provide(layerPortScanner),
-  Layer.provide(layerNativeTelemetry),
-);
 
 const layerPreview = Layer.empty.pipe(
   Layer.provideMerge(PreviewManager.layer),
@@ -608,7 +632,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(layerSourceControlProviderRegistry),
   Layer.provideMerge(layerGit),
   Layer.provideMerge(layerVcs),
-  Layer.provideMerge(Layer.mergeAll(layerTerminal, layerPreview, layerDevice)),
+  Layer.provideMerge(Layer.mergeAll(layerTerminal, layerPodRuntime, layerPreview, layerDevice)),
   Layer.provideMerge(layerPersistence),
   Layer.provideMerge(
     Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),

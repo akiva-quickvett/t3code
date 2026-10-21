@@ -3,9 +3,14 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
   type GitCommandError,
+  PodRuntimeError,
+  PodRuntimeId,
+  type PodRuntimeSnapshot,
+  type PodRuntimeState,
   ProjectId,
   ThreadId,
   type ProjectScript,
+  type WorktreePodTeardownError,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
@@ -24,6 +29,9 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as WorktreeLifecycle from "./WorktreeLifecycle.ts";
+import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
+import { layerWithoutPods } from "../pod/testkit/layerWithoutPods.ts";
+import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 
 const PROJECT_ID = ProjectId.make("project-1");
 const THREAD_ID = ThreadId.make("thread-1");
@@ -47,7 +55,13 @@ const processRunning = (pid: number) =>
     return stdout.trim() !== "" && !stdout.trim().startsWith("Z");
   }).pipe(Effect.orElseSucceed(() => false));
 
-const fixture = (scripts: (out: string) => ReadonlyArray<ProjectScript>, timeoutMs = 60_000) =>
+const fixture = (
+  scripts: (out: string) => ReadonlyArray<ProjectScript>,
+  timeoutMs = 60_000,
+  pods: Layer.Layer<
+    PodRuntimeService.PodRuntimeService | WorkspaceExecutionTarget.WorkspaceExecutionTarget
+  > = layerWithoutPods,
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const git = yield* GitVcsDriver.GitVcsDriver;
@@ -67,7 +81,7 @@ const fixture = (scripts: (out: string) => ReadonlyArray<ProjectScript>, timeout
     const project = { id: PROJECT_ID, workspaceRoot: repo, scripts: scripts(out) };
     const projectWhen = (matches: boolean) =>
       Effect.succeed(matches ? Option.some(project) : Option.none());
-    const context = yield* Layer.build(WorktreeLifecycle.layer).pipe(
+    const context = yield* Layer.build(WorktreeLifecycle.layer.pipe(Layer.provide(pods))).pipe(
       Effect.provideService(ProjectService.ProjectService, {
         getById: (id: ProjectId) => projectWhen(id === PROJECT_ID),
         getByWorkspaceRoot: (root: string) => projectWhen(root === repo),
@@ -224,7 +238,7 @@ describe("WorktreeLifecycle.remove", () => {
   // The timeout is the behavior under test, so these run on the real clock.
   // Rollbacks remove from uninterruptible error handlers, where it must still fire.
   it.live.each([
-    ["", (effect: Effect.Effect<void, GitCommandError>) => effect],
+    ["", (effect: Effect.Effect<void, GitCommandError | WorktreePodTeardownError>) => effect],
     [" in an uninterruptible region", Effect.uninterruptible],
   ] as const)(
     "kills a script that outlives the timeout%s, with its children, and removes anyway",
@@ -342,7 +356,11 @@ describe("WorktreeLifecycle.remove", () => {
           sweep: { cleanUntrackedFiles: true },
         })
         .pipe(Effect.flip);
-      assert.strictEqual(failure.command, "git worktree remove");
+      assert.strictEqual(failure._tag, "GitCommandError");
+      assert.strictEqual(
+        failure._tag === "GitCommandError" && failure.command,
+        "git worktree remove",
+      );
       assert.isTrue(yield* t.fs.exists(`${t.worktree}/tracked.txt`));
       assert.isFalse(yield* t.fs.exists(`${t.worktree}/scratch.log`));
     }).pipe(Effect.provide(testLayer), Effect.scoped),
@@ -370,5 +388,184 @@ describe("WorktreeLifecycle.remove", () => {
         "workspace/WorktreeLifecycle.ts",
       ]);
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
+/**
+ * A pod that records what it is asked to do; any worktree it is asked about is
+ * its own. The pod runtime itself is tested in PodRuntimeService.test.ts.
+ */
+const fakePod = (options: {
+  readonly scriptExitCode?: number | null;
+  readonly startFails?: boolean;
+  readonly removeEndsIn?: PodRuntimeState;
+  readonly initialState?: PodRuntimeState;
+}) => {
+  const steps: Array<string> = [];
+  let state: PodRuntimeState = options.initialState ?? "stopped";
+  const podId = PodRuntimeId.make("pod-teardown1");
+  const snapshot = (worktreePath: string): PodRuntimeSnapshot => ({
+    id: podId,
+    projectId: PROJECT_ID,
+    worktreePath,
+    state,
+    services: [],
+    image: "image",
+    startedAt: null,
+    lastError: null,
+    containerIds: [],
+    volumeIds: [],
+    updatedAt: "2026-10-21T00:00:00.000Z",
+  });
+  let worktree = "";
+  const layer = Layer.mergeAll(
+    Layer.mock(PodRuntimeService.PodRuntimeService)({
+      forPath: (path, lookup) =>
+        Effect.sync(() => {
+          worktree = path;
+          return state === "removed" && lookup?.includeRemoved !== true
+            ? undefined
+            : snapshot(path);
+        }),
+      ensureRunning: () =>
+        Effect.suspend(() => {
+          steps.push("start pod");
+          if (options.startFails)
+            return Effect.fail(
+              new PodRuntimeError({ reason: "invalid-state", podId, state: "start_failed" }),
+            );
+          state = "running";
+          return Effect.succeed(snapshot(worktree));
+        }),
+      remove: (input) =>
+        Effect.sync(() => {
+          steps.push(input.force === true ? "remove pod anyway" : "remove pod");
+          state = input.force === true ? "removed" : (options.removeEndsIn ?? "removed");
+          return snapshot(worktree);
+        }),
+      awaitSettled: () => Effect.sync(() => snapshot(worktree)),
+      releaseWorktree: () => Effect.sync(() => steps.push("release path")),
+    }),
+    Layer.mock(WorkspaceExecutionTarget.WorkspaceExecutionTarget)({
+      resolve: (path) =>
+        Effect.succeed({ type: "pod", podId, state, worktreePath: path, dockerHost: "" }),
+      launch: () => {
+        throw new Error("teardown never opens a terminal");
+      },
+      exec: (_target, spec) =>
+        Effect.sync(() => {
+          steps.push(`script in pod: ${spec.command.join(" ")}`);
+          const exitCode = options.scriptExitCode === undefined ? 0 : options.scriptExitCode;
+          return { exitCode, timedOut: exitCode === null };
+        }),
+    }),
+  );
+  return { steps, layer };
+};
+
+describe("WorktreeLifecycle.remove for a pod's worktree", () => {
+  it.effect("runs the script in the pod, then removes the pod, then the worktree", () =>
+    Effect.gen(function* () {
+      const pod = fakePod({});
+      const t = yield* fixture(() => [teardown("docker compose down")], 60_000, pod.layer);
+      yield* t.lifecycle.remove({
+        projectRoot: t.repo,
+        worktreePath: t.worktree,
+        force: true,
+        projectId: PROJECT_ID,
+      });
+      assert.deepStrictEqual(pod.steps, [
+        "start pod",
+        "script in pod: sh -c docker compose down",
+        "remove pod",
+        "release path",
+      ]);
+      assert.isFalse(yield* t.fs.exists(t.worktree));
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("removes a pod without a teardown script without starting it", () =>
+    Effect.gen(function* () {
+      const pod = fakePod({});
+      const t = yield* fixture(() => [], 60_000, pod.layer);
+      yield* t.lifecycle.remove({ projectRoot: t.repo, worktreePath: t.worktree, force: true });
+      assert.deepStrictEqual(pod.steps, ["remove pod", "release path"]);
+      assert.isFalse(yield* t.fs.exists(t.worktree));
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("removes anyway: no script, and the pod is forgotten even if Docker refuses", () =>
+    Effect.gen(function* () {
+      const pod = fakePod({ removeEndsIn: "stop_failed" });
+      const t = yield* fixture(() => [teardown("docker compose down")], 60_000, pod.layer);
+      yield* t.lifecycle.remove({
+        projectRoot: t.repo,
+        worktreePath: t.worktree,
+        force: true,
+        projectId: PROJECT_ID,
+        skipPodTeardown: true,
+      });
+      assert.deepStrictEqual(pod.steps, ["remove pod anyway", "release path"]);
+      assert.isFalse(yield* t.fs.exists(t.worktree));
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("never runs a pod's teardown script on the host once its pod is gone", () =>
+    Effect.gen(function* () {
+      const pod = fakePod({ initialState: "removed" });
+      const t = yield* fixture(
+        (out) => [teardown(`touch ${quote(`${out}/ran-on-host`)}`)],
+        60_000,
+        pod.layer,
+      );
+      yield* t.lifecycle.remove({
+        projectRoot: t.repo,
+        worktreePath: t.worktree,
+        force: true,
+        projectId: PROJECT_ID,
+      });
+      assert.deepStrictEqual(pod.steps, ["release path"]);
+      assert.strictEqual(yield* t.readOut("ran-on-host"), null);
+      assert.isFalse(yield* t.fs.exists(t.worktree));
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect.each([
+    [
+      "the script fails in the pod",
+      { scriptExitCode: 3 },
+      "script",
+      ["start pod", "script in pod: sh -c docker compose down"],
+    ],
+    [
+      "the script times out in the pod",
+      { scriptExitCode: null },
+      "script",
+      ["start pod", "script in pod: sh -c docker compose down"],
+    ],
+    ["the pod cannot start for its script", { startFails: true }, "start", ["start pod"]],
+    [
+      "the pod cannot be removed",
+      { removeEndsIn: "stop_failed" },
+      "remove",
+      ["start pod", "script in pod: sh -c docker compose down", "remove pod"],
+    ],
+  ] as const)("keeps the worktree when %s", ([, options, step, steps]) =>
+    Effect.gen(function* () {
+      const pod = fakePod(options);
+      const t = yield* fixture(() => [teardown("docker compose down")], 60_000, pod.layer);
+      const failure = yield* t.lifecycle
+        .remove({
+          projectRoot: t.repo,
+          worktreePath: t.worktree,
+          force: true,
+          projectId: PROJECT_ID,
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "WorktreePodTeardownError");
+      assert.strictEqual(failure._tag === "WorktreePodTeardownError" && failure.step, step);
+      assert.deepStrictEqual(pod.steps, [...steps]);
+      assert.isTrue(yield* t.fs.exists(`${t.worktree}/tracked.txt`));
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 });
