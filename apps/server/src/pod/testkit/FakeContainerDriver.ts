@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 
 import {
+  type ContainerInspection,
   ContainerDriver,
   ContainerDriverError,
   type ContainerDriverOperation,
@@ -38,7 +39,11 @@ export const makeFakeContainerDriver = () => {
   let failWhen: (call: FakeCall) => boolean = () => false;
   let dieWhen: (call: FakeCall) => boolean = () => false;
   let execExitCode: (call: FakeCall) => number | null = () => 0;
-  let network: PodNetworkInfo = { subnet: "172.18.0.0/16", gateway: "172.18.0.1" };
+  let podNetwork: PodNetworkInfo = { subnet: "172.18.0.0/16", gateway: "172.18.0.1" };
+  let containerLogs: (name: string) => string = () => "";
+  let execOutput: (call: FakeCall) => string = () => "";
+  /** Containers other than the pod's, such as a proxy, as `docker inspect` reports them. */
+  const inspections = new Map<string, ContainerInspection>();
 
   const hostState = (host: string) => {
     const existing = hosts.get(host);
@@ -106,7 +111,7 @@ export const makeFakeContainerDriver = () => {
           })),
         ),
       ensureNetwork: (name) => record("network", name).pipe(Effect.asVoid),
-      inspectNetwork: (name) => record("network", name).pipe(Effect.map(() => network)),
+      inspectNetwork: (name) => record("network", name).pipe(Effect.map(() => podNetwork)),
       createVolume: ({ name, labels }) =>
         record("createVolume", name).pipe(
           Effect.tap(() => Effect.sync(() => state.volumes.set(name, { ...labels }))),
@@ -149,7 +154,7 @@ export const makeFakeContainerDriver = () => {
         record("exec", id, spec.command).pipe(
           Effect.map((call) => {
             const exitCode = execExitCode(call);
-            return { exitCode, timedOut: exitCode === null };
+            return { exitCode, timedOut: exitCode === null, outputTail: execOutput(call) };
           }),
         ),
       execLaunch: (id, spec) => ({
@@ -157,6 +162,20 @@ export const makeFakeContainerDriver = () => {
         args: ["exec", id, ...spec.command],
         env: { ...spec.env },
       }),
+      inspect: (nameOrId) =>
+        record("inspect", nameOrId).pipe(
+          Effect.map(() => {
+            const seeded = inspections.get(nameOrId);
+            if (seeded !== undefined) return seeded;
+            const container = find(nameOrId);
+            return container === undefined
+              ? null
+              : { status: container.status, networks: {}, mounts: [] };
+          }),
+        ),
+      connectNetwork: (network, containerId) =>
+        record("connect", containerId, [network]).pipe(Effect.asVoid),
+      logs: (id) => record("logs", id).pipe(Effect.map((call) => containerLogs(call.target ?? id))),
       memoryUsage: (ids) =>
         record("stats", null).pipe(
           Effect.map(
@@ -199,7 +218,20 @@ export const makeFakeContainerDriver = () => {
     },
     /** What every pod network reports as its subnet and gateway. */
     setNetwork: (info: PodNetworkInfo) => {
-      network = info;
+      podNetwork = info;
+    },
+    /** What a container that is not a pod's, such as the hostname proxy, inspects as. */
+    seedInspection: (name: string, inspection: ContainerInspection | null) => {
+      if (inspection === null) inspections.delete(name);
+      else inspections.set(name, inspection);
+    },
+    /** The output tail an exec reports. */
+    execOutput: (resolve: (call: FakeCall) => string) => {
+      execOutput = resolve;
+    },
+    /** What `docker logs` prints for a container, by name. */
+    containerLogs: (resolve: (name: string) => string) => {
+      containerLogs = resolve;
     },
   };
 };

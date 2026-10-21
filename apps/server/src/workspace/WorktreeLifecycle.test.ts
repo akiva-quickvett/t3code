@@ -456,7 +456,7 @@ const fakePod = (options: {
         Effect.sync(() => {
           steps.push(`script in pod: ${spec.command.join(" ")}`);
           const exitCode = options.scriptExitCode === undefined ? 0 : options.scriptExitCode;
-          return { exitCode, timedOut: exitCode === null };
+          return { exitCode, timedOut: exitCode === null, outputTail: "" };
         }),
     }),
   );

@@ -2,6 +2,7 @@ import {
   type PodRuntimeAction,
   podRuntimeActions,
   podRuntimeStatePresentation,
+  podServiceLinks,
 } from "@t3tools/client-runtime/state/pod-runtime";
 import type {
   EnvironmentId,
@@ -14,7 +15,9 @@ import { formatBytes } from "../../lib/formatBytes";
 import { useEnvironmentSupportsPodRuntime } from "../../state/podRuntime";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
+import { PodRuntimeWarningList } from "../pods/PodRuntimeWarnings";
 import { usePodActions } from "../pods/usePodActions";
+import { useOpenPodService } from "../pods/useOpenPodService";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -32,7 +35,37 @@ function memoryLabel(status: PodRuntimeStatus, podId: string) {
   return bytes == null ? "—" : formatBytes(bytes);
 }
 
+/** Each running service opens in an environment browser tab; its tailnet address is shown to copy. */
+function PodServices(props: {
+  readonly environmentId: EnvironmentId;
+  readonly pod: PodRuntimeSnapshot;
+}) {
+  const services = useOpenPodService(props.environmentId);
+  const links = podServiceLinks(props.pod);
+  if (links.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 text-xs">
+      {links.map((link) => (
+        <span key={link.name} className="inline-flex items-center gap-1">
+          <Button
+            size="xs"
+            variant="link"
+            disabled={!services.allowed}
+            onClick={() => void services.open(props.pod, link, null)}
+          >
+            {link.name}
+          </Button>
+          {link.tailnetUrl === undefined ? null : (
+            <span className="select-all font-mono text-muted-foreground">{link.tailnetUrl}</span>
+          )}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function PodRow(props: {
+  readonly environmentId: EnvironmentId;
   readonly pod: PodRuntimeSnapshot;
   readonly memory: string;
   readonly onAction: (action: PodRuntimeAction) => void;
@@ -52,6 +85,10 @@ function PodRow(props: {
           {props.pod.id}
           {props.pod.lastError === null ? null : ` · ${props.pod.lastError.message}`}
         </div>
+        {props.pod.hostnameProblem === undefined ? null : (
+          <div className="text-warning text-xs">{props.pod.hostnameProblem}</div>
+        )}
+        <PodServices environmentId={props.environmentId} pod={props.pod} />
       </div>
       <Badge
         variant={
@@ -133,7 +170,8 @@ export function PodDiagnostics(props: { readonly environmentId: EnvironmentId | 
       : null,
   );
   const { run, allowed } = usePodActions(props.environmentId);
-  if (!supported) return null;
+  const environmentId = props.environmentId;
+  if (!supported || environmentId === null) return null;
   const data = status.data;
   const empty = data !== null && data.pods.length === 0 && data.orphans.length === 0;
   const act = (pod: PodRuntimeSnapshot, action: PodRuntimeAction) =>
@@ -146,6 +184,11 @@ export function PodDiagnostics(props: { readonly environmentId: EnvironmentId | 
   };
   return (
     <SettingsSection title="Pods">
+      {data?.warnings === undefined ? null : (
+        <div className="px-4 pt-3 sm:px-5">
+          <PodRuntimeWarningList warnings={data.warnings} />
+        </div>
+      )}
       {data === null ? (
         <p className="px-4 py-3 text-muted-foreground text-xs sm:px-5">
           {status.error ?? "Loading pods…"}
@@ -161,6 +204,7 @@ export function PodDiagnostics(props: { readonly environmentId: EnvironmentId | 
           {data.pods.map((pod) => (
             <PodRow
               key={pod.id}
+              environmentId={environmentId}
               pod={pod}
               memory={memoryLabel(data, pod.id)}
               allowed={allowed}

@@ -79,7 +79,11 @@ const makeLayer = (input: {
       ),
     launch: () => ({ command: "docker", args: [], env: {} }),
     exec: (_target, spec) =>
-      Effect.succeed({ exitCode: mounted.has(spec.command[2] ?? "") ? 0 : 1, timedOut: false }),
+      Effect.succeed({
+        exitCode: mounted.has(spec.command[2] ?? "") ? 0 : 1,
+        timedOut: false,
+        outputTail: "",
+      }),
   });
   const layer = layerPlacement.pipe(
     Layer.provide(Layer.succeed(WorkspaceExecutionTarget.WorkspaceExecutionTarget, targets)),
@@ -325,7 +329,7 @@ const localProcessLayer = (procRoot: string) => {
         child.once("exit", (code) => {
           stops.push({ mode: spec.command[4], user: spec.user, exitCode: code });
           stopped();
-          resume(Effect.succeed({ exitCode: code, timedOut: false }));
+          resume(Effect.succeed({ exitCode: code, timedOut: false, outputTail: "" }));
         });
       }),
   });
@@ -571,7 +575,7 @@ describe("pod sweep", () => {
                   daemonMessage: null,
                 }),
               )
-            : Effect.succeed({ exitCode: 3, timedOut: false });
+            : Effect.succeed({ exitCode: 3, timedOut: false, outputTail: "" });
         }),
     });
     const observed = (occurredAt: string) =>

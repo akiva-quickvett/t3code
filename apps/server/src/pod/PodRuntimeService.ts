@@ -12,6 +12,7 @@ import {
   type PodRuntimeStatus,
   type PodRuntimeStatusInput,
   type PodRuntimeStreamEvent,
+  type PodRuntimeWarning,
   type ProjectId,
   type T3ProjectFilePod,
 } from "@t3tools/contracts";
@@ -30,10 +31,12 @@ import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as TxRef from "effect/TxRef";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as PortScanner from "../preview/PortScanner.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -41,17 +44,35 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ContainerDriver from "./ContainerDriver.ts";
-import { POD_ENVIRONMENT_LABEL, POD_LABEL, planPod } from "./PodContainerPlan.ts";
+import {
+  parsePodPortsLabel,
+  POD_ENVIRONMENT_LABEL,
+  POD_LABEL,
+  POD_PORTS_LABEL,
+  planPod,
+  podContainerNames,
+  podEnvironmentStem,
+  podNameStem,
+} from "./PodContainerPlan.ts";
+import { renderPodEnv, writePodDotEnv } from "./PodEnv.ts";
+import * as PodHostnameRouter from "./PodHostnameRouter.ts";
+import * as PodHostPorts from "./PodHostPorts.ts";
 import {
   runPodOperation,
   type PodOperationContext,
   type PodOperationResult,
+  PodStepError,
 } from "./PodOperations.ts";
 import { resolvePodProviderMounts } from "./PodProviderMounts.ts";
 import {
+  boundedPodMessage,
   isPodTransitional,
+  POD_LOOPBACK_ADDRESS,
+  POD_OPERATION_RULES,
   type PodObservation,
   planPodCompletion,
+  podHostnameUrl,
+  podServiceUrl,
   planPodObservation,
   planPodRequest,
   type PodRuntimeEvent,
@@ -121,6 +142,9 @@ export class PodRuntimeService extends Context.Service<
 >()("t3/pod/PodRuntimeService") {}
 
 const POD_SHELL_TERMINAL_ID = "pod-shell";
+/** Docker's default endpoint or a socket on this machine. */
+const isLocalDockerHost = (dockerHost: string) =>
+  dockerHost.length === 0 || dockerHost.startsWith("unix://");
 const OPERATION_CRASHED = "The pod operation stopped unexpectedly; see the server log.";
 const isPodRuntimeId = Schema.is(PodRuntimeId);
 const EMPTY_POD_CONFIG: T3ProjectFilePod = { services: {} };
@@ -129,6 +153,8 @@ const STARTS_CONTAINERS = new Set<PodRuntimeOperation>([
   "recreate",
   "recreateAgentContainer",
 ]);
+/** These create the pod's daemon afresh, so its ports and `.env` are decided again. */
+const BUILDS_FRESH = new Set<PodRuntimeOperation>(["create", "recreate"]);
 
 interface QueuedOperation {
   readonly podId: PodRuntimeId;
@@ -144,6 +170,9 @@ const make = Effect.gen(function* () {
   const projectFiles = yield* T3ProjectFileLoader.T3ProjectFileLoader;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const terminals = yield* TerminalManager.TerminalManager;
+  const portDiscovery = yield* PortScanner.PortDiscovery;
+  const hostNetwork = yield* PodHostPorts.PodHostNetwork;
+  const router = yield* PodHostnameRouter.PodHostnameRouter;
   const environmentId = yield* (yield* ServerEnvironment.ServerEnvironmentIdentity)
     .getEnvironmentId;
   const crypto = yield* Crypto.Crypto;
@@ -159,6 +188,9 @@ const make = Effect.gen(function* () {
   // for mid-start is recorded at once and runs when the start returns.
   const stateLocks = yield* KeyedLock.make<PodRuntimeId>();
   const operationLocks = yield* KeyedLock.make<PodRuntimeId>();
+  // Host ports are shared by every pod: one allocation at a time, so two pods
+  // starting together never pick the same port.
+  const allocationLock = yield* Semaphore.make(1);
   const workerScope = yield* Effect.scope;
   const outstanding = yield* TxRef.make(0);
   // Kept per Docker host, so a host that cannot answer keeps its last known orphans.
@@ -175,8 +207,30 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  /**
+   * The preview's server list shows a pod's services while they can open: a
+   * hostname only while its route is in place. It is probed at its loopback
+   * port, since the server's own fetch does not trust the proxy's CA.
+   */
+  const publishToDiscovery = (record: PodRuntimeRecord) => {
+    const owner = `pod:${record.snapshot.id}`;
+    const urls = record.snapshot.services.flatMap(
+      (service): ReadonlyArray<string | { readonly url: string; readonly probeUrl: string }> => {
+        const hostPort = record.hostPorts?.[service.name];
+        if (service.url === null || hostPort === undefined) return [];
+        const loopback = podServiceUrl(POD_LOOPBACK_ADDRESS, hostPort);
+        if (service.url === loopback) return [loopback];
+        return record.routed === true ? [{ url: service.url, probeUrl: loopback }] : [];
+      },
+    );
+    return portDiscovery.registerConfiguredUrls({ owner, urls });
+  };
+
   const commit = (podId: PodRuntimeId, events: ReadonlyArray<PodRuntimeEvent>) =>
-    store.commit(podId, events).pipe(Effect.catch(unavailable(podId)));
+    store.commit(podId, events).pipe(
+      Effect.tap((record) => (record === undefined ? Effect.void : publishToDiscovery(record))),
+      Effect.catch(unavailable(podId)),
+    );
 
   const requireRecord = (podId: PodRuntimeId) =>
     store
@@ -230,8 +284,286 @@ const make = Effect.gen(function* () {
     );
   };
 
+  /**
+   * Ports other servers' pods, and orphans, hold on the same daemon, stopped
+   * ones included, where a bind probe would see nothing.
+   */
+  const portsOnDaemon = (podId: PodRuntimeId, dockerHost: string) =>
+    driver
+      .forHost(dockerHost)
+      .list(POD_LABEL)
+      .pipe(
+        Effect.map(({ containers }) =>
+          containers.flatMap((container) =>
+            container.labels[POD_LABEL] === podId &&
+            container.labels[POD_ENVIRONMENT_LABEL] === environmentId
+              ? []
+              : parsePodPortsLabel(container.labels[POD_PORTS_LABEL]),
+          ),
+        ),
+        Effect.catch((error) =>
+          Effect.logWarning("could not list pod ports on the Docker host", {
+            operation: error.operation,
+          }).pipe(Effect.as([])),
+        ),
+      );
+
+  /** The record's routing as `problem` and `routed` leave it; null when that is already so. */
+  const routesUpdated = (
+    record: PodRuntimeRecord,
+    routed: boolean,
+    problem: string | null,
+    occurredAt: string,
+  ): PodRuntimeEvent | null => {
+    const bounded = problem === null ? undefined : boundedPodMessage(problem);
+    if ((record.routed === true) === routed && record.snapshot.hostnameProblem === bounded)
+      return null;
+    return {
+      type: "pod.routes-updated",
+      podId: record.snapshot.id,
+      occurredAt,
+      routed,
+      problem: bounded ?? null,
+    };
+  };
+
+  /**
+   * Whether a daemon about to be built serves hostnames: only when the project
+   * asks for them and the host's proxy is there; otherwise ports, and why.
+   */
+  const decideHostnames = (podId: PodRuntimeId, dockerHost: string, config: T3ProjectFilePod) =>
+    Effect.gen(function* () {
+      if (config.hostnames !== true) return { type: "ports" as const, problem: null };
+      const { podRuntime } = yield* settingsFor(null);
+      const proxy = router.resolve(podRuntime.hostnameProxy);
+      const prepared = yield* router.prepare(dockerHost, proxy);
+      if (prepared.type === "unavailable")
+        return {
+          type: "ports" as const,
+          problem: `Hostnames are off for this pod: ${prepared.reason}. Its services use ports; Recreate the pod once that is fixed.`,
+        };
+      const stem = podNameStem(podId, environmentId);
+      return {
+        type: "hostnames" as const,
+        dnsAddress: prepared.dnsAddress,
+        hostnames: Object.fromEntries(
+          Object.keys(config.services).map((name) => [
+            name,
+            PodHostnameRouter.podServiceHostname(stem, name, proxy.domain),
+          ]),
+        ),
+      };
+    });
+
+  /**
+   * Hostnames are decided when the daemon is built, so a pod built for ports
+   * says why it ignores a later `hostnames: true` until it is recreated, and
+   * stops saying so once t3.json no longer asks.
+   */
+  const noteHostnamesSetting = (queued: PodRuntimeRecord, config: T3ProjectFilePod) =>
+    Effect.gen(function* () {
+      if (queued.hostnames !== undefined) return queued;
+      const asks = config.hostnames === true;
+      const noted = queued.snapshot.hostnameProblem !== undefined;
+      if (asks === noted) return queued;
+      const podId = queued.snapshot.id;
+      return yield* stateLocks.withLock(
+        podId,
+        Effect.gen(function* () {
+          const current = yield* requireRecord(podId);
+          const event = routesUpdated(
+            current,
+            current.routed === true,
+            asks
+              ? "This pod was built for ports; Recreate it to serve its services on hostnames."
+              : null,
+            yield* nowIso,
+          );
+          return event === null ? current : ((yield* commit(podId, [event])) ?? current);
+        }),
+      );
+    });
+
+  /**
+   * Keeps each service's host port and gives new services free ones, under the
+   * allocation lock so the ports other pods hold are read and claimed in one step.
+   */
+  const allocatePorts = (podId: PodRuntimeId, config: T3ProjectFilePod) =>
+    allocationLock.withPermits(1)(
+      Effect.gen(function* () {
+        const services = config.services;
+        // Docker is asked outside the pod's state lock, so a slow daemon never
+        // holds up this pod's Stop or Remove; the driver's own timeout bounds it.
+        const dockerHost = (yield* requireRecord(podId)).dockerHost;
+        const daemonTaken = yield* portsOnDaemon(podId, dockerHost);
+        const hostnames = yield* decideHostnames(podId, dockerHost, config);
+        return yield* stateLocks.withLock(
+          podId,
+          Effect.gen(function* () {
+            const current = yield* requireRecord(podId);
+            const taken = new Set<number>(daemonTaken);
+            for (const other of yield* store.list)
+              if (other.snapshot.id !== podId && other.snapshot.state !== "removed")
+                for (const port of Object.values(other.hostPorts ?? {})) taken.add(port);
+            const { podRuntime } = yield* settingsFor(current.snapshot.projectId);
+            const tailnetAddress = podRuntime.publishOnTailnet
+              ? yield* hostNetwork.tailnetAddress
+              : null;
+            if (podRuntime.publishOnTailnet && tailnetAddress === null)
+              yield* Effect.logWarning(
+                "no tailnet address; pod services are published on loopback only",
+                {
+                  podId,
+                },
+              );
+            const allocated = yield* PodHostPorts.allocatePodHostPorts({
+              services,
+              previous: current.hostPorts ?? {},
+              taken,
+              addresses: [
+                POD_LOOPBACK_ADDRESS,
+                ...(tailnetAddress === null ? [] : [tailnetAddress]),
+              ],
+            }).pipe(Effect.provideService(PodHostPorts.PodHostNetwork, hostNetwork));
+            const occurredAt = yield* nowIso;
+            const problem = routesUpdated(
+              current,
+              current.routed === true,
+              hostnames.type === "ports" ? hostnames.problem : null,
+              occurredAt,
+            );
+            const next = yield* commit(podId, [
+              {
+                type: "pod.ports-allocated",
+                podId,
+                occurredAt,
+                services: allocated,
+                tailnetAddress,
+                ...(hostnames.type === "hostnames"
+                  ? { hostnames: hostnames.hostnames, dnsAddress: hostnames.dnsAddress }
+                  : {}),
+              },
+              ...(problem === null ? [] : [problem]),
+            ]);
+            return next ?? current;
+          }),
+        );
+      }),
+    );
+
+  /**
+   * The services' side of an operation. A fresh daemon gets its ports and its
+   * `.env` decided again; every operation gets the rendered env, what the
+   * daemon publishes, and the check that its ports are still free.
+   */
+  const prepareServices = Effect.fn("PodRuntimeService.prepareServices")(function* (
+    queued: PodRuntimeRecord,
+    operation: PodRuntimeOperation,
+    config: T3ProjectFilePod,
+  ) {
+    // Changes to the t3.json services take effect when the daemon is created
+    // again. A retried create reuses a daemon its failed attempt left, with that
+    // attempt's ports; Recreate applies service changes made in between.
+    const record = BUILDS_FRESH.has(operation)
+      ? yield* allocatePorts(queued.snapshot.id, config)
+      : yield* noteHostnamesSetting(queued, config);
+    const published = record.snapshot.services.flatMap(({ name, port }) => {
+      const hostPort = record.hostPorts?.[name];
+      return hostPort === undefined ? [] : [{ name, port, hostPort }];
+    });
+    const addresses = [
+      POD_LOOPBACK_ADDRESS,
+      ...(record.tailnetAddress === undefined ? [] : [record.tailnetAddress]),
+    ];
+    const rendered = renderPodEnv(
+      config.env ?? {},
+      published.map((service) => {
+        const hostname = record.hostnames?.[service.name];
+        return hostname === undefined
+          ? {
+              name: service.name,
+              url: podServiceUrl(POD_LOOPBACK_ADDRESS, service.hostPort),
+              port: service.hostPort,
+            }
+          : { name: service.name, url: podHostnameUrl(hostname), port: 443 };
+      }),
+      new Set(
+        Object.keys(config.services).filter((name) => record.hostPorts?.[name] === undefined),
+      ),
+    );
+    // Taking the stack down never waits on a t3.json edit: its compose runs
+    // with the raw values when they no longer render.
+    const env =
+      operation === "stop" || operation === "remove"
+        ? yield* rendered.pipe(Effect.orElseSucceed(() => config.env ?? {}))
+        : yield* rendered;
+    if (BUILDS_FRESH.has(operation))
+      yield* writePodDotEnv(record.snapshot.worktreePath, env).pipe(
+        Effect.provide(services),
+        Effect.mapError(
+          (cause) =>
+            new PodStepError({
+              step: "Writing the pod's .env",
+              exitCode: null,
+              timedOut: false,
+              daemonMessage: cause._tag === "PodEnvError" ? cause.message : null,
+              cause,
+            }),
+        ),
+      );
+    const checkHostPorts = PodHostPorts.findPodPortClash(published, addresses).pipe(
+      Effect.provideService(PodHostPorts.PodHostNetwork, hostNetwork),
+      Effect.flatMap((clash) =>
+        clash === null
+          ? Effect.void
+          : Effect.fail(
+              new PodStepError({
+                step: "Publishing the pod's services",
+                exitCode: null,
+                timedOut: false,
+                daemonMessage: clash,
+              }),
+            ),
+      ),
+    );
+    return {
+      record,
+      env,
+      publish: addresses.flatMap((hostIp) =>
+        published.map((service) => ({
+          hostIp,
+          hostPort: service.hostPort,
+          containerPort: service.port,
+        })),
+      ),
+      checkHostPorts,
+    };
+  });
+
+  /**
+   * Explicit resolvers for the daemon and its stack. Docker's own DNS on the
+   * pods network can fail where the host's resolvers answer, so a pod of ports
+   * on this machine's daemon asks the host's upstreams unless the setting names
+   * others; a remote daemon's network may not reach them. A pod in hostname
+   * mode asks the proxy's DNS server first, which answers its domain and
+   * forwards the rest.
+   */
+  const podResolvers = (
+    dockerHost: string,
+    proxyDns: string | undefined,
+    configured: ReadonlyArray<string>,
+  ) =>
+    proxyDns !== undefined
+      ? Effect.succeed([proxyDns, ...configured])
+      : configured.length > 0
+        ? Effect.succeed(configured)
+        : isLocalDockerHost(dockerHost)
+          ? hostNetwork.resolvConf.pipe(Effect.map(PodHostPorts.upstreamNameservers))
+          : Effect.succeed([]);
+
   const operationContext = Effect.fn("PodRuntimeService.operationContext")(function* (
     record: PodRuntimeRecord,
+    operation: PodRuntimeOperation,
   ) {
     const { snapshot } = record;
     const root = yield* projectRoot(snapshot.projectId);
@@ -239,6 +571,9 @@ const make = Effect.gen(function* () {
     const config =
       (yield* loadPodConfig(snapshot.worktreePath, ...(root === undefined ? [] : [root]))) ??
       EMPTY_POD_CONFIG;
+    const podServices = yield* prepareServices(record, operation, config);
+    const hostnameMode = podServices.record.hostnames !== undefined;
+    const proxy = router.resolve(podRuntime.hostnameProxy);
     const gitCommonDir = yield* git
       .execute({
         operation: "PodRuntimeService.gitCommonDir",
@@ -265,7 +600,14 @@ const make = Effect.gen(function* () {
       gitConfigPath: yield* existingPath(path.join(homeDirectory, ".gitconfig")),
       ghConfigDir: yield* existingPath(path.join(homeDirectory, ".config", "gh")),
       seeds: yield* seedsFor(root),
-      podEnv: config.env ?? {},
+      podEnv: podServices.env,
+      publish: podServices.publish,
+      dns: yield* podResolvers(
+        record.dockerHost,
+        podServices.record.dnsAddress,
+        podRuntime.dnsServers,
+      ),
+      proxyCaRoot: hostnameMode ? proxy.caRootPath : null,
     });
     return {
       podId: snapshot.id,
@@ -273,8 +615,10 @@ const make = Effect.gen(function* () {
       host: driver.forHost(record.dockerHost),
       plan,
       network: podRuntime.network,
-      config,
+      config: { ...config, env: podServices.env },
       worktreePath: snapshot.worktreePath,
+      checkHostPorts: podServices.checkHostPorts,
+      proxyNetwork: hostnameMode ? proxy.network : null,
     } satisfies PodOperationContext;
   });
 
@@ -282,7 +626,12 @@ const make = Effect.gen(function* () {
    * Records how a queued operation ended. Retried, because a transitional
    * state left behind would have no way out until the next restart.
    */
-  const complete = (item: QueuedOperation, failure: string | null, result?: PodOperationResult) =>
+  const complete = (
+    item: QueuedOperation,
+    failure: string | null,
+    result?: PodOperationResult,
+    routes: PodRuntimeEvent | null = null,
+  ) =>
     stateLocks
       .withLock(
         item.podId,
@@ -301,7 +650,8 @@ const make = Effect.gen(function* () {
                 : { type: "failed", message: failure },
             yield* nowIso,
           );
-          if (event !== null) yield* commit(item.podId, [event]);
+          if (event !== null)
+            yield* commit(item.podId, routes === null ? [event] : [event, routes]);
         }),
       )
       .pipe(Effect.retry({ schedule: Schedule.exponential("500 millis"), times: 5 }));
@@ -310,7 +660,7 @@ const make = Effect.gen(function* () {
     const record = yield* store.get(item.podId);
     // A later request moved the pod on; this operation no longer applies.
     if (record === undefined || isStale(record, item.operation)) return;
-    const outcome = yield* operationContext(record).pipe(
+    const outcome = yield* operationContext(record, item.operation).pipe(
       Effect.flatMap((context) => runPodOperation(item.operation, context)),
       Effect.result,
     );
@@ -320,10 +670,76 @@ const make = Effect.gen(function* () {
         operation: item.operation,
         error: outcome.failure._tag,
       });
-      return yield* complete(item, outcome.failure.message);
+      const routes = yield* syncRoutes(item.podId, null);
+      return yield* complete(item, outcome.failure.message, undefined, routes);
     }
-    yield* complete(item, null, outcome.success);
+    const routes = yield* syncRoutes(item.podId, item.operation);
+    yield* complete(item, null, outcome.success, routes);
   });
+
+  /**
+   * Puts the pod's proxy route in place when `succeeded` leaves it running in
+   * hostname mode, and takes it away otherwise, before the outcome commits, so
+   * a link never names a hostname without a route or a route outlives its pod.
+   * A pod of ports only has no route and costs nothing here.
+   */
+  const syncRoutes = (podId: PodRuntimeId, succeeded: PodRuntimeOperation | null) =>
+    Effect.gen(function* () {
+      const record = yield* store.get(podId);
+      if (record === undefined) return null;
+      if (succeeded !== null && isStale(record, succeeded)) return null;
+      const serves = succeeded !== null && POD_OPERATION_RULES[succeeded].success === "running";
+      return yield* routeRecord(record, serves);
+    });
+
+  const routeRecord = (record: PodRuntimeRecord, serves: boolean) =>
+    Effect.gen(function* () {
+      const hostnames = record.hostnames;
+      if (hostnames === undefined && record.routed !== true) return null;
+      const podId = record.snapshot.id;
+      const { podRuntime } = yield* settingsFor(null);
+      const proxy = router.resolve(podRuntime.hostnameProxy);
+      const stem = podNameStem(podId, environmentId);
+      const desired = serves && hostnames !== undefined;
+      const dind = podContainerNames(podId, environmentId).dind;
+      const failed = desired
+        ? yield* router.install({
+            dockerHost: record.dockerHost,
+            proxy,
+            stem,
+            upstreamContainer: dind,
+            routed: record.routed === true,
+            routes: record.snapshot.services.flatMap((service) => {
+              const hostname = hostnames[service.name];
+              return hostname === undefined
+                ? []
+                : [{ hostname, upstream: `${dind}:${service.port}` }];
+            }),
+          })
+        : yield* router.uninstall({
+            dockerHost: record.dockerHost,
+            proxy,
+            stem,
+            routed: record.routed === true,
+          });
+      if (failed !== null)
+        yield* Effect.logWarning("pod proxy route not updated", { podId, desired, reason: failed });
+      const problem =
+        failed === null
+          ? // A pod built for ports keeps saying why, though its old route is gone.
+            hostnames === undefined
+            ? (record.snapshot.hostnameProblem ?? null)
+            : null
+          : desired
+            ? `Its proxy route is not in place: ${failed}. Its hostnames will not open until the pod starts again with the route.`
+            : `Its proxy route could not be taken away: ${failed}.`;
+      return routesUpdated(
+        record,
+        desired ? failed === null : failed !== null,
+        problem,
+        yield* nowIso,
+      );
+    });
 
   const isStale = (record: PodRuntimeRecord, operation: PodRuntimeOperation) =>
     planPodCompletion(record, operation, { type: "failed", message: "" }, "") === null;
@@ -550,7 +966,50 @@ const make = Effect.gen(function* () {
       );
     }
     yield* refreshOrphans(owned);
+    yield* reconcileRoutes(owned);
   });
+
+  /**
+   * Startup only: every running pod in hostname mode gets its route back,
+   * every other pod loses its own, and route files named for this environment
+   * that no pod here owns are removed. A pod on a Docker host that did not
+   * answer keeps whatever it had.
+   */
+  const reconcileRoutes = (owned: Owned) =>
+    Effect.gen(function* () {
+      for (const { snapshot } of startupRecords) {
+        const podId = snapshot.id;
+        // The proxy is asked outside the state lock, so a slow reload never holds up a Stop.
+        yield* operationLocks.withLock(
+          podId,
+          Effect.gen(function* () {
+            const current = yield* store.get(podId);
+            if (current === undefined || !owned.answered.has(current.dockerHost)) return;
+            const event = yield* routeRecord(current, current.snapshot.state === "running");
+            if (event !== null)
+              yield* stateLocks.withLock(podId, commit(podId, [event]).pipe(Effect.ignore));
+          }),
+        );
+      }
+      const { podRuntime } = yield* settingsFor(null);
+      yield* router.prune({
+        dockerHost: podRuntime.dockerHost,
+        proxy: router.resolve(podRuntime.hostnameProxy),
+        prefix: podEnvironmentStem(environmentId),
+        // Read under the router's lock, so a pod that started meanwhile keeps its
+        // route. A live pod's own file is routeRecord's to keep or take away.
+        keep: store.list.pipe(
+          Effect.map(
+            (records) =>
+              new Set(
+                records
+                  .filter((record) => record.snapshot.state !== "removed")
+                  .map((record) => podNameStem(record.snapshot.id, environmentId)),
+              ),
+          ),
+        ),
+      });
+    });
 
   const removeOrphan = (podId: PodRuntimeId) =>
     Effect.gen(function* () {
@@ -620,6 +1079,23 @@ const make = Effect.gen(function* () {
       });
     });
 
+  /**
+   * Read on each status request, so it follows t3.json and settings edits.
+   * The projects are read only when Tailscale Serve holds :443.
+   */
+  const podWarnings = Effect.gen(function* () {
+    const none: ReadonlyArray<PodRuntimeWarning> = [];
+    if (!router.tailscaleServeOnProxyPort) return none;
+    const shells = yield* projects.listShells().pipe(Effect.orElseSucceed(() => []));
+    const { settings } = yield* settingsFor(null);
+    for (const shell of shells) {
+      if (!resolveProjectSettings(settings, shell.id).settings.podRuntime.enabled) continue;
+      if ((yield* loadPodConfig(shell.workspaceRoot))?.hostnames === true)
+        return ["tailscale-serve-443"] satisfies ReadonlyArray<PodRuntimeWarning>;
+    }
+    return none;
+  });
+
   const status: PodRuntimeService["Service"]["status"] = Effect.fn("PodRuntimeService.status")(
     function* (input) {
       const { podRuntime } = yield* settingsFor(input.projectId ?? null);
@@ -631,12 +1107,15 @@ const make = Effect.gen(function* () {
       // Docker is asked only when the Diagnostics screen polls.
       const owned = input.includeStats === true ? yield* listOwned : null;
       if (owned !== null) yield* refreshOrphans(owned);
+      // A project's own status, which the composer reads, never warns: it is per environment.
+      const warnings = input.projectId === undefined ? yield* podWarnings : [];
       return {
         enabled: podRuntime.enabled,
         pods: yield* liveSnapshots,
         orphans: orphans.map((entry) => entry.orphan),
         ...(projectConfigured === undefined ? {} : { projectConfigured }),
         ...(owned === null ? {} : { stats: yield* stats(owned) }),
+        ...(warnings.length === 0 ? {} : { warnings }),
       };
     },
   );
@@ -714,6 +1193,9 @@ const make = Effect.gen(function* () {
         .pipe(Effect.catch(unavailable(input.podId)));
       return { threadId: input.threadId, terminalId: POD_SHELL_TERMINAL_ID };
     });
+
+  // What the last run recorded as running; reconcile corrects it through `commit`.
+  yield* Effect.forEach(startupRecords, publishToDiscovery, { discard: true });
 
   yield* TxRef.update(outstanding, (count) => count + 1).pipe(Effect.tx);
   yield* reconcile.pipe(

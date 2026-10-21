@@ -59,6 +59,7 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BoxIcon,
+  GlobeIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronRightIcon,
@@ -83,6 +84,7 @@ import {
 } from "lucide-react";
 import { useWorktreePod } from "../state/podRuntime";
 import { usePodActions } from "./pods/usePodActions";
+import { useOpenPodService } from "./pods/useOpenPodService";
 import { requestThreadFindOpen } from "./chat/threadFindActionBus";
 import {
   useDeferredValue,
@@ -203,6 +205,7 @@ import {
   getCommandPaletteMode,
   ITEM_ICON_CLASS,
   buildPodActionItems,
+  buildPodServiceItems,
   RECENT_THREAD_LIMIT,
   reduceCommandPaletteUiState,
   type SearchOverlayMode,
@@ -758,6 +761,7 @@ function OpenCommandPaletteDialog(props: {
     useHandleNewThread();
   const activePod = useWorktreePod(activeThread?.environmentId ?? null, activeThread?.worktreePath);
   const podActions = usePodActions(activeThread?.environmentId ?? null);
+  const podServices = useOpenPodService(activeThread?.environmentId ?? null);
   const startTicketThread = useStartTicketThread();
   const paletteRouteTarget = useThreadRouteTarget();
   const projects = useProjects();
@@ -1867,6 +1871,12 @@ function OpenCommandPaletteDialog(props: {
         icon: <BoxIcon className={ITEM_ICON_CLASS} />,
         allowed: podActions.allowed,
         run: (action) => podActions.run(activePod.id, action, threadId),
+      }),
+      ...buildPodServiceItems({
+        pod: activePod,
+        icon: <GlobeIcon className={ITEM_ICON_CLASS} />,
+        allowed: podServices.allowed,
+        open: (link) => podServices.open(activePod, link, threadId),
       }),
     );
   }

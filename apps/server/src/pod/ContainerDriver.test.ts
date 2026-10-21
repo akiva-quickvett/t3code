@@ -11,21 +11,30 @@ import { planPod } from "./PodContainerPlan.ts";
 const HOST_DOCKER = "unix:///run/user/1000/docker.sock";
 
 /** Records what the driver hands the docker CLI; nothing is run. */
-const recordingDriver = () => {
+const recordingDriver = (
+  respond: (input: ProcessRunner.ProcessRunInput) => {
+    readonly stdout?: string;
+    readonly stderr?: string;
+    readonly code?: number;
+  } = () => ({}),
+) => {
   const runs: Array<ProcessRunner.ProcessRunInput> = [];
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) =>
       Effect.sync(() => {
         runs.push(input);
+        const response = respond(input);
         return {
+          // A pod network's inspect answers with its subnet and gateway.
           stdout:
-            input.args[0] === "network"
+            response.stdout ??
+            (input.args[0] === "network"
               ? JSON.stringify([
                   { IPAM: { Config: [{ Subnet: "172.18.0.0/16", Gateway: "172.18.0.1" }] } },
                 ])
-              : "container-id\n",
-          stderr: "",
-          code: 0 as never,
+              : "container-id\n"),
+          stderr: response.stderr ?? "",
+          code: (response.code ?? 0) as never,
           timedOut: false,
           stdoutTruncated: false,
           stderrTruncated: false,
@@ -59,6 +68,9 @@ const plan = planPod({
   ghConfigDir: null,
   seeds: null,
   podEnv: { DATABASE_URL: "postgres://secret@db" },
+  dns: [],
+  proxyCaRoot: null,
+  publish: [{ hostIp: "127.0.0.1", hostPort: 20000, containerPort: 3000 }],
 });
 
 describe("Docker container driver", () => {
@@ -73,6 +85,11 @@ describe("Docker container driver", () => {
         expect(dind?.args).toEqual(expect.arrayContaining(["--init", "--privileged"]));
         expect(agent?.args).toContain("--init");
         expect(agent?.args).not.toContain("--privileged");
+        // Only the daemon publishes, on the planned host address alone.
+        expect(dind?.args).toEqual(
+          expect.arrayContaining(["--publish", "127.0.0.1:20000:3000/tcp"]),
+        );
+        expect(agent?.args).not.toContain("--publish");
         const mounts = (args: ReadonlyArray<string>) =>
           args.flatMap((arg, index) => (args[index - 1] === "--mount" ? [arg] : []));
         expect(mounts(agent!.args)).toEqual([
@@ -142,5 +159,62 @@ describe("Docker container driver", () => {
           expect(launch.args).toEqual(expect.arrayContaining(["-e", "PATH=/opt/bin:/bin", "-t"]));
         }),
       ),
+  );
+
+  it.effect("reads another container's state, addresses and mounts, and null when it is gone", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const inspected = JSON.stringify([
+          {
+            State: { Status: "running" },
+            NetworkSettings: { Networks: { pods: { IPAddress: "172.21.0.4" } } },
+            Mounts: [{ Source: "/home/dev/routes", Destination: "/routes", RW: false }],
+          },
+        ]);
+        const docker = yield* recordingDriver((input) =>
+          input.args.at(-1) === "gone"
+            ? { stdout: "[]", stderr: "Error: No such container: gone", code: 1 }
+            : { stdout: inspected },
+        ).host;
+        expect(yield* docker.inspect("pods-proxy")).toEqual({
+          status: "running",
+          networks: { pods: "172.21.0.4" },
+          mounts: [{ source: "/home/dev/routes", destination: "/routes" }],
+        });
+        expect(yield* docker.inspect("gone")).toBeNull();
+      }),
+    ),
+  );
+
+  it.effect("joins a network once, and reports what a failed command printed last", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { runs, host } = recordingDriver((input) =>
+          input.args[0] === "network" && input.args[1] === "connect"
+            ? {
+                stderr:
+                  "Error response from daemon: endpoint with name t3-dind already exists in network pods",
+                code: 1,
+              }
+            : input.args[0] === "exec"
+              ? { stdout: "pulling\n", stderr: "\nError: pull access denied\n", code: 1 }
+              : {},
+        );
+        const docker = yield* host;
+        yield* docker.connectNetwork("pods", "t3-dind");
+        expect(runs[0]?.args).toEqual(["network", "connect", "pods", "t3-dind"]);
+        const result = yield* docker.exec("agent", {
+          command: ["docker", "compose", "up"],
+          timeoutMs: 1_000,
+        });
+        expect(result).toEqual({
+          exitCode: 1,
+          timedOut: false,
+          outputTail: "pulling | Error: pull access denied",
+        });
+        yield* docker.createContainer({ ...plan.dind, dns: ["172.21.0.2"] });
+        expect(runs.at(-1)?.args).toEqual(expect.arrayContaining(["--dns", "172.21.0.2"]));
+      }),
+    ),
   );
 });
