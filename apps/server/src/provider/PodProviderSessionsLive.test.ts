@@ -160,7 +160,12 @@ const makeLayer = (input: {
         PodPaths,
         input.filesRoot === undefined
           ? undefined
-          : { t3Home: "/t3", filesRoot: input.filesRoot, toolsDir: `${input.filesRoot}/tools` },
+          : {
+              t3Home: "/t3",
+              providerHomesDir: "/t3/userdata/providers",
+              filesRoot: input.filesRoot,
+              toolsDir: `${input.filesRoot}/tools`,
+            },
       ),
     ),
     Layer.provide(NodeServices.layer),

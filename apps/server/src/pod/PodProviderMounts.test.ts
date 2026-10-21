@@ -139,6 +139,7 @@ describe("pod provider mounts beyond Claude and Codex", () => {
 
         const mounts = yield* resolvePodProviderMounts(settings, ProjectId.make("p"), {
           t3Home: path.join(home, ".t3"),
+          providerHomesDir: path.join(home, ".t3", "userdata", "providers"),
           filesRoot: path.join(home, ".t3", "caches", "pods"),
           toolsDir,
         }).pipe(
@@ -212,6 +213,7 @@ describe("pod provider mounts beyond Claude and Codex", () => {
 
       const mounts = yield* resolvePodProviderMounts(settings, ProjectId.make("p"), {
         t3Home: root,
+        providerHomesDir: path.join(root, "userdata", "providers"),
         filesRoot: path.join(root, "caches", "pods"),
         toolsDir: path.join(root, "tools"),
       }).pipe(Effect.provideService(HostProcess.Platform, "darwin"));
@@ -287,7 +289,12 @@ describe("pod config dir bounds for a home outside /home", () => {
             },
           },
           ProviderInstanceId.make("work"),
-          { t3Home, filesRoot: `${t3Home}/caches/pods`, toolsDir: `${t3Home}/tools` },
+          {
+            t3Home,
+            providerHomesDir: `${t3Home}/userdata/providers`,
+            filesRoot: `${t3Home}/caches/pods`,
+            toolsDir: `${t3Home}/tools`,
+          },
         ).pipe(
           Effect.provideService(HostProcess.HomeDirectory, home),
           Effect.provideService(HostProcess.Environment, {}),
@@ -348,6 +355,7 @@ describe("pod config dir bounds", () => {
         const home = "/home/dev";
         const hostPaths = {
           t3Home: "/home/dev/.t3",
+          providerHomesDir: "/home/dev/.t3/userdata/providers",
           filesRoot: "/home/dev/.t3/caches/pods",
           toolsDir: "/home/dev/.t3/tools",
         };
@@ -383,9 +391,16 @@ describe("pod config dir bounds", () => {
           "/boot",
           "/home/dev/.docker",
           "/home/dev/.docker/run",
+          // The live database and secrets, and the rest of the T3 home.
+          "/home/dev/.t3/userdata",
+          "/home/dev/.t3/userdata/secrets",
+          "/home/dev/.t3/caches",
         ])
           expect(yield* unsafe(dir), dir).not.toEqual([]);
-        for (const dir of ["/home/dev/.pi/agent", "/home/dev/.t3/codex-shadow"])
+        for (const dir of [
+          "/home/dev/.pi/agent",
+          "/home/dev/.t3/userdata/providers/codex/codex_work/shadow",
+        ])
           expect(yield* unsafe(dir), dir).toEqual([]);
       }).pipe(Effect.provide(NodeServices.layer)),
   );

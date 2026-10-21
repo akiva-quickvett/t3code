@@ -13,6 +13,8 @@ import * as ServerConfig from "../config.ts";
 export interface PodHostPaths {
   /** The T3 home, which no pod may mount whole. */
   readonly t3Home: string;
+  /** Inside it, the provider homes T3 manages, such as Codex's shadow homes: all a config dir there may be. */
+  readonly providerHomesDir: string;
   /** One directory per pod for files T3 writes for its agents, read-only in the pod. */
   readonly filesRoot: string;
   /** The managed binary cache, where ACP Registry agents install under their id. */
@@ -32,6 +34,8 @@ export const layer = Layer.effect(
     const path = yield* Path.Path;
     return {
       t3Home: config.baseDir,
+      // CodexManagedHome and the provider auth flows keep them under `<state>/providers`.
+      providerHomesDir: path.join(config.stateDir, "providers"),
       filesRoot: path.join(config.providerStatusCacheDir, "pods"),
       // AcpRegistrySupport installs under `<T3 home>/tools`.
       toolsDir: path.join(config.baseDir, "tools"),

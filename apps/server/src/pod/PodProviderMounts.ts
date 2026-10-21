@@ -184,8 +184,9 @@ const HOST_ONLY_DIR = /^\/(var|run|proc|sys|dev|root|boot|srv|mnt|media)(\/|$)/;
 
 /**
  * A config dir is mounted read-write, so one that is `/`, a system or host
- * dir, the home itself or anything holding it or the T3 home would hand the
- * pod far more than a provider's login. Judged where it really is, since
+ * dir, the home itself or anything holding it, or any part of the T3 home but
+ * the provider homes T3 manages there, would hand the pod far more than a
+ * provider's login. Judged where it really is, since
  * Docker's bind follows a symlink.
  */
 const unsafeConfigDir = (hostPaths: PodHostPaths | undefined) =>
@@ -195,7 +196,10 @@ const unsafeConfigDir = (hostPaths: PodHostPaths | undefined) =>
     const real = (dir: string) =>
       fileSystem.realPath(dir).pipe(Effect.orElseSucceed(() => path.resolve(dir)));
     const home = yield* real(yield* HostProcess.HomeDirectory);
-    const guarded = [home, ...(hostPaths === undefined ? [] : [yield* real(hostPaths.t3Home)])];
+    const t3Home = hostPaths === undefined ? undefined : yield* real(hostPaths.t3Home);
+    const providerHomes =
+      hostPaths === undefined ? undefined : yield* real(hostPaths.providerHomesDir);
+    const guarded = [home, ...(t3Home === undefined ? [] : [t3Home])];
     // Docker's own config: its registry logins and, with Docker Desktop, its socket.
     const docker = path.join(home, ".docker");
     const within = (dir: string, root: string) => dir === root || dir.startsWith(`${root}/`);
@@ -207,9 +211,13 @@ const unsafeConfigDir = (hostPaths: PodHostPaths | undefined) =>
           if (within(resolved, docker)) return true;
           // The home or the T3 home, or a tree holding either.
           if (guarded.some((kept) => within(kept, resolved))) return true;
+          // The T3 home holds the live database and secrets: only the
+          // provider homes T3 manages there are a provider's own.
+          if (t3Home !== undefined && resolved.startsWith(`${t3Home}/`))
+            return providerHomes === undefined || !resolved.startsWith(`${providerHomes}/`);
           // A home may itself live under /root, /var or /srv on a server, so
-          // what is inside it or the T3 home is the provider's own.
-          if (guarded.some((kept) => resolved.startsWith(`${kept}/`))) return false;
+          // what is inside it is the provider's own.
+          if (resolved.startsWith(`${home}/`)) return false;
           // Both as written and as resolved: macOS's /var and /etc are links
           // into /private, which neither pattern names.
           return hostTree(resolved) || hostTree(path.resolve(dir));

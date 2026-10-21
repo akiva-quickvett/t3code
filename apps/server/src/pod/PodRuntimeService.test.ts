@@ -106,6 +106,7 @@ const harness = (options: {
         ? undefined
         : {
             t3Home: `${options.filesRoot}/home`,
+            providerHomesDir: `${options.filesRoot}/home/userdata/providers`,
             filesRoot: options.filesRoot,
             toolsDir: `${options.filesRoot}/tools`,
           },
