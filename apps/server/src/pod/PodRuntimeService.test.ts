@@ -515,7 +515,9 @@ describe("PodRuntimeService", () => {
         const settled = yield* Effect.forkChild(pods.awaitSettled(id));
         // Readiness probes are spaced a second apart; run the clock past all of
         // them, however long the operation's real file reads take to reach them.
-        while (settled.pollUnsafe() === undefined) yield* TestClock.adjust("1 second");
+        for (let second = 0; second < 600 && settled.pollUnsafe() === undefined; second++)
+          yield* TestClock.adjust("1 second");
+        expect(settled.pollUnsafe()).toBeDefined();
         expect(yield* Fiber.join(settled)).toMatchObject({
           state: "start_failed",
           lastError: {

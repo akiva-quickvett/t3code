@@ -198,17 +198,22 @@ const unsafeConfigDir = (hostPaths: PodHostPaths | undefined) =>
     const guarded = [home, ...(hostPaths === undefined ? [] : [yield* real(hostPaths.t3Home)])];
     // Docker's own config: its registry logins and, with Docker Desktop, its socket.
     const docker = path.join(home, ".docker");
+    const within = (dir: string, root: string) => dir === root || dir.startsWith(`${root}/`);
+    const hostTree = (dir: string) =>
+      dir === path.parse(dir).root || SYSTEM_DIR.test(dir) || HOST_ONLY_DIR.test(dir);
     return (dir: string) =>
       real(dir).pipe(
-        Effect.map(
-          (resolved) =>
-            resolved === path.parse(resolved).root ||
-            SYSTEM_DIR.test(resolved) ||
-            HOST_ONLY_DIR.test(resolved) ||
-            resolved === docker ||
-            resolved.startsWith(`${docker}/`) ||
-            guarded.some((kept) => kept === resolved || kept.startsWith(`${resolved}/`)),
-        ),
+        Effect.map((resolved) => {
+          if (within(resolved, docker)) return true;
+          // The home or the T3 home, or a tree holding either.
+          if (guarded.some((kept) => within(kept, resolved))) return true;
+          // A home may itself live under /root, /var or /srv on a server, so
+          // what is inside it or the T3 home is the provider's own.
+          if (guarded.some((kept) => resolved.startsWith(`${kept}/`))) return false;
+          // Both as written and as resolved: macOS's /var and /etc are links
+          // into /private, which neither pattern names.
+          return hostTree(resolved) || hostTree(path.resolve(dir));
+        }),
       );
   });
 

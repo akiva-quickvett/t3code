@@ -268,6 +268,41 @@ describe("pod provider mounts for npm-installed CLIs", () => {
   );
 });
 
+describe("pod config dir bounds for a home outside /home", () => {
+  it.effect.each([
+    { home: "/root", t3Home: "/root/.t3" },
+    { home: "/var/lib/t3", t3Home: "/var/lib/t3/.t3" },
+  ])("keeps $home's own provider dirs and still refuses the home", ({ home, t3Home }) =>
+    Effect.gen(function* () {
+      const unsafe = (driver: string, config: Record<string, unknown>) =>
+        unsafePodConfigDirs(
+          {
+            ...DEFAULT_SERVER_SETTINGS,
+            providerInstances: {
+              [ProviderInstanceId.make("work")]: {
+                driver: ProviderDriverKind.make(driver),
+                enabled: true,
+                config,
+              },
+            },
+          },
+          ProviderInstanceId.make("work"),
+          { t3Home, filesRoot: `${t3Home}/caches/pods`, toolsDir: `${t3Home}/tools` },
+        ).pipe(
+          Effect.provideService(HostProcess.HomeDirectory, home),
+          Effect.provideService(HostProcess.Environment, {}),
+        );
+      expect(yield* unsafe("claudeAgent", {})).toEqual([]);
+      expect(yield* unsafe("pi", {})).toEqual([]);
+      expect(yield* unsafe("grok", {})).toEqual([]);
+      expect(yield* unsafe("claudeAgent", { homePath: home })).toEqual([home]);
+      expect(yield* unsafe("claudeAgent", { homePath: `${home}/.docker` })).toEqual([
+        `${home}/.docker`,
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
 describe("pod config dir bounds through symlinks", () => {
   it.effect("judges a config dir where its link points, as Docker's bind does", () =>
     Effect.gen(function* () {
