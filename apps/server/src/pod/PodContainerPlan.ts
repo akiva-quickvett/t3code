@@ -22,6 +22,8 @@ export const DIND_IMAGE = "docker:27-dind";
 export const POD_DOCKER_HOST = "tcp://127.0.0.1:2375";
 const DIND_DATA_DIR = "/var/lib/docker";
 const SEEDS_ROOT = "/seeds";
+/** Where Debian's and Alpine's `update-ca-certificates` pick up a local CA. */
+export const POD_PROXY_CA_PATH = "/usr/local/share/ca-certificates/t3-pods-proxy.crt";
 const PROVIDER_BIN_ROOT = "/opt/t3/provider-bin";
 
 /**
@@ -58,6 +60,10 @@ export interface PodPlanInput {
   readonly seeds: { readonly dir: string; readonly name: string } | null;
   /** `env` from the project's t3.json pod block. */
   readonly podEnv: Readonly<Record<string, string>>;
+  /** Resolvers for the daemon and the stack it runs; empty keeps Docker's own. */
+  readonly dns: ReadonlyArray<string>;
+  /** The hostname proxy's CA root on the host, which the agent container then trusts. */
+  readonly proxyCaRoot: string | null;
 }
 
 export interface PodPlan {
@@ -71,11 +77,18 @@ export interface PodPlan {
  * server's database (a dev copy of real data) can never address this server's
  * containers by name.
  */
-export const podContainerNames = (podId: PodRuntimeId, environmentId: string) => {
-  const stem = `t3-${environmentId
+export const podEnvironmentStem = (environmentId: string) =>
+  `t3-${environmentId
     .replace(/[^A-Za-z0-9]/g, "")
     .slice(0, 8)
-    .toLowerCase()}-${podId}`;
+    .toLowerCase()}-`;
+
+/** Also names the pod's proxy route file and hostnames, as orch's `<pod>` does. */
+export const podNameStem = (podId: PodRuntimeId, environmentId: string) =>
+  `${podEnvironmentStem(environmentId)}${podId}`;
+
+export const podContainerNames = (podId: PodRuntimeId, environmentId: string) => {
+  const stem = podNameStem(podId, environmentId);
   return { dind: `${stem}-dind`, agent: `${stem}-agent`, volume: `${stem}-dockerlib` };
 };
 
@@ -141,10 +154,17 @@ export const planPod = (input: PodPlanInput): PodPlan => {
     ],
     env: { DOCKER_TLS_CERTDIR: "" },
     publish: input.publish,
+    ...(input.dns.length === 0 ? {} : { dns: input.dns }),
     // Naming dockerd keeps the image's entrypoint from adding its own
     // `--host=tcp://0.0.0.0:2375`, which would clash with this listener and
     // open the daemon to every container on the pods network.
-    command: ["dockerd", "--host=unix:///var/run/docker.sock", `--host=${POD_DOCKER_HOST}`],
+    command: [
+      "dockerd",
+      "--host=unix:///var/run/docker.sock",
+      `--host=${POD_DOCKER_HOST}`,
+      // The stack's containers resolve through the daemon, not the container.
+      ...input.dns.flatMap((server) => ["--dns", server]),
+    ],
   };
 
   // Pod-private targets after the image's own directories, so a host binary
@@ -179,6 +199,16 @@ export const planPod = (input: PodPlanInput): PodPlan => {
       })),
       ...(input.gitConfigPath === null ? [] : [bind(input.gitConfigPath, true)]),
       ...(input.ghConfigDir === null ? [] : [bind(input.ghConfigDir, true)]),
+      ...(input.proxyCaRoot === null
+        ? []
+        : [
+            {
+              type: "bind",
+              source: input.proxyCaRoot,
+              target: POD_PROXY_CA_PATH,
+              readOnly: true,
+            } satisfies PodContainerMount,
+          ]),
       ...seeds,
     ],
     env: podSafeEnv({
@@ -187,6 +217,8 @@ export const planPod = (input: PodPlanInput): PodPlan => {
       PATH: binPath,
       DOCKER_HOST: POD_DOCKER_HOST,
       LANG: "C.UTF-8",
+      // Node reads only its own bundle, so the system store alone misses it.
+      ...(input.proxyCaRoot === null ? {} : { NODE_EXTRA_CA_CERTS: POD_PROXY_CA_PATH }),
     }),
     ...(user === undefined ? {} : { user }),
     workdir: input.worktreePath,

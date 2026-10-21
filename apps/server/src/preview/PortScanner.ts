@@ -50,10 +50,13 @@ export class PortDiscovery extends Context.Service<
      * URLs the server itself knows serve something, such as a pod's published
      * services: probed for every scan and subscriber, beside the client's own.
      * Registering again under `owner` replaces its URLs; no URLs removes them.
+     * A URL with a `probeUrl` is listed as itself but probed there, for an
+     * address the server's own fetch cannot reach, such as an https hostname
+     * signed by a CA only the system trusts.
      */
     readonly registerConfiguredUrls: (input: {
       readonly owner: string;
-      readonly urls: ReadonlyArray<string>;
+      readonly urls: ReadonlyArray<string | { readonly url: string; readonly probeUrl: string }>;
     }) => Effect.Effect<void>;
   }
 >()("t3/preview/PortScanner/PortDiscovery") {}
@@ -92,6 +95,8 @@ interface ScannerState {
   readonly retainCount: number;
   /** Normalized when registered; the poll reads it on every tick. */
   readonly registeredUrls: ReadonlyMap<string, ReadonlyArray<string>>;
+  /** Per owner, where to probe each of its URLs that is not probed at itself. */
+  readonly registeredProbeUrls: ReadonlyMap<string, ReadonlyMap<string, string>>;
 }
 
 interface TerminalProcessOwner {
@@ -121,11 +126,15 @@ const terminalOwnerKey = (owner: {
   readonly terminalId: string;
 }): string => `${owner.threadId}\u0000${owner.terminalId}`;
 
-const parseConfiguredUrl = (raw: string): URL | null => {
+/**
+ * A client may name only loopback URLs, or it could make the server probe any
+ * host. The server's own registrations, such as a pod's hostnames, may name others.
+ */
+const parseConfiguredUrl = (raw: string, anyHost = false): URL | null => {
   try {
     const url = new URL(raw);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    if (!isLoopbackHost(url.hostname)) return null;
+    if (!anyHost && !isLoopbackHost(url.hostname)) return null;
     return url;
   } catch {
     return null;
@@ -144,12 +153,15 @@ const webProbeCacheKey = (raw: string): string => {
   return url.href;
 };
 
-const normalizeConfiguredUrls = (urls: ReadonlyArray<string>): ReadonlyArray<string> => [
+const normalizeConfiguredUrls = (
+  urls: ReadonlyArray<string>,
+  options: { readonly anyHost?: boolean } = {},
+): ReadonlyArray<string> => [
   ...new Set(
     urls
       .slice(0, CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS)
       .filter((raw) => raw.length <= PREVIEW_URL_MAX_LENGTH)
-      .map(parseConfiguredUrl)
+      .map((raw) => parseConfiguredUrl(raw, options.anyHost))
       .filter((url): url is URL => url !== null && url.href.length <= PREVIEW_URL_MAX_LENGTH)
       .map((url) => {
         if (url.hostname === "0.0.0.0") url.hostname = "localhost";
@@ -393,6 +405,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     terminalProcesses: new Map(),
     retainCount: 0,
     registeredUrls: new Map(),
+    registeredProbeUrls: new Map(),
   });
   const webProbeCacheRef = yield* Ref.make<ReadonlyMap<string, WebProbeCacheEntry>>(new Map());
   const scanSemaphore = yield* Semaphore.make(1);
@@ -515,6 +528,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   const makeWebProbeGroups = (
     servers: ReadonlyArray<DiscoveredLocalServer>,
     configuredUrls: ReadonlyArray<string>,
+    probeUrls: ReadonlyMap<string, string>,
   ): ReadonlyArray<WebProbeGroup> => {
     const serversByKey = new Map(
       servers.map((server) => [localServerKey(server.host, server.port), server] as const),
@@ -538,7 +552,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
           pid: null,
           terminal: null,
         },
-        urls: [raw],
+        urls: [probeUrls.get(raw) ?? raw],
         configuredKey: resourceKey,
       });
     }
@@ -563,7 +577,10 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   ) {
     const nowMillis = yield* Clock.currentTimeMillis;
     const cached = yield* Ref.get(webProbeCacheRef);
-    const groups = makeWebProbeGroups(servers, configuredUrls);
+    const probeUrls = new Map(
+      [...(yield* Ref.get(stateRef)).registeredProbeUrls.values()].flatMap((owned) => [...owned]),
+    );
+    const groups = makeWebProbeGroups(servers, configuredUrls, probeUrls);
     const batchProbes = new Map<
       string,
       Effect.Effect<{ readonly probe: WebProbeCacheEntry; readonly fresh: boolean }>
@@ -902,10 +919,25 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   const registerConfiguredUrls: PortDiscovery["Service"]["registerConfiguredUrls"] = (input) =>
     Ref.update(stateRef, (state) => {
       const registeredUrls = new Map(state.registeredUrls);
-      const urls = normalizeConfiguredUrls(input.urls);
+      const registeredProbeUrls = new Map(state.registeredProbeUrls);
+      const entries = input.urls.map((entry) =>
+        typeof entry === "string" ? { url: entry, probeUrl: null } : entry,
+      );
+      const urls = normalizeConfiguredUrls(
+        entries.map((entry) => entry.url),
+        { anyHost: true },
+      );
+      const probes = new Map<string, string>();
+      for (const entry of entries) {
+        const [url] = normalizeConfiguredUrls([entry.url], { anyHost: true });
+        const [probeUrl] = entry.probeUrl === null ? [] : normalizeConfiguredUrls([entry.probeUrl]);
+        if (url !== undefined && probeUrl !== undefined) probes.set(url, probeUrl);
+      }
       if (urls.length === 0) registeredUrls.delete(input.owner);
       else registeredUrls.set(input.owner, urls);
-      return { ...state, registeredUrls };
+      if (probes.size === 0) registeredProbeUrls.delete(input.owner);
+      else registeredProbeUrls.set(input.owner, probes);
+      return { ...state, registeredUrls, registeredProbeUrls };
     });
 
   return PortDiscovery.of({

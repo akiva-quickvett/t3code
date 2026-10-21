@@ -6,6 +6,7 @@ import {
   type PodRuntimeSnapshot,
   type PodRuntimeState,
   type PodRuntimeStreamEvent,
+  type PodRuntimeWarning,
 } from "@t3tools/contracts";
 
 import type { EnvironmentThreadShell } from "./models.ts";
@@ -44,7 +45,10 @@ export function podForWorktree(
 
 export interface PodServiceLink {
   readonly name: string;
-  /** The service on the environment host's loopback, for its server-side browser. */
+  /**
+   * The service's hostname in hostname mode, else its port on the environment
+   * host's loopback; either way for that host's server-side browser.
+   */
   readonly url: string;
   /** The same service on the host's tailnet address, when the environment publishes there. */
   readonly tailnetUrl?: string;
@@ -75,6 +79,15 @@ export function podBrowsingThread(
     if (latest === undefined || thread.updatedAt > latest.updatedAt) latest = thread;
   }
   return latest;
+}
+
+const WARNING_MESSAGES: Readonly<Record<PodRuntimeWarning, string>> = {
+  "tailscale-serve-443":
+    "A project serves its pods on hostnames, which need port 443 of this machine's tailnet address, and T3 Code was started with Tailscale Serve on that port too, so other devices cannot open the pods. Serve T3 Code on another port, such as 8443 (--tailscale-serve-port 8443).",
+};
+
+export function podRuntimeWarningMessage(warning: PodRuntimeWarning): string {
+  return WARNING_MESSAGES[warning];
 }
 
 export type PodRuntimeTone = "running" | "busy" | "idle" | "failed";

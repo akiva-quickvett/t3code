@@ -13,13 +13,14 @@ const PLACEHOLDER = /\{([A-Za-z_][\w-]*)\.([A-Za-z_]\w*)\}/g;
 
 export interface PodEnvService {
   readonly name: string;
-  readonly hostPort: number;
   readonly url: string;
+  /** `url`'s port: the host port, or 443 for a hostname. */
+  readonly port: number;
 }
 
 const FIELDS: ReadonlyMap<string, (service: PodEnvService) => string> = new Map([
   ["url", (service: PodEnvService) => service.url],
-  ["port", (service: PodEnvService) => String(service.hostPort)],
+  ["port", (service: PodEnvService) => String(service.port)],
 ]);
 
 export class PodEnvError extends Schema.TaggedError<PodEnvError>()("PodEnvError", {

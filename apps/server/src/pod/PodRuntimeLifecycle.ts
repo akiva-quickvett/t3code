@@ -24,6 +24,12 @@ export interface PodRuntimeRecord {
   readonly hostPorts?: Readonly<Record<string, number>>;
   /** The tailnet address the services are also published on. */
   readonly tailnetAddress?: string;
+  /** Hostname per service, chosen when the daemon was built in hostname mode. */
+  readonly hostnames?: Readonly<Record<string, string>>;
+  /** The hostname proxy's DNS server, which the daemon was built to resolve through. */
+  readonly dnsAddress?: string;
+  /** The pod's route file is in the proxy's directory, as far as this server knows. */
+  readonly routed?: boolean;
 }
 
 const PodServicePort = Schema.Struct({ name: TrimmedNonEmptyString, port: Schema.Int });
@@ -78,6 +84,20 @@ export const PodRuntimeEvent = Schema.Union([
     occurredAt: IsoDateTime,
     services: Schema.Array(PodServiceHostPort),
     tailnetAddress: Schema.NullOr(Schema.String),
+    /** Absent when the daemon is built for ports only. */
+    hostnames: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+    dnsAddress: Schema.optional(Schema.String),
+  }),
+  /**
+   * The pod's proxy route was put in place or taken away; `problem` says what
+   * keeps a pod whose project asks for hostnames from being served on them.
+   */
+  Schema.Struct({
+    type: Schema.Literal("pod.routes-updated"),
+    podId: PodRuntimeId,
+    occurredAt: IsoDateTime,
+    routed: Schema.Boolean,
+    problem: Schema.NullOr(Schema.String),
   }),
   /** A removed pod's worktree checkout was removed, freeing the path for a host worktree. */
   Schema.Struct({
@@ -337,18 +357,29 @@ export const POD_LOOPBACK_ADDRESS = "127.0.0.1";
 
 export const podServiceUrl = (address: string, hostPort: number) => `http://${address}:${hostPort}`;
 
-/** A removed pod holds no ports; a pod's services are reachable only while it runs. */
+export const podHostnameUrl = (hostname: string) => `https://${hostname}`;
+
+/**
+ * A removed pod holds no ports or hostnames; a pod's services are reachable
+ * only while it runs. A pod built for hostnames links them even while its
+ * route is not in place: its stack was configured for them, so a port link
+ * would not work either, and its hostname problem says why.
+ */
 const publishServices = (record: PodRuntimeRecord): PodRuntimeRecord => {
-  const { hostPorts, tailnetAddress, ...unallocated } = record;
+  const { hostPorts, tailnetAddress, hostnames, dnsAddress: _dns, ...unallocated } = record;
   const { state } = record.snapshot;
   const kept = state === "removed" ? unallocated : record;
   const services = record.snapshot.services.map(({ name, port }) => {
     const hostPort = state === "running" ? hostPorts?.[name] : undefined;
     if (hostPort === undefined) return { name, port, url: null };
+    const hostname = hostnames?.[name];
     return {
       name,
       port,
-      url: podServiceUrl(POD_LOOPBACK_ADDRESS, hostPort),
+      url:
+        hostname === undefined
+          ? podServiceUrl(POD_LOOPBACK_ADDRESS, hostPort)
+          : podHostnameUrl(hostname),
       ...(tailnetAddress === undefined
         ? {}
         : { tailnetUrl: podServiceUrl(tailnetAddress, hostPort) }),
@@ -395,16 +426,30 @@ const reducePodEvent = (
     case "pod.worktree-released":
       return { ...record, worktreeReleased: true };
     case "pod.ports-allocated": {
-      const { tailnetAddress: _previous, ...rest } = record;
+      const { tailnetAddress: _tailnet, hostnames: _hostnames, dnsAddress: _dns, ...rest } = record;
       return {
         ...rest,
         hostPorts: Object.fromEntries(
           event.services.map((service) => [service.name, service.hostPort]),
         ),
         ...(event.tailnetAddress === null ? {} : { tailnetAddress: event.tailnetAddress }),
+        ...(event.hostnames === undefined ? {} : { hostnames: event.hostnames }),
+        ...(event.dnsAddress === undefined ? {} : { dnsAddress: event.dnsAddress }),
         snapshot: {
           ...snapshot,
           services: event.services.map(({ name, port }) => ({ name, port, url: null })),
+          updatedAt,
+        },
+      };
+    }
+    case "pod.routes-updated": {
+      const { hostnameProblem: _previous, ...unflagged } = snapshot;
+      return {
+        ...record,
+        routed: event.routed,
+        snapshot: {
+          ...unflagged,
+          ...(event.problem === null ? {} : { hostnameProblem: boundedPodMessage(event.problem) }),
           updatedAt,
         },
       };

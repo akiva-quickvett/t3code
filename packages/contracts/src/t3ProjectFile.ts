@@ -152,7 +152,7 @@ export const T3ProjectFilePod = Schema.Struct({
     Schema.Record(Schema.String, Schema.String.check(Schema.isMaxLength(4_096)))
       .annotate({
         description:
-          "Environment variables set for every command inside the pod and written to the worktree's .env. {<service>.url} and {<service>.port} become that service's address on the host (e.g. \"{web.url}\"). PATH, HOME, DOCKER_HOST, DOCKER_CONTEXT and DOCKER_CONFIG are T3 Code's.",
+          "Environment variables set for every command inside the pod and written to the worktree's .env. {<service>.url} and {<service>.port} become that service's address and port on the host (e.g. \"{web.url}\"); with hostnames on, its https hostname and 443. PATH, HOME, DOCKER_HOST, DOCKER_CONTEXT and DOCKER_CONFIG are T3 Code's.",
       })
       .check(
         Schema.makeFilter((env) =>

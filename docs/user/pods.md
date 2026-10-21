@@ -52,6 +52,11 @@ In the composer, choose **New worktree**, then **Runtime → Container**. T3 Cod
 worktree, starts its pod and brings the stack up before the setup script runs, which then runs in
 the pod. The first pod pulls its images, which can take a few minutes.
 
+A pod's Docker daemon looks names up through this machine's own upstream DNS servers, since
+Docker's DNS on the pods network fails on some machines. If its image pulls still fail with
+`server misbehaving`, set `podRuntime.dnsServers` in the server settings to resolvers that work
+from containers (for example `["192.168.1.1"]`) and recreate the pod.
+
 ## Manage a pod
 
 The pod chip next to the thread title shows its state. Click it to stop or start the pod, open a
@@ -81,6 +86,49 @@ pod**, which also writes `.env` again.
 To reach the services from other tailnet devices directly, set `podRuntime.publishOnTailnet` to
 `true` in the server settings. Pods created or recreated after that are also published on this
 machine's tailnet address, which Diagnostics shows next to each service.
+
+## Serve a pod's services on hostnames
+
+Some stacks only work over HTTPS on a real hostname, for example when their CORS, cookies or
+WebSocket URLs are built from it. Add `"hostnames": true` to the project's `pod` block and each
+service is served at `https://<pod>-<service>.pods.internal` instead of a port: the pod chip,
+**Settings → Diagnostics → Pods**, the local servers list and `{web.url}` in `env` all use that
+address. `{web.port}` is then 443.
+
+Hostname mode uses the pods proxy that `orch` runs on this machine: a Caddy container
+(`pods-proxy`) with its own certificate authority, and DNS servers that answer `*.pods.internal`.
+T3 Code adds one route file per pod beside orch's, removes it when the pod stops, and checks every
+route with the proxy before reloading it, so a bad route never affects other pods. Set it up once
+on the machine running T3 Code:
+
+1. Start the proxy, for example by bringing up any orch pod once.
+2. `orch pod host-dns` sends `*.pods.internal` lookups on this machine to the proxy's DNS server.
+3. `orch pod trust` adds the proxy's certificate authority to the system trust store, which
+   browsers and T3 Code's own browser use. On a distribution whose NSS does not read the system
+   store (stock Debian or Ubuntu without p11-kit's `libnssckbi.so`), also import it for your user:
+   `certutil -A -d sql:$HOME/.pki/nssdb -n "Caddy Local Authority" -t "C,," -i ~/.local/state/herdr-orch/caddy/root.crt`.
+4. If T3 Code uses Tailscale Serve, keep it off port 443: the proxy serves the hostnames to your
+   other devices on 443 of this machine's tailnet address, and Tailscale Serve on the same port
+   takes it over. Start T3 Code with `--tailscale-serve-port 8443` (or
+   `T3CODE_TAILSCALE_SERVE_PORT=8443`), or pick another port when you turn on Tailscale HTTPS in
+   **Settings → Connections**. Both that screen and Diagnostics warn while T3 Code's own Tailscale
+   Serve uses 443; a serve on 443 set up any other way, such as one `t3 pair` left running, is not
+   detected, so check `tailscale serve status`.
+
+T3 Code's route files are named `t3-*.caddy`. `orch pod status` currently lists them as stale
+routes; leave them, since they serve running pods and T3 Code removes its own.
+
+Inside the pod, the stack's containers resolve `*.pods.internal` too, and the agent container
+trusts the proxy's certificates, so commands there can reach any pod's hostname. Lookups of those
+hostnames can take a few seconds, because orch's DNS server does not answer IPv6 lookups yet (a fix
+is pending in orch); busybox tools such as the default image's `wget` give up with `bad address`,
+so use an agent image with `curl` or another glibc-based tool for requests to pod hostnames.
+
+If the proxy is missing when a pod is created, the pod still starts on ports and Diagnostics says
+why; **Recreate pod** once the proxy is back moves it to hostnames. If only its route cannot be put
+in place, Diagnostics says why and its hostnames do not open until the pod starts again with the
+route. The proxy's container names, network, domain, routes directory and certificate are orch's
+defaults; change them under `podRuntime.hostnameProxy` in the server settings if your setup differs.
 
 ## Removing a pod's worktree
 

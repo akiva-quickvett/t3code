@@ -66,6 +66,14 @@ function PodChipMenu(props: {
             <MenuSeparator />
           </>
         )}
+        {props.pod.hostnameProblem === undefined ? null : (
+          <>
+            <div className="max-w-72 px-2 py-1 text-muted-foreground text-xs">
+              {props.pod.hostnameProblem}
+            </div>
+            <MenuSeparator />
+          </>
+        )}
         {links.map((link) => (
           <MenuItem
             key={`service:${link.name}`}

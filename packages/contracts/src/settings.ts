@@ -1,5 +1,9 @@
 import { AgentRolePresetSettings } from "./agentRole.ts";
-import { PodRuntimeSettings, PodRuntimeSettingsPatch } from "./podRuntime.ts";
+import {
+  PodRuntimeProjectSettingsPatch,
+  PodRuntimeSettings,
+  PodRuntimeSettingsPatch,
+} from "./podRuntime.ts";
 import { SshDeviceHostConfigs } from "./device.ts";
 import {
   AuthOrchestrationOperateScope,
@@ -996,7 +1000,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   /** Merged over the environment's, so overriding `enabled` leaves its Docker settings live. */
-  podRuntime: Schema.optionalKey(PodRuntimeSettingsPatch),
+  podRuntime: Schema.optionalKey(PodRuntimeProjectSettingsPatch),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
