@@ -1,5 +1,5 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- The fake proxy reads the routes directory synchronously, mid-exec.
-import * as NodeFs from "node:fs";
+import * as NodeFS from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
@@ -73,8 +73,8 @@ const setup = (options: { readonly serve?: { enabled: boolean; port: number } } 
       routesDir: "~/routes",
       caRootPath: "~/root.crt",
     });
-    const files = () => NodeFs.readdirSync(routesDir).toSorted();
-    const read = (name: string) => NodeFs.readFileSync(`${routesDir}/${name}`, "utf8");
+    const files = () => NodeFS.readdirSync(routesDir).toSorted();
+    const read = (name: string) => NodeFS.readFileSync(`${routesDir}/${name}`, "utf8");
     return { router, proxy, driver, routesDir, files, read };
   });
 
@@ -350,7 +350,7 @@ describe("PodHostnameRouter", () => {
         "t3-envtest-pod-gone.caddy.next",
         "t3-otherenv-pod-def456.caddy",
       ])
-        NodeFs.writeFileSync(`${routesDir}/${name}`, "");
+        NodeFS.writeFileSync(`${routesDir}/${name}`, "");
       yield* router.prune({
         dockerHost: "",
         proxy,
@@ -374,8 +374,8 @@ describe("PodHostnameRouter", () => {
   it.effect("puts stale routes back when the proxy does not reload without them", () =>
     Effect.gen(function* () {
       const { router, proxy, driver, files, read, routesDir } = yield* setup();
-      NodeFs.writeFileSync(`${routesDir}/t3-envtest-pod-gone.caddy`, "gone route");
-      NodeFs.writeFileSync(`${routesDir}/t3-envtest-pod-gone.validate`, "leftover");
+      NodeFS.writeFileSync(`${routesDir}/t3-envtest-pod-gone.caddy`, "gone route");
+      NodeFS.writeFileSync(`${routesDir}/t3-envtest-pod-gone.validate`, "leftover");
       driver.execExitCode((call) => (call.command?.[1] === "reload" ? 1 : 0));
       yield* router.prune({
         dockerHost: "",
@@ -409,7 +409,7 @@ describe("PodHostnameRouter", () => {
         "notes.txt": "someone's notes",
       };
       for (const [name, text] of Object.entries(foreign))
-        NodeFs.writeFileSync(`${routesDir}/${name}`, text);
+        NodeFS.writeFileSync(`${routesDir}/${name}`, text);
       // Whatever the proxy would import mid-operation is only ever orch's files or a whole route.
       const imported: Array<ReadonlyArray<string>> = [];
       let validateExit = 0;
