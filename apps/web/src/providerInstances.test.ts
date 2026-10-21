@@ -867,6 +867,23 @@ describe("provider instance lock", () => {
       expect(resolveProviderInstanceSwitchNote(undefined, claudePersonal)).toBeNull();
     });
 
+    it("warns about another organization on a native resume through a shared config dir", () => {
+      const sharedPersonal = entryOf(claude, "claude_shared_personal", "claude:work", {
+        id: "org-b",
+      });
+
+      expect(resolveProviderInstanceSwitchNote(claudeWork, sharedPersonal)).toEqual({
+        label: "Resumes the same Claude session",
+        organizationWarning: "Another organization: earlier reasoning won't carry over",
+      });
+      expect(
+        resolveProviderInstanceSwitchNote(
+          claudeWork,
+          entryOf(claude, "claude_shared_work", "claude:work", { id: "org-a" }),
+        ),
+      ).toBeNull();
+    });
+
     it("labels a move from a Claude instance without a group to another instance", () => {
       expect(
         resolveProviderInstanceSwitchNote(entryOf(claude, "claude_ungrouped"), claudePersonal)

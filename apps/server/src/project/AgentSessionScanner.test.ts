@@ -626,6 +626,78 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect.skipIf(!symlinksSupported)(
+      "scans a shared Claude config dir once for every instance linked to it",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const sharingHome = yield* makeTempDir("t3code-claude-sharing-");
+          const workspace = yield* makeTempDir("t3code-workspace-");
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
+            contents: claudeSessionLine(workspace),
+            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          });
+          yield* fileSystem.symlink(
+            path.join(claudeHomePath, "projects"),
+            path.join(sharingHome, "projects"),
+          );
+
+          const result = yield* runScan({
+            claudeHomePath,
+            codexHomePath,
+            providerInstances: {
+              [ProviderInstanceId.make("claude-sharing")]: {
+                driver: ProviderDriverKind.make("claudeAgent"),
+                config: { homePath: sharingHome, sharedConfigPath: claudeHomePath },
+              },
+            },
+          });
+
+          expect(result.candidates.map((candidate) => candidate.threadCount)).toEqual([1]);
+        }),
+    );
+
+    it.effect("still scans an instance's own transcripts when its projects dir is not shared", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const privateHome = yield* makeTempDir("t3code-claude-private-");
+        const sharedWorkspace = yield* makeTempDir("t3code-workspace-shared-");
+        const privateWorkspace = yield* makeTempDir("t3code-workspace-private-");
+        for (const [home, cwd] of [
+          [claudeHomePath, sharedWorkspace],
+          [privateHome, privateWorkspace],
+        ] as const) {
+          yield* writeTranscript({
+            filePath: path.join(home, "projects", "-slug", "a.jsonl"),
+            contents: claudeSessionLine(cwd),
+            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          });
+        }
+
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          providerInstances: {
+            // A conflict left this instance's own projects dir in place.
+            [ProviderInstanceId.make("claude-unshared")]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              config: { homePath: privateHome, sharedConfigPath: claudeHomePath },
+            },
+          },
+        });
+
+        expect(result.candidates.map((candidate) => candidate.path).toSorted()).toEqual(
+          [sharedWorkspace, privateWorkspace].toSorted(),
+        );
+      }),
+    );
+
     it.effect("honors provider instance home directory environment variables", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
