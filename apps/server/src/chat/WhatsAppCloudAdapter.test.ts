@@ -80,7 +80,7 @@ describe("whatsAppApiRoot", () => {
 
 describe("WhatsAppCloudAdapter", () => {
   it.effect("sends every content kind in the documented shape with an explicit User-Agent", () =>
-    withAdapter(({ adapter, send, fake }) =>
+    withAdapter(({ send, fake }) =>
       Effect.gen(function* () {
         const contents: ReadonlyArray<ChatOutboundContent> = [
           { type: "text", text: "Hello", replyTo: "wamid.in1" },
@@ -194,7 +194,7 @@ describe("WhatsAppCloudAdapter", () => {
   );
 
   it.effect("classifies refusals so the outbox knows whether a resend is safe", () =>
-    withAdapter(({ adapter, send, fake }) =>
+    withAdapter(({ send, fake }) =>
       Effect.gen(function* () {
         const sendText = send({ credentials, to: TO, content: { type: "text", text: "Hi" } }).pipe(
           Effect.flip,
@@ -295,7 +295,7 @@ describe("WhatsAppCloudAdapter", () => {
   );
 
   it.effect("reads media by id with the token and reports template status", () =>
-    withAdapter(({ adapter, send, fake }) =>
+    withAdapter(({ adapter, fake }) =>
       Effect.gen(function* () {
         const mediaId = fake.addMedia(new Uint8Array([1, 2, 3]), "image/png");
         const media = yield* adapter.readMedia({ credentials, providerMediaId: mediaId });

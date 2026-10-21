@@ -886,8 +886,6 @@ const make = Effect.gen(function* () {
       return { _tag: "recorded", contactId: contact.config.id, messageId } as const;
     }).pipe(Effect.withSpan("ChatChannelService.recordInbound"));
 
-  // --- outbox worker ---------------------------------------------------------
-
   // A contact's messages go out in order: one waiting out a retry holds back the ones after it.
   const firstPendingOfContact = sql`
     candidate.status = 'pending'

@@ -1,6 +1,5 @@
 import type {
   ChatChannelCredentialName,
-  ChatNotifyTemplate,
   ChatOutboundContent,
   ChatTemplateState,
 } from "@t3tools/contracts";
