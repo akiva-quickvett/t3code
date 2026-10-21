@@ -3839,6 +3839,45 @@ it.effect("hands a label change to the host, and reads the labels back for the m
   }),
 );
 
+it.effect("holds a label rule's write through a rate limit pause, but not a person's", () =>
+  Effect.gen(function* () {
+    const writes: Array<{ readonly background: boolean }> = [];
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          capabilities: {
+            ...fakeProvider(SourceControlProviderKind.make("github")).capabilities,
+            labels: true,
+          },
+          setLabels: (input) =>
+            Effect.sync(() => {
+              writes.push({ background: input.background === true });
+            }),
+          runAction: () =>
+            Effect.fail(
+              new PullRequestProviderError({
+                provider: SourceControlProviderKind.make("github"),
+                operation: "runAction",
+                reason: "rate-limited",
+                detail: "GitHub API rate limit exceeded.",
+              }),
+            ),
+        }),
+      ],
+    });
+    const ref = { projectId: "p1" as ProjectId, repository: "acme/web", number: 4 };
+    yield* Effect.flip(service.runAction({ ...ref, action: "close" }));
+
+    const held = yield* Effect.flip(
+      service.setLabels({ ...ref, labels: ["Agent Done"], applied: true }, { background: true }),
+    );
+    assert.strictEqual(held._tag, "PullRequestOperationError");
+    yield* service.setLabels({ ...ref, labels: ["bug"], applied: true });
+    assert.deepStrictEqual(writes, [{ background: false }]);
+  }),
+);
+
 it.effect("answers a repeated listing from cache, and concurrent readers share one request", () =>
   Effect.gen(function* () {
     let hostCalls = 0;

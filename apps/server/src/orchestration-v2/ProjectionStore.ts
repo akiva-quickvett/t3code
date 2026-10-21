@@ -82,6 +82,8 @@ import type * as Statement from "effect/sql/Statement";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
+import { PROJECTION_THREAD_TREE_PARENT } from "../persistence/Migrations/066_ProjectionThreadTreeParentIndex.ts";
+import { workTreeOf, type WorkTreeNode } from "./pullRequestAgentState.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
@@ -426,6 +428,10 @@ export interface ProjectionStoreV2Shape {
     ReadonlyArray<{ readonly threadId: ThreadId; readonly worktreePath: string }>,
     ProjectionStoreV2Error
   >;
+  /** These threads and every thread they launched or delegated to, transitively, with run activity. */
+  readonly getWorkTreeNodes: (
+    rootThreadIds: ReadonlyArray<ThreadId>,
+  ) => Effect.Effect<ReadonlyArray<WorkTreeNode>, ProjectionStoreV2Error>;
   readonly getTurnStartContext: (
     threadId: ThreadId,
     runId: RunId,
@@ -5764,6 +5770,72 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
       );
 
+    const getWorkTreeNodes: ProjectionStoreV2Shape["getWorkTreeNodes"] = (rootThreadIds) =>
+      Effect.gen(function* () {
+        if (rootThreadIds.length === 0) return [];
+        const parent = sql.literal(PROJECTION_THREAD_TREE_PARENT);
+        // Walks down from the roots through the tree-parent index, so a sweep reads only these
+        // trees rather than every thread. The unary plus on tree.id is what lets SQLite look the
+        // step up in that index instead of scanning the table.
+        const threads = yield* sql<{
+          readonly thread_id: string;
+          readonly parent_thread_id: string | null;
+          readonly role_preset_id: string | null;
+        }>`
+          WITH RECURSIVE tree(id) AS (
+            SELECT thread_id FROM orchestration_v2_projection_threads
+            WHERE thread_id IN ${sql.in(rootThreadIds)} AND deleted_at IS NULL
+            UNION
+            SELECT thread_id FROM tree, orchestration_v2_projection_threads
+            WHERE ${parent} = +tree.id AND deleted_at IS NULL
+          )
+          SELECT
+            thread_id,
+            ${parent} AS parent_thread_id,
+            CASE WHEN json_valid(payload_json)
+              THEN json_extract(payload_json, '$.rolePreset.id') END AS role_preset_id
+          FROM orchestration_v2_projection_threads
+          WHERE thread_id IN (SELECT id FROM tree)
+        `;
+        if (threads.length === 0) return [];
+        const runs = yield* sql<{
+          readonly thread_id: string;
+          readonly latest_requested_at: string | null;
+          readonly latest_completed_at: string | null;
+          readonly running: number;
+        }>`
+          SELECT
+            thread_id,
+            MAX(requested_at) AS latest_requested_at,
+            MAX(completed_at) AS latest_completed_at,
+            MAX(CASE
+              WHEN status IN ('preparing', 'starting', 'running', 'waiting') THEN 1
+              WHEN status = 'queued' AND NOT (json_valid(payload_json)
+                AND json_extract(payload_json, '$.queueHeld') IS 1) THEN 1
+              ELSE 0 END) AS running
+          FROM orchestration_v2_projection_runs
+          WHERE thread_id IN ${sql.in(threads.map((row) => row.thread_id))}
+          GROUP BY thread_id
+        `;
+        const runsByThread = new Map(runs.map((row) => [row.thread_id, row]));
+        const epochMs = (value: string | null | undefined) => {
+          const parsed = value == null ? Number.NaN : Date.parse(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        };
+        return threads.map((row): WorkTreeNode => {
+          const run = runsByThread.get(row.thread_id);
+          return {
+            threadId: ThreadId.make(row.thread_id),
+            parentThreadId:
+              row.parent_thread_id === null ? null : ThreadId.make(row.parent_thread_id),
+            rolePresetId: row.role_preset_id,
+            running: run?.running === 1,
+            latestRunRequestedAtMs: epochMs(run?.latest_requested_at),
+            latestRunCompletedAtMs: epochMs(run?.latest_completed_at),
+          };
+        });
+      }).pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
+
     const shellThreadStateFromRow = (input: {
       readonly row: ShellThreadRow;
       readonly runOrdinalsByThreadId: ReadonlyMap<ThreadId, Map<RunId, number>>;
@@ -6097,6 +6169,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThread,
       getSettlementCandidates,
       getThreadsWithPullRequests,
+      getWorkTreeNodes,
       getThreadWorktreePaths,
       getThreadProjection,
       getTurnStartContext,
@@ -6259,6 +6332,42 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 : [],
             ),
           ),
+        ),
+      getWorkTreeNodes: (rootThreadIds) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => {
+            const nodes = [...state.projections.values()].flatMap(({ thread, runs }) => {
+              if (thread.deletedAt !== null) return [];
+              const { supervisorThreadId, relationshipToParent, parentThreadId } = thread.lineage;
+              const latest = (pick: (run: (typeof runs)[number]) => DateTime.Utc | null) =>
+                runs.reduce<number | null>((max, run) => {
+                  const at = pick(run);
+                  return at === null ? max : Math.max(max ?? 0, DateTime.toEpochMillis(at));
+                }, null);
+              return [
+                {
+                  threadId: thread.id,
+                  parentThreadId:
+                    supervisorThreadId ??
+                    (relationshipToParent === "subagent" ? parentThreadId : null),
+                  rolePresetId: thread.rolePreset?.id ?? null,
+                  running: runs.some(
+                    (run) =>
+                      activeRunStatuses.has(run.status) &&
+                      !(run.status === "queued" && run.queueHeld === true),
+                  ),
+                  latestRunRequestedAtMs: latest((run) => run.requestedAt),
+                  latestRunCompletedAtMs: latest((run) => run.completedAt),
+                } satisfies WorkTreeNode,
+              ];
+            });
+            const inTree = new Set(
+              rootThreadIds.flatMap((rootId) =>
+                workTreeOf(rootId, nodes).map((node) => node.threadId),
+              ),
+            );
+            return nodes.filter((node) => inTree.has(node.threadId));
+          }),
         ),
       getThreadsWithPullRequests: (threadId) =>
         Ref.get(replayState).pipe(

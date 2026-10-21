@@ -38,6 +38,7 @@ import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ServerActivation from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as PullRequestLabelReactor from "./PullRequestLabelReactor.ts";
 import * as PullRequestSyncReactor from "./PullRequestSyncReactor.ts";
 import type { PullRequestTestThread } from "./testkit/pullRequestFixtures.ts";
 
@@ -171,6 +172,7 @@ interface HarnessOptions {
   readonly stack?: (
     input: PullRequestRef,
   ) => Effect.Effect<PullRequestStack | null, PullRequestOperationError>;
+  readonly labelRules?: PullRequestLabelReactor.PullRequestLabelReactor["Service"];
 }
 
 const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: HarnessOptions) {
@@ -263,6 +265,9 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
     }),
     Layer.succeed(ServerActivation.ServerActivation, Deferred.await(activation)),
     Layer.succeed(Crypto.Crypto, testCrypto),
+    options.labelRules === undefined
+      ? Layer.empty
+      : Layer.succeed(PullRequestLabelReactor.PullRequestLabelReactor, options.labelRules),
   );
 
   return {
@@ -384,6 +389,41 @@ function applySync(
 }
 
 describe("PullRequestSyncReactor", () => {
+  it.effect("hands each sweep's reads to the label rules once their snapshots are saved", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const observed = yield* Ref.make<
+          ReadonlyArray<ReadonlyArray<PullRequestLabelReactor.PullRequestLabelObservation>>
+        >([]);
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([makeThread("one", { pullRequests: [makeLink(7)] })]),
+          summary: (input) =>
+            Effect.succeed(
+              makeSummary(input, { labels: [{ name: "Agent Building", color: null }] }),
+            ),
+          labelRules: {
+            apply: (observations) => Ref.update(observed, (batches) => [...batches, observations]),
+          },
+        });
+        yield* Effect.gen(function* () {
+          yield* startAndSweep(fixture);
+          const batches = yield* Ref.get(observed);
+          assert.strictEqual(batches.length, 1);
+          const [entry] = batches[0]!;
+          assert.strictEqual(entry?.summary.number, 7);
+          assert.deepStrictEqual(entry?.summary.labels, [{ name: "Agent Building", color: null }]);
+          assert.deepStrictEqual(
+            entry?.entries.map(({ thread }) => thread.id),
+            [ThreadId.make("one")],
+          );
+          // The label pass runs after the sweep's snapshot writes.
+          assert.strictEqual((yield* Ref.get(fixture.syncCommands)).length, 1);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
   it.effect("retries a failed stack read after the summary becomes terminal", () =>
     Effect.scoped(
       Effect.gen(function* () {

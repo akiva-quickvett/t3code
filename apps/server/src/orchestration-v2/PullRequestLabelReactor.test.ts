@@ -1,0 +1,424 @@
+import {
+  DEFAULT_PULL_REQUEST_AGENT_LABELS,
+  ProjectId,
+  READY_FOR_HUMAN_REVIEW_LABEL,
+  SourceControlProviderKind,
+  ThreadId,
+  type OrchestrationV2Command,
+  type PullRequestLabelChangeInput,
+  type PullRequestSummary,
+  type ThreadPullRequestLink,
+} from "@t3tools/contracts";
+import { assert, describe, it } from "@effect/vitest";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import { TestClock } from "effect/testing";
+
+import * as PullRequestService from "../pullRequest/PullRequestService.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as Orchestrator from "./Orchestrator.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
+import * as PullRequestLabelReactor from "./PullRequestLabelReactor.ts";
+import type { WorkTreeNode } from "./pullRequestAgentState.ts";
+
+const PROJECT_ID = ProjectId.make("label-project");
+const SLICE = ThreadId.make("slice");
+const LINKED_AT = "2026-10-01T00:00:00.000Z";
+const LINKED_MS = Date.parse(LINKED_AT);
+// A recorded done after every fixture's finished work.
+const DONE_AT = "2026-10-01T00:10:00.000Z";
+const NOW_MS = LINKED_MS + 60 * 60_000;
+
+const testCrypto = Crypto.make({
+  randomBytes: (size) => new Uint8Array(size).fill(1),
+  digest: (_algorithm, data) => Effect.succeed(data),
+});
+
+function link(overrides: Partial<ThreadPullRequestLink> = {}): ThreadPullRequestLink {
+  return {
+    host: "github.com",
+    repository: "owner/repo",
+    number: 5,
+    url: "https://github.com/owner/repo/pull/5",
+    source: "manual",
+    linkedAt: LINKED_AT,
+    snapshot: null,
+    stack: null,
+    ...overrides,
+  };
+}
+
+function summary(labels: ReadonlyArray<string>, overrides: Partial<PullRequestSummary> = {}) {
+  return {
+    provider: SourceControlProviderKind.make("github"),
+    projectId: PROJECT_ID,
+    repository: "owner/repo",
+    number: 5,
+    title: "Feature",
+    url: "https://github.com/owner/repo/pull/5",
+    state: "open",
+    isDraft: true,
+    headBranch: "feature",
+    baseBranch: "main",
+    updatedAt: LINKED_AT,
+    labels: labels.map((name) => ({ name, color: null })),
+    ...overrides,
+  } satisfies PullRequestSummary;
+}
+
+function observation(
+  pullRequest: PullRequestSummary,
+  threadLink: ThreadPullRequestLink = link(),
+): PullRequestLabelReactor.PullRequestLabelObservation {
+  return {
+    summary: pullRequest,
+    entries: [
+      {
+        thread: {
+          id: SLICE,
+          projectId: PROJECT_ID,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: SLICE },
+          settledOverride: null,
+          settledAt: null,
+          pullRequests: [threadLink],
+        },
+        link: threadLink,
+      },
+    ],
+  };
+}
+
+const sliceNode = (overrides: Partial<WorkTreeNode> = {}): WorkTreeNode => ({
+  threadId: SLICE,
+  parentThreadId: null,
+  rolePresetId: null,
+  running: false,
+  latestRunRequestedAtMs: null,
+  latestRunCompletedAtMs: null,
+  ...overrides,
+});
+
+const building = [
+  sliceNode(),
+  sliceNode({
+    threadId: ThreadId.make("impl"),
+    parentThreadId: SLICE,
+    running: true,
+    latestRunRequestedAtMs: LINKED_MS + 1,
+  }),
+];
+const quietAfterWork = [
+  sliceNode({ latestRunRequestedAtMs: LINKED_MS + 1, latestRunCompletedAtMs: LINKED_MS + 2 }),
+];
+
+const makeHarness = Effect.fn("makeLabelHarness")(function* (options: {
+  readonly nodes: ReadonlyArray<WorkTreeNode>;
+  readonly enabled?: boolean;
+  readonly rejectDispatch?: boolean;
+}) {
+  const writes = yield* Ref.make<ReadonlyArray<PullRequestLabelChangeInput>>([]);
+  const commands = yield* Ref.make<ReadonlyArray<OrchestrationV2Command["type"] | string>>([]);
+  const layer = PullRequestLabelReactor.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          dispatch: (command) =>
+            Ref.update(commands, (recorded) => [...recorded, command.type]).pipe(
+              Effect.andThen(
+                options.rejectDispatch === true
+                  ? Effect.fail(
+                      new Orchestrator.OrchestratorDispatchError({
+                        commandId: command.commandId,
+                        commandType: command.type,
+                        cause: "Command produced no domain events.",
+                      }),
+                    )
+                  : Effect.succeed({ sequence: 1, storedEvents: [] }),
+              ),
+            ),
+        }),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getWorkTreeNodes: () => Effect.succeed(options.nodes),
+        }),
+        Layer.mock(PullRequestService.PullRequestService)({
+          setLabels: (input, writeOptions) => {
+            assert.isTrue(writeOptions?.background);
+            return Ref.update(writes, (recorded) => [...recorded, input]);
+          },
+        }),
+        ServerSettings.ServerSettingsService.layerTest({
+          pullRequestLabelRules: { enabled: options.enabled ?? true },
+        }),
+        Layer.succeed(Crypto.Crypto, testCrypto),
+      ),
+    ),
+  );
+  return { writes, commands, layer };
+});
+
+const applyWith = (
+  harness: Effect.Success<ReturnType<typeof makeHarness>>,
+  observations: ReadonlyArray<PullRequestLabelReactor.PullRequestLabelObservation>,
+) =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(NOW_MS);
+    const reactor = yield* PullRequestLabelReactor.PullRequestLabelReactor;
+    yield* reactor.apply(observations);
+  }).pipe(Effect.provide(harness.layer));
+
+describe("PullRequestLabelReactor", () => {
+  it.effect("adds the state's label and removes only the other agent labels", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ nodes: building });
+      yield* applyWith(harness, [
+        observation(
+          summary(["bug", READY_FOR_HUMAN_REVIEW_LABEL, "Agent Investigating", "agent done"]),
+        ),
+      ]);
+      assert.deepEqual(yield* Ref.get(harness.writes), [
+        {
+          projectId: PROJECT_ID,
+          repository: "owner/repo",
+          number: 5,
+          labels: [DEFAULT_PULL_REQUEST_AGENT_LABELS.building],
+          applied: true,
+        },
+        {
+          projectId: PROJECT_ID,
+          repository: "owner/repo",
+          number: 5,
+          labels: ["Agent Investigating", "agent done"],
+          applied: false,
+        },
+      ]);
+    }),
+  );
+
+  it.effect("writes nothing when the pull request already shows the state", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ nodes: building });
+      yield* applyWith(harness, [observation(summary(["Agent Building", "bug"]))]);
+      assert.deepEqual(yield* Ref.get(harness.writes), []);
+    }),
+  );
+
+  it.effect("leaves merged and closed pull requests, unlabelled reads and disabled rules", () =>
+    Effect.gen(function* () {
+      const enabled = yield* makeHarness({ nodes: building });
+      yield* applyWith(enabled, [
+        observation(summary(["Agent Reviewing"], { state: "merged" })),
+        observation(summary(["Agent Reviewing"], { state: "closed" })),
+        observation({ ...summary([]), labels: undefined }),
+      ]);
+      assert.deepEqual(yield* Ref.get(enabled.writes), []);
+
+      const disabled = yield* makeHarness({ nodes: building, enabled: false });
+      yield* applyWith(disabled, [observation(summary([]))]);
+      assert.deepEqual(yield* Ref.get(disabled.writes), []);
+    }),
+  );
+
+  it.effect("records the first done before labelling, and only once", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ nodes: quietAfterWork });
+      yield* applyWith(harness, [observation(summary(["Agent Building"]))]);
+      assert.deepEqual(yield* Ref.get(harness.commands), ["thread.pull-request-link.agent-done"]);
+      assert.deepEqual(
+        (yield* Ref.get(harness.writes)).map((write) => [write.labels, write.applied]),
+        [
+          [["Agent Done"], true],
+          [["Agent Building"], false],
+        ],
+      );
+
+      const again = yield* makeHarness({ nodes: quietAfterWork });
+      yield* applyWith(again, [
+        observation(summary(["Agent Done"]), link({ agentDoneAt: DONE_AT })),
+      ]);
+      assert.deepEqual(yield* Ref.get(again.commands), []);
+      assert.deepEqual(yield* Ref.get(again.writes), []);
+    }),
+  );
+
+  it.effect("labels work after the first done as revising", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ nodes: building });
+      yield* applyWith(harness, [
+        observation(summary(["Agent Done"]), link({ agentDoneAt: DONE_AT })),
+      ]);
+      assert.deepEqual(
+        (yield* Ref.get(harness.writes)).map((write) => [write.labels, write.applied]),
+        [
+          [["Agent Revising"], true],
+          [["Agent Done"], false],
+        ],
+      );
+    }),
+  );
+});
+
+describe("PullRequestLabelReactor revisions", () => {
+  const DONE_1 = LINKED_MS + 10 * 60_000;
+  const iso = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+  const reviewer = (overrides: Partial<WorkTreeNode>) =>
+    sliceNode({
+      threadId: ThreadId.make("reviewer"),
+      parentThreadId: SLICE,
+      rolePresetId: "review-t1",
+      ...overrides,
+    });
+
+  it.effect("records each done cycle, so a second revision starts as revising", () =>
+    Effect.gen(function* () {
+      // Revision 1 was reviewed and has gone quiet: that done is recorded as the latest.
+      const revision1Done = yield* makeHarness({
+        nodes: [
+          sliceNode(),
+          reviewer({
+            latestRunRequestedAtMs: DONE_1 + 60_000,
+            latestRunCompletedAtMs: DONE_1 + 120_000,
+          }),
+        ],
+      });
+      yield* applyWith(revision1Done, [
+        observation(summary(["Agent Reviewing"]), link({ agentDoneAt: iso(DONE_1) })),
+      ]);
+      assert.deepEqual(yield* Ref.get(revision1Done.commands), [
+        "thread.pull-request-link.agent-done",
+      ]);
+
+      // Revision 2's implementor runs; revision 1's reviewer is from before the latest done.
+      const revision2 = yield* makeHarness({
+        nodes: [
+          sliceNode(),
+          reviewer({
+            latestRunRequestedAtMs: DONE_1 + 60_000,
+            latestRunCompletedAtMs: DONE_1 + 120_000,
+          }),
+          sliceNode({
+            threadId: ThreadId.make("impl"),
+            parentThreadId: SLICE,
+            running: true,
+            latestRunRequestedAtMs: NOW_MS - 60_000,
+          }),
+        ],
+      });
+      yield* applyWith(revision2, [
+        observation(summary(["Agent Done"]), link({ agentDoneAt: iso(NOW_MS - 5 * 60_000) })),
+      ]);
+      assert.deepEqual(yield* Ref.get(revision2.commands), []);
+      assert.deepEqual(
+        (yield* Ref.get(revision2.writes)).map((write) => [write.labels, write.applied]),
+        [
+          [["Agent Revising"], true],
+          [["Agent Done"], false],
+        ],
+      );
+    }),
+  );
+
+  it.effect("backs off from a pull request whose done could not be recorded", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ nodes: quietAfterWork, rejectDispatch: true });
+      yield* Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const reactor = yield* PullRequestLabelReactor.PullRequestLabelReactor;
+        const observations = [observation(summary(["Agent Building"]))];
+        yield* reactor.apply(observations);
+        yield* reactor.apply(observations);
+      }).pipe(Effect.provide(harness.layer));
+      // One attempt, no label written without the fact behind it, and no retry on the next sweep.
+      assert.deepEqual(yield* Ref.get(harness.commands), ["thread.pull-request-link.agent-done"]);
+      assert.deepEqual(yield* Ref.get(harness.writes), []);
+    }),
+  );
+});
+
+describe("PullRequestLabelReactor shared links", () => {
+  const PARENT = ThreadId.make("parent");
+  const entry = (threadId: ThreadId, threadLink: ThreadPullRequestLink) => ({
+    thread: {
+      id: threadId,
+      projectId: PROJECT_ID,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+      settledOverride: null,
+      settledAt: null,
+      pullRequests: [threadLink],
+    },
+    link: threadLink,
+  });
+  const childDone = entry(SLICE, link({ agentDoneAt: DONE_AT }));
+  const parentLater = entry(PARENT, link({ linkedAt: "2026-10-01T00:30:00.000Z" }));
+  const tree = (sliceOverrides: Partial<WorkTreeNode>) => [
+    sliceNode({ threadId: PARENT }),
+    sliceNode({ parentThreadId: PARENT, ...sliceOverrides }),
+  ];
+
+  it.effect("keeps done and revising when a parent links the pull request later", () =>
+    Effect.gen(function* () {
+      const quiet = yield* makeHarness({
+        nodes: tree({
+          latestRunRequestedAtMs: LINKED_MS + 1,
+          latestRunCompletedAtMs: LINKED_MS + 2,
+        }),
+      });
+      yield* applyWith(quiet, [
+        { summary: summary(["Agent Done"]), entries: [parentLater, childDone] },
+      ]);
+      assert.deepEqual(yield* Ref.get(quiet.writes), []);
+      // The new link takes the done too, so unlinking the first one keeps it.
+      assert.deepEqual(yield* Ref.get(quiet.commands), ["thread.pull-request-link.agent-done"]);
+
+      const working = yield* makeHarness({
+        nodes: tree({ running: true, latestRunRequestedAtMs: NOW_MS - 1 }),
+      });
+      yield* applyWith(working, [
+        { summary: summary(["Agent Done"]), entries: [parentLater, childDone] },
+      ]);
+      assert.deepEqual(
+        (yield* Ref.get(working.writes)).map((write) => [write.labels, write.applied]),
+        [
+          [["Agent Revising"], true],
+          [["Agent Done"], false],
+        ],
+      );
+    }),
+  );
+
+  it.effect("follows the linking thread's own subtree, not its siblings", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        nodes: [
+          sliceNode({ threadId: PARENT }),
+          sliceNode({ parentThreadId: PARENT, latestRunRequestedAtMs: LINKED_MS + 1 }),
+          sliceNode({
+            threadId: ThreadId.make("sibling-reviewer"),
+            parentThreadId: PARENT,
+            rolePresetId: "review-t1",
+            running: true,
+            latestRunRequestedAtMs: LINKED_MS + 1,
+          }),
+        ],
+      });
+      yield* applyWith(harness, [observation(summary(["Agent Done"]))]);
+      assert.deepEqual(yield* Ref.get(harness.writes), []);
+    }),
+  );
+});
+
+describe("agentLabelChange", () => {
+  it("matches names without regard to case and never lists a foreign label", () => {
+    assert.deepEqual(
+      PullRequestLabelReactor.agentLabelChange(DEFAULT_PULL_REQUEST_AGENT_LABELS, "reviewing", [
+        "agent reviewing",
+        "Agent Building",
+        "needs-design",
+        READY_FOR_HUMAN_REVIEW_LABEL,
+      ]),
+      { add: [], remove: ["Agent Building"] },
+    );
+  });
+});

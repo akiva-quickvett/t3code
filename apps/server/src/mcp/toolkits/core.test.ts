@@ -781,6 +781,61 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
   ),
 );
 
+it.effect("only a full-access caller turns a scheduled task into a project script", () =>
+  Effect.gen(function* () {
+    const upserts: Array<Record<string, unknown>> = [];
+    const call = (
+      access: McpInvocationContext.McpClientCaller["access"],
+      args: Record<string, unknown>,
+    ) =>
+      Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        return yield* server
+          .callTool({ name: "update_scheduled_task", arguments: args })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope(access)),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+      }).pipe(
+        Effect.provide(
+          layerOrchestratorToolkit.pipe(
+            Layer.provideMerge(McpServer.McpServer.layer),
+            Layer.provide(NodeCrypto.layer),
+            Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+            Layer.provide(ServerSettings.layerTest()),
+            Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+            Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+            Layer.provide(
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+                list: () => Effect.succeed({ tasks: [scheduledTask("task-auto", "auto")] }),
+                upsert: (input) => {
+                  upserts.push(input as Record<string, unknown>);
+                  return Effect.succeed({
+                    task: { ...(scheduledTask("task-auto", "auto") as object), ...input },
+                  } as never);
+                },
+              }),
+            ),
+            Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+            Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+          ),
+        ),
+      );
+    const action = { type: "script", scriptId: "board-sync" };
+    const denied = yield* call("auto", { scheduledTaskId: "task-auto", action });
+    expect(declaredFailure(denied)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+    expect(upserts).toHaveLength(0);
+
+    const allowed = yield* call("full-access", { scheduledTaskId: "task-auto", action });
+    expect(allowed.isError).toBe(false);
+    expect(upserts[0]).toMatchObject({
+      action,
+      threadId: null,
+      workspaceStrategy: { type: "root" },
+    });
+  }),
+);
+
 function scheduledTask(id: string, runtimeMode: "auto" | "full-access"): never {
   return {
     id,

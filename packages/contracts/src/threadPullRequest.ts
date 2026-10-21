@@ -108,5 +108,11 @@ export const ThreadPullRequestLink = Schema.Struct({
   watch: Schema.optional(ThreadPullRequestWatch),
   /** The last watch as it ended. Watching again starts from it, so the thread is not told twice. */
   endedWatch: Schema.optional(ThreadPullRequestWatch),
+  /**
+   * When PR label rules last saw the thread's work tree done for this pull request after new
+   * work. The one stored fact behind the Agent labels: the rest is computed from thread state,
+   * and work after it is Revising rather than Building.
+   */
+  agentDoneAt: Schema.optional(IsoDateTime),
 });
 export type ThreadPullRequestLink = typeof ThreadPullRequestLink.Type;

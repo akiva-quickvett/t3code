@@ -286,7 +286,32 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
     ...(task.webhook === undefined
       ? {}
       : { webhookSignature: task.webhook.hasSecret ? "set" : "none" }),
+    ...(task.action === undefined ? {} : { action: task.action }),
   };
+}
+
+/**
+ * A script runs unsupervised with the server's own access, so only a caller at the broadest
+ * runtime mode may schedule or edit one; the task records that mode so later edits are held to it.
+ */
+function requireScriptActionAccess(
+  limits: { readonly runtimeMode: RuntimeMode },
+  bindToCurrentThread: boolean | undefined,
+): Effect.Effect<void, OrchestratorMcpFailure> {
+  if (limits.runtimeMode !== "full-access") {
+    return Effect.fail(
+      failure(
+        "runtime_mode_escalation_denied",
+        `A script task runs a project script unsupervised, which needs full-access runtime mode; this caller runs at ${limits.runtimeMode}.`,
+      ),
+    );
+  }
+  if (bindToCurrentThread === true) {
+    return Effect.fail(
+      failure("invalid_request", "A script task runs on its own and cannot be bound to a thread."),
+    );
+  }
+  return Effect.void;
 }
 
 function providerConstraints(
@@ -1972,9 +1997,12 @@ const make = Effect.gen(function* () {
         const projectId = yield* resolveProjectTarget(parent, input.projectId);
         yield* assertLiveCallerForOtherProject(scope, parent, projectId);
         const project = yield* requireProject(projectId);
+        const runsScript = input.action?.type === "script";
+        if (runsScript) yield* requireScriptActionAccess(limits, input.bindToCurrentThread);
         const bindToCurrentThread =
-          input.bindToCurrentThread ??
-          (parent !== undefined && parent.thread.projectId === projectId);
+          !runsScript &&
+          (input.bindToCurrentThread ??
+            (parent !== undefined && parent.thread.projectId === projectId));
         if (
           bindToCurrentThread &&
           (parent === undefined || parent.thread.projectId !== projectId)
@@ -1998,12 +2026,16 @@ const make = Effect.gen(function* () {
           schedule: input.schedule,
           projectId,
           threadId: bindToCurrentThread && parent !== undefined ? parent.thread.id : null,
-          workspaceStrategy: scheduledTaskWorkspaceStrategy(bindToCurrentThread),
+          // A script runs where the project is checked out.
+          workspaceStrategy: runsScript
+            ? { type: "root" }
+            : scheduledTaskWorkspaceStrategy(bindToCurrentThread),
           modelSelection,
           runtimeMode: limits.runtimeMode,
           interactionMode: limits.interactionMode,
           createdBy: "agent",
           creationSource: "mcp",
+          ...(input.action === undefined ? {} : { action: input.action }),
           // Scope the idempotency key by provider session so two callers
           // reusing the same clientRequestId cannot collide on one task row.
           ...(input.clientRequestId === undefined
@@ -2048,6 +2080,13 @@ const make = Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
         const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
+        const action = input.action ?? existing.action;
+        const runsScript = action?.type === "script";
+        if (runsScript) yield* requireScriptActionAccess(limits, input.bindToCurrentThread);
+        // Leaving a script, which runs in the root, must not run loose prompts in the shared
+        // checkout, so an agent turn with no binding asked for gets a fresh worktree.
+        const leavesScript = existing.action?.type === "script" && !runsScript;
+        const bindToCurrentThread = input.bindToCurrentThread ?? (leavesScript ? false : undefined);
         if (
           input.bindToCurrentThread === true &&
           (parent === undefined || parent.thread.projectId !== existing.projectId)
@@ -2059,19 +2098,21 @@ const make = Effect.gen(function* () {
               : "bindToCurrentThread binds to this thread, which belongs to a different project.",
           );
         }
-        const threadId =
-          input.bindToCurrentThread === undefined
+        const threadId = runsScript
+          ? null
+          : bindToCurrentThread === undefined
             ? existing.threadId
-            : input.bindToCurrentThread && parent !== undefined
+            : bindToCurrentThread && parent !== undefined
               ? parent.thread.id
               : null;
         // Rebinding changes where runs execute, so the workspace strategy must
         // follow: unbinding a root-strategy task would otherwise run loose
         // prompts in the shared project checkout.
-        const workspaceStrategy =
-          input.bindToCurrentThread === undefined
+        const workspaceStrategy: ScheduledTask["workspaceStrategy"] = runsScript
+          ? { type: "root" }
+          : bindToCurrentThread === undefined
             ? existing.workspaceStrategy
-            : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+            : scheduledTaskWorkspaceStrategy(bindToCurrentThread);
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           title: input.title ?? existing.title,
@@ -2086,6 +2127,7 @@ const make = Effect.gen(function* () {
           interactionMode: existing.interactionMode,
           createdBy: existing.createdBy,
           creationSource: existing.creationSource,
+          ...(action === undefined ? {} : { action }),
         };
         const { task } = yield* scheduledTasks
           .upsert(upsertInput)

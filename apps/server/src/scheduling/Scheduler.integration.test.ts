@@ -23,6 +23,7 @@ import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as UsageLimitRecoveryWorker from "../orchestration-v2/UsageLimitRecoveryWorker.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ScheduledScriptRunner from "../scheduledTasks/ScheduledScriptRunner.ts";
 import * as ScheduledTasks from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -114,6 +115,7 @@ it.effect.each(["on time", "after restart"])(
           getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
         }),
         Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledScriptRunner.ScheduledScriptRunner)({}),
       );
       const layerWorkers = Layer.mergeAll(
         ScheduledTasks.layer,

@@ -677,6 +677,33 @@ describe("serverSettings helpers", () => {
     });
   });
 
+  it("keeps a project's label rules when a patch entry omits them, and clears them on null", () => {
+    const projectId = ProjectId.make("project-a");
+    const rules = { ...DEFAULT_SERVER_SETTINGS.pullRequestLabelRules, enabled: true };
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      projectSettingsOverrides: {
+        [projectId]: { branchNamePrefix: "t3", pullRequestLabelRules: rules },
+      },
+    };
+
+    // What a client built before label rules sends when it edits the branch prefix.
+    const kept = applyServerSettingsPatch(current, {
+      projectSettingsOverrides: { [projectId]: { branchNamePrefix: "akiva" } },
+    });
+    expect(kept.projectSettingsOverrides[projectId]).toEqual({
+      branchNamePrefix: "akiva",
+      pullRequestLabelRules: rules,
+    });
+
+    const cleared = applyServerSettingsPatch(current, {
+      projectSettingsOverrides: {
+        [projectId]: { branchNamePrefix: "t3", pullRequestLabelRules: null },
+      },
+    });
+    expect(cleared.projectSettingsOverrides[projectId]).toEqual({ branchNamePrefix: "t3" });
+  });
+
   it("clears a project's providerInstances override when a patch entry sends an empty map", () => {
     const instanceId = ProviderInstanceId.make("codex_work");
     const projectId = ProjectId.make("project-a");
