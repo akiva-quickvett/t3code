@@ -82,6 +82,7 @@ import type * as Statement from "effect/sql/Statement";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
+import { workTreeOf, type WorkTreeNode } from "./pullRequestAgentState.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
@@ -426,6 +427,10 @@ export interface ProjectionStoreV2Shape {
     ReadonlyArray<{ readonly threadId: ThreadId; readonly worktreePath: string }>,
     ProjectionStoreV2Error
   >;
+  /** These threads and every thread they launched or delegated to, transitively, with run activity. */
+  readonly getWorkTreeNodes: (
+    rootThreadIds: ReadonlyArray<ThreadId>,
+  ) => Effect.Effect<ReadonlyArray<WorkTreeNode>, ProjectionStoreV2Error>;
   readonly getTurnStartContext: (
     threadId: ThreadId,
     runId: RunId,
@@ -5764,6 +5769,87 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
       );
 
+    const getWorkTreeNodes: ProjectionStoreV2Shape["getWorkTreeNodes"] = (rootThreadIds) =>
+      Effect.gen(function* () {
+        if (rootThreadIds.length === 0) return [];
+        // Forks copy a conversation rather than take work from it, so only supervised and
+        // delegated children belong to the tree.
+        const threads = yield* sql<{
+          readonly thread_id: string;
+          readonly parent_thread_id: string | null;
+          readonly role_preset_id: string | null;
+        }>`
+          SELECT
+            thread_id,
+            COALESCE(
+              json_extract(payload_json, '$.lineage.supervisorThreadId'),
+              CASE WHEN json_extract(payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                THEN json_extract(payload_json, '$.lineage.parentThreadId') END
+            ) AS parent_thread_id,
+            json_extract(payload_json, '$.rolePreset.id') AS role_preset_id
+          FROM orchestration_v2_projection_threads
+          WHERE deleted_at IS NULL
+            AND json_valid(payload_json)
+            AND (
+              thread_id IN ${sql.in(rootThreadIds)}
+              OR json_extract(payload_json, '$.lineage.supervisorThreadId') IS NOT NULL
+              OR json_extract(payload_json, '$.lineage.relationshipToParent') = 'subagent'
+            )
+        `;
+        const children = new Map<string, Array<string>>();
+        for (const row of threads) {
+          if (row.parent_thread_id === null) continue;
+          const siblings = children.get(row.parent_thread_id) ?? [];
+          siblings.push(row.thread_id);
+          children.set(row.parent_thread_id, siblings);
+        }
+        const inTree = new Set<string>();
+        const pending: Array<string> = [...rootThreadIds];
+        while (pending.length > 0) {
+          const threadId = pending.pop()!;
+          if (inTree.has(threadId)) continue;
+          inTree.add(threadId);
+          pending.push(...(children.get(threadId) ?? []));
+        }
+        const runs = yield* sql<{
+          readonly thread_id: string;
+          readonly latest_requested_at: string | null;
+          readonly latest_completed_at: string | null;
+          readonly running: number;
+        }>`
+          SELECT
+            thread_id,
+            MAX(requested_at) AS latest_requested_at,
+            MAX(completed_at) AS latest_completed_at,
+            MAX(CASE
+              WHEN status IN ('preparing', 'starting', 'running', 'waiting') THEN 1
+              WHEN status = 'queued' AND json_extract(payload_json, '$.queueHeld') IS NOT 1 THEN 1
+              ELSE 0 END) AS running
+          FROM orchestration_v2_projection_runs
+          WHERE thread_id IN ${sql.in([...inTree])}
+          GROUP BY thread_id
+        `;
+        const runsByThread = new Map(runs.map((row) => [row.thread_id, row]));
+        const epochMs = (value: string | null | undefined) => {
+          const parsed = value == null ? Number.NaN : Date.parse(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        };
+        return threads
+          .filter((row) => inTree.has(row.thread_id))
+          .map((row): WorkTreeNode => {
+            const run = runsByThread.get(row.thread_id);
+            return {
+              threadId: ThreadId.make(row.thread_id),
+              parentThreadId:
+                row.parent_thread_id === null ? null : ThreadId.make(row.parent_thread_id),
+              rolePresetId: row.role_preset_id,
+              running: run?.running === 1,
+              latestRunRequestedAtMs: epochMs(run?.latest_requested_at),
+              latestRunCompletedAtMs: epochMs(run?.latest_completed_at),
+            };
+          });
+      }).pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
+
     const shellThreadStateFromRow = (input: {
       readonly row: ShellThreadRow;
       readonly runOrdinalsByThreadId: ReadonlyMap<ThreadId, Map<RunId, number>>;
@@ -6097,6 +6183,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThread,
       getSettlementCandidates,
       getThreadsWithPullRequests,
+      getWorkTreeNodes,
       getThreadWorktreePaths,
       getThreadProjection,
       getTurnStartContext,
@@ -6259,6 +6346,42 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 : [],
             ),
           ),
+        ),
+      getWorkTreeNodes: (rootThreadIds) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => {
+            const nodes = [...state.projections.values()].flatMap(({ thread, runs }) => {
+              if (thread.deletedAt !== null) return [];
+              const { supervisorThreadId, relationshipToParent, parentThreadId } = thread.lineage;
+              const latest = (pick: (run: (typeof runs)[number]) => DateTime.Utc | null) =>
+                runs.reduce<number | null>((max, run) => {
+                  const at = pick(run);
+                  return at === null ? max : Math.max(max ?? 0, DateTime.toEpochMillis(at));
+                }, null);
+              return [
+                {
+                  threadId: thread.id,
+                  parentThreadId:
+                    supervisorThreadId ??
+                    (relationshipToParent === "subagent" ? parentThreadId : null),
+                  rolePresetId: thread.rolePreset?.id ?? null,
+                  running: runs.some(
+                    (run) =>
+                      activeRunStatuses.has(run.status) &&
+                      !(run.status === "queued" && run.queueHeld === true),
+                  ),
+                  latestRunRequestedAtMs: latest((run) => run.requestedAt),
+                  latestRunCompletedAtMs: latest((run) => run.completedAt),
+                } satisfies WorkTreeNode,
+              ];
+            });
+            const inTree = new Set(
+              rootThreadIds.flatMap((rootId) =>
+                workTreeOf(rootId, nodes).map((node) => node.threadId),
+              ),
+            );
+            return nodes.filter((node) => inTree.has(node.threadId));
+          }),
         ),
       getThreadsWithPullRequests: (threadId) =>
         Ref.get(replayState).pipe(

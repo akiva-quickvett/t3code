@@ -6385,3 +6385,90 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
     );
   },
 );
+
+it.layer(Layer.fresh(layerSharedApplicationDataPlaneTest))("PR label rule facts", (it) => {
+  it.effect("keeps the first agent done on a link and reads the supervised tree with roles", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projectId = ProjectId.make("label-rules-project");
+      const create = (id: string, extra: object = {}) =>
+        orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`label-rules-create-${id}`),
+          threadId: ThreadId.make(id),
+          projectId,
+          title: id,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          ...extra,
+        });
+      const sliceId = ThreadId.make("label-rules-slice");
+      yield* create(sliceId);
+      yield* create("label-rules-reviewer", {
+        supervisorThreadId: sliceId,
+        rolePreset: { id: "review-t1", label: "Reviewer (tier 1)" },
+      });
+      yield* create("label-rules-unrelated");
+      const key = { host: "github.com", repository: "pingdotgg/t3code", number: 7 };
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request.link",
+        commandId: CommandId.make("label-rules-link"),
+        threadId: sliceId,
+        ...key,
+        url: "https://github.com/pingdotgg/t3code/pull/7",
+        source: "manual",
+      });
+      const markDone = (commandId: string, doneAt: string) =>
+        orchestrator.dispatch({
+          type: "thread.pull-request-link.agent-done",
+          commandId: CommandId.make(commandId),
+          threadId: sliceId,
+          ...key,
+          doneAt,
+        });
+      yield* markDone("label-rules-done-1", "2026-10-13T12:00:00.000Z");
+      // A later done would move the fact forward, so it changes nothing and records no event.
+      const again = yield* markDone("label-rules-done-2", "2026-10-13T13:00:00.000Z").pipe(
+        Effect.flip,
+      );
+      assert.instanceOf(again, Orchestrator.OrchestratorDispatchError);
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request-link.sync",
+        commandId: CommandId.make("label-rules-sync"),
+        threadId: sliceId,
+        ...key,
+        snapshot: {
+          state: "open",
+          title: "Open PR",
+          headBranch: "feature/pr",
+          baseBranch: "main",
+          isDraft: true,
+          updatedAt: null,
+          syncedAt: "2026-10-13T14:00:00.000Z",
+        },
+        stack: null,
+      });
+      const link = (yield* orchestrator.getThreadShell(sliceId))?.pullRequests?.[0];
+      assert.equal(link?.agentDoneAt, "2026-10-13T12:00:00.000Z");
+      assert.equal(link?.snapshot?.title, "Open PR");
+
+      const nodes = yield* ProjectionStore.ProjectionStoreV2.use((projections) =>
+        projections.getWorkTreeNodes([sliceId]),
+      ).pipe(Effect.provide(ProjectionStore.layer));
+      assert.deepEqual(
+        nodes
+          .map((node) => [node.threadId, node.parentThreadId, node.rolePresetId, node.running])
+          .toSorted(),
+        [
+          [ThreadId.make("label-rules-reviewer"), sliceId, "review-t1", false],
+          [sliceId, null, null, false],
+        ],
+      );
+    }),
+  );
+});

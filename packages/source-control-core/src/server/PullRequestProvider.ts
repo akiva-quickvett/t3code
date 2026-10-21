@@ -113,6 +113,8 @@ export interface ProviderChangeRequestSummary {
   readonly reviewDecision?: PullRequestReviewDecision | null | undefined;
   readonly checksState?: PullRequestChecksState | null | undefined;
   readonly mergeability?: PullRequestMergeability | undefined;
+  /** Absent when the host's summary read does not carry labels. */
+  readonly labels?: ReadonlyArray<PullRequestLabel> | undefined;
   /**
    * Null when the host says it is in none; absent when the read did not ask.
    */
@@ -507,6 +509,11 @@ export interface PullRequestProviderApi {
       readonly number: number;
       readonly labels: ReadonlyArray<string>;
       readonly applied: boolean;
+      /**
+       * A rule asked rather than a person, so the write waits out a rate limit pause and
+       * leaves the quota reserve to people.
+       */
+      readonly background?: boolean;
     },
   ) => Effect.Effect<void, PullRequestProviderError>;
 

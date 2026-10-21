@@ -151,6 +151,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   serverBrowser: Schema.optionalKey(Schema.Boolean),
   /** Server answers the agentRoles.* RPCs and records thread roles; absent on stock servers. */
   agentRolePresets: Schema.optionalKey(Schema.Boolean),
+  /** Server reads the `pullRequestLabelRules` setting and applies Agent labels; absent on stock servers. */
+  pullRequestLabelRules: Schema.optionalKey(Schema.Boolean),
+  /** Server runs scheduled tasks whose `action` is a project script; absent on stock servers. */
+  scheduledTaskScripts: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

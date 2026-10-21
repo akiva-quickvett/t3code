@@ -455,6 +455,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
     case "thread.pull-request-link.sync":
+    case "thread.pull-request-link.agent-done":
     case "thread.pull-request.watch":
     case "thread.pull-request-watch.sync":
     case "thread.pull-request.sync":
@@ -2504,6 +2505,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.pull-request.link"
           | "thread.pull-request.unlink"
           | "thread.pull-request-link.sync"
+          | "thread.pull-request-link.agent-done"
           | "thread.pull-request.watch"
           | "thread.pull-request-watch.sync"
           | "thread.pull-request.sync"
@@ -3198,6 +3200,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             updatedAt: command.type === "thread.pull-request-link.sync" ? thread.updatedAt : now,
           };
         }
+        case "thread.pull-request-link.agent-done": {
+          const key = normalizeThreadPullRequestKey(command);
+          const links = threadPullRequestsOf(thread);
+          const existing = links.find((link) => threadPullRequestKeysEqual(link, key));
+          // The first done is the one that counts; later ones would move it forward.
+          if (existing === undefined || existing.agentDoneAt !== undefined) return thread;
+          return {
+            ...thread,
+            pullRequests: links.map((link) =>
+              link === existing ? { ...link, agentDoneAt: command.doneAt } : link,
+            ),
+          };
+        }
         case "thread.pull-request.watch":
         case "thread.pull-request-watch.sync": {
           const key = normalizeThreadPullRequestKey(command);
@@ -3325,6 +3340,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     })();
     if (
       command.type === "thread.pull-request-link.sync" ||
+      command.type === "thread.pull-request-link.agent-done" ||
       command.type === "thread.pull-request-watch.sync"
     ) {
       if (updatedThread === thread) return;
@@ -11227,6 +11243,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.pull-request.link":
       case "thread.pull-request.unlink":
       case "thread.pull-request-link.sync":
+      case "thread.pull-request-link.agent-done":
       case "thread.pull-request.watch":
       case "thread.pull-request.sync":
       case "thread.title.regeneration.complete":

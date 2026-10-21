@@ -49,6 +49,7 @@ import {
 import { usePrimaryCloudLinkState } from "../../cloud/primaryCloudLinkState";
 import { requestConfirmDialog } from "../../confirmDialog";
 import { webhookAddress } from "@t3tools/client-runtime/webhook-address";
+import { resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import { Link } from "@tanstack/react-router";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useNowMinute } from "../../hooks/useNowMinute";
@@ -76,7 +77,9 @@ import {
   matchesScheduledTaskScope,
   scheduleFromDraft,
   scheduledTaskDefaultModel,
+  scriptTaskPrompt,
   taskToDraft,
+  type ActionMode,
   type DraftState,
   type ScheduleMode,
   type WorkspaceMode,
@@ -126,6 +129,8 @@ const EMPTY_DRAFT: DraftState = {
   title: "",
   prompt: "",
   enabled: true,
+  actionMode: "agentTurn",
+  scriptId: "",
   scheduleMode: "fixed",
   intervalMinutes: "15",
   timeOfDay: "09:00",
@@ -627,7 +632,11 @@ function ScheduledTaskRow({
           {task.lastRunStatus !== "never" ? (
             <Badge variant={statusVariant(task.lastRunStatus)}>{task.lastRunStatus}</Badge>
           ) : null}
-          {task.lastRunError ? <span className="text-destructive">{task.lastRunError}</span> : null}
+          {task.action?.type === "script" ? <Badge variant="outline">Project action</Badge> : null}
+          {task.lastRunError ? (
+            // A failed project action carries the last lines of its stderr.
+            <span className="whitespace-pre-line text-destructive">{task.lastRunError}</span>
+          ) : null}
         </div>
       }
       control={
@@ -746,9 +755,11 @@ function WebhookDeliveriesDialog({
                 ) : null}
               </div>
               {selected.error ? <p className="text-sm text-destructive">{selected.error}</p> : null}
-              <DeliveryBlock title="Prompt sent to the agent">
-                {selected.renderedPrompt ?? "No run was started for this request."}
-              </DeliveryBlock>
+              {task.action?.type === "script" ? null : (
+                <DeliveryBlock title="Prompt sent to the agent">
+                  {selected.renderedPrompt ?? "No run was started for this request."}
+                </DeliveryBlock>
+              )}
               {selected.missingFields.length > 0 ? (
                 <p className="text-sm text-muted-foreground">
                   Empty placeholders: {selected.missingFields.join(", ")}
@@ -1003,6 +1014,12 @@ function ScheduledTaskEditorForm({
     : task;
   const selectedProjectId = draft.projectId || projects[0]?.id || "";
   const selectedProject = projects.find((project) => project.id === selectedProjectId);
+  // A stock server would drop the action and save an agent turn, so it never offers scripts.
+  const scriptsSupported =
+    environment?.serverConfig?.environment.capabilities.scheduledTaskScripts === true;
+  const runsScript = draft.actionMode === "script";
+  const projectScripts = selectedProject ? resolveProjectScripts(settings, selectedProject) : [];
+  const selectedScript = projectScripts.find((script) => script.id === draft.scriptId);
   const instanceEntries = sortProviderInstanceEntries(
     applyProviderInstanceSettings(
       deriveProviderInstanceEntries(providers),
@@ -1048,14 +1065,19 @@ function ScheduledTaskEditorForm({
       tasksQuery.data === null
     )
       return;
-    const selection = activeSelection;
+    // A script ignores the model, but the task still carries one for clients that edit it.
+    const selection = activeSelection ?? (runsScript ? draft.baseModelSelection : null);
     if (
       !draft.title.trim() ||
-      !draft.prompt.trim() ||
+      (!runsScript && !draft.prompt.trim()) ||
       !projects.some((project) => project.id === selectedProjectId) ||
       selection === null
     ) {
       reportFailure("Scheduled task is incomplete", "Add a title, prompt, project, and model.");
+      return;
+    }
+    if (runsScript && selectedScript === undefined) {
+      reportFailure("Choose an action", "Pick one of the project's actions to run.");
       return;
     }
     const schedule = scheduleFromDraft(draft);
@@ -1083,7 +1105,11 @@ function ScheduledTaskEditorForm({
       reportFailure("Invalid interval", "Enter an interval of at least one minute.");
       return;
     }
-    if (draft.workspaceMode === "existing_worktree" && !draft.existingWorktreePath.trim()) {
+    if (
+      !runsScript &&
+      draft.workspaceMode === "existing_worktree" &&
+      !draft.existingWorktreePath.trim()
+    ) {
       reportFailure("Checkout path is required", "Enter the path of the checkout to run in.");
       return;
     }
@@ -1094,7 +1120,7 @@ function ScheduledTaskEditorForm({
         ? draft.baseModelSelection
         : selection;
     const workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy =
-      draft.workspaceMode === "root"
+      runsScript || draft.workspaceMode === "root"
         ? { type: "root" }
         : draft.workspaceMode === "existing_worktree"
           ? { type: "existing_worktree", worktreePath: draft.existingWorktreePath.trim() }
@@ -1106,16 +1132,22 @@ function ScheduledTaskEditorForm({
     const input: ScheduledTaskUpsertInput = {
       ...(draft.editingId ? { id: draft.editingId as ScheduledTaskId, requireExisting: true } : {}),
       title: draft.title.trim(),
-      prompt: draft.prompt.trim(),
+      prompt:
+        selectedScript && runsScript ? scriptTaskPrompt(selectedScript.name) : draft.prompt.trim(),
       enabled: draft.enabled,
       schedule,
       projectId: selectedProjectId as ProjectId,
-      threadId: draft.threadId ? (draft.threadId as ThreadId) : null,
+      threadId: draft.threadId && !runsScript ? (draft.threadId as ThreadId) : null,
       workspaceStrategy,
       modelSelection,
       runtimeMode: draft.runtimeMode,
       interactionMode: draft.interactionMode,
       creationSource: "web",
+      ...(!scriptsSupported
+        ? {}
+        : selectedScript && runsScript
+          ? { action: { type: "script", scriptId: selectedScript.id } }
+          : { action: { type: "agentTurn" } }),
     };
     // Lock before React renders, and keep successful creates locked until the form closes.
     submissionPending.current = true;
@@ -1137,7 +1169,8 @@ function ScheduledTaskEditorForm({
       <DialogHeader>
         <DialogTitle>{draft.editingId ? "Edit task" : "New task"}</DialogTitle>
         <DialogDescription>
-          Run a prompt automatically — on an interval, at a fixed time, or when a webhook is called.
+          Run a prompt{scriptsSupported ? " or a project action" : ""} automatically — on an
+          interval, at a fixed time, or when a webhook is called.
         </DialogDescription>
       </DialogHeader>
 
@@ -1229,6 +1262,24 @@ function ScheduledTaskEditorForm({
             />
           </Field>
 
+          {scriptsSupported || runsScript ? (
+            <div className="flex items-center justify-between gap-2">
+              <Label>Each run</Label>
+              <ToggleGroup
+                aria-label="Each run"
+                value={[draft.actionMode]}
+                onValueChange={(values) => {
+                  const mode = values[0] as ActionMode | undefined;
+                  if (mode === "agentTurn" || mode === "script")
+                    setDraft((current) => ({ ...current, actionMode: mode }));
+                }}
+              >
+                <Toggle value="agentTurn">Agent turn</Toggle>
+                <Toggle value="script">Project action</Toggle>
+              </ToggleGroup>
+            </div>
+          ) : null}
+
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Project" htmlFor="scheduled-task-project">
               <Select
@@ -1260,26 +1311,60 @@ function ScheduledTaskEditorForm({
               </Select>
             </Field>
 
-            <Field label="Workspace" htmlFor="scheduled-task-workspace">
-              <Select
-                value={draft.workspaceMode}
-                onValueChange={(value) =>
-                  setDraft((current) => ({ ...current, workspaceMode: value as WorkspaceMode }))
-                }
-              >
-                <SelectTrigger size="sm" id="scheduled-task-workspace">
-                  <SelectValue>{WORKSPACE_MODE_LABELS[draft.workspaceMode]}</SelectValue>
-                </SelectTrigger>
-                <SelectPopup>
-                  <SelectItem value="worktree">Create a new worktree</SelectItem>
-                  <SelectItem value="root">Use the project checkout</SelectItem>
-                  <SelectItem value="existing_worktree">Use a specific checkout</SelectItem>
-                </SelectPopup>
-              </Select>
-            </Field>
+            {runsScript ? (
+              <Field label="Project action" htmlFor="scheduled-task-script">
+                <Select
+                  value={draft.scriptId}
+                  onValueChange={(scriptId) =>
+                    setDraft((current) => ({ ...current, scriptId: scriptId ?? "" }))
+                  }
+                >
+                  <SelectTrigger size="sm" id="scheduled-task-script">
+                    <SelectValue placeholder="Select an action">
+                      {selectedScript?.name ?? (draft.scriptId ? "Missing action" : undefined)}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {projectScripts.map((script) => (
+                      <SelectItem key={script.id} value={script.id} label={script.name}>
+                        <span className="block truncate">{script.name}</span>
+                        <span className="block max-w-72 truncate font-mono text-xs text-muted-foreground">
+                          {script.command}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </Field>
+            ) : (
+              <Field label="Workspace" htmlFor="scheduled-task-workspace">
+                <Select
+                  value={draft.workspaceMode}
+                  onValueChange={(value) =>
+                    setDraft((current) => ({ ...current, workspaceMode: value as WorkspaceMode }))
+                  }
+                >
+                  <SelectTrigger size="sm" id="scheduled-task-workspace">
+                    <SelectValue>{WORKSPACE_MODE_LABELS[draft.workspaceMode]}</SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup>
+                    <SelectItem value="worktree">Create a new worktree</SelectItem>
+                    <SelectItem value="root">Use the project checkout</SelectItem>
+                    <SelectItem value="existing_worktree">Use a specific checkout</SelectItem>
+                  </SelectPopup>
+                </Select>
+              </Field>
+            )}
           </div>
 
-          {draft.workspaceMode === "worktree" ? (
+          {runsScript ? (
+            <p className="text-xs text-muted-foreground">
+              {projectScripts.length === 0
+                ? "This project has no actions. Add one in the project's settings first."
+                : "Runs in the project checkout with no agent or model. The last run shows its exit code and the end of its error output."}
+            </p>
+          ) : null}
+          {!runsScript && draft.workspaceMode === "worktree" ? (
             <Field label="Base branch" htmlFor="scheduled-task-base-ref">
               <WorktreeBaseBranchPicker
                 key={`${environmentId}:${selectedProjectId}`}
@@ -1296,7 +1381,7 @@ function ScheduledTaskEditorForm({
               />
             </Field>
           ) : null}
-          {draft.workspaceMode === "existing_worktree" ? (
+          {!runsScript && draft.workspaceMode === "existing_worktree" ? (
             <Field label="Checkout path" htmlFor="scheduled-task-checkout">
               <Input
                 id="scheduled-task-checkout"
@@ -1312,36 +1397,40 @@ function ScheduledTaskEditorForm({
             </Field>
           ) : null}
 
-          <Field label="Prompt" htmlFor="scheduled-task-prompt">
-            <Textarea
-              id="scheduled-task-prompt"
-              className="max-h-64 overflow-y-auto"
-              placeholder="What should the agent do each time this runs?"
-              value={draft.prompt}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, prompt: event.target.value }))
-              }
-            />
-          </Field>
+          {runsScript ? null : (
+            <>
+              <Field label="Prompt" htmlFor="scheduled-task-prompt">
+                <Textarea
+                  id="scheduled-task-prompt"
+                  className="max-h-64 overflow-y-auto"
+                  placeholder="What should the agent do each time this runs?"
+                  value={draft.prompt}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, prompt: event.target.value }))
+                  }
+                />
+              </Field>
 
-          <Field label="Model">
-            <div>
-              <ProviderModelPicker
-                environmentId={environmentId}
-                disabled={saving || !connected}
-                activeInstanceId={activeInstanceId}
-                model={activeModel}
-                providerLock={null}
-                instanceEntries={instanceEntries}
-                modelOptionsByInstance={modelOptionsByInstance}
-                isComposerOwned={false}
-                triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                onInstanceModelChange={(instanceId, model) =>
-                  setDraft((current) => ({ ...current, modelKey: `${instanceId}:${model}` }))
-                }
-              />
-            </div>
-          </Field>
+              <Field label="Model">
+                <div>
+                  <ProviderModelPicker
+                    environmentId={environmentId}
+                    disabled={saving || !connected}
+                    activeInstanceId={activeInstanceId}
+                    model={activeModel}
+                    providerLock={null}
+                    instanceEntries={instanceEntries}
+                    modelOptionsByInstance={modelOptionsByInstance}
+                    isComposerOwned={false}
+                    triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                    onInstanceModelChange={(instanceId, model) =>
+                      setDraft((current) => ({ ...current, modelKey: `${instanceId}:${model}` }))
+                    }
+                  />
+                </div>
+              </Field>
+            </>
+          )}
 
           <div className="space-y-3">
             {task?.schedule.type === "interval" &&

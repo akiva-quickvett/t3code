@@ -3,6 +3,7 @@ import {
   MessageId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ScheduledTask,
+  ScheduledTaskAction,
   ScheduledTaskError,
   ScheduledTaskId,
   ThreadId,
@@ -45,6 +46,7 @@ import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as ScheduledScriptRunner from "./ScheduledScriptRunner.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
 import {
   redactHeaders,
@@ -142,6 +144,7 @@ const decodeWorkspaceStrategyJson = Schema.decodeUnknownEffect(
 const decodeModelSelectionJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ScheduledTask.fields.modelSelection),
 );
+const decodeActionJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ScheduledTaskAction));
 const HeadersJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.String));
 const MissingFieldsJson = Schema.fromJsonString(Schema.Array(Schema.String));
 const decodeHeadersJson = Schema.decodeUnknownOption(HeadersJson);
@@ -172,6 +175,8 @@ interface ScheduledTaskRow {
   readonly run_count: number;
   readonly webhook_token: string | null;
   readonly webhook_secret: string | null;
+  /** Null for an agent turn, the only action rows written before script actions had. */
+  readonly action_json: string | null;
 }
 
 interface WebhookDeliveryRow {
@@ -286,6 +291,7 @@ const decodeRow = (row: ScheduledTaskRow, origin: WebhookOrigin | null = null) =
     const webhook = schedule.type === "webhook" ? webhookEndpoint(row, origin) : undefined;
     const workspaceStrategy = yield* decodeWorkspaceStrategyJson(row.workspace_strategy_json);
     const modelSelection = yield* decodeModelSelectionJson(row.model_selection_json);
+    const action = row.action_json === null ? undefined : yield* decodeActionJson(row.action_json);
     return yield* decodeTask({
       id: row.task_id,
       title: row.title,
@@ -308,6 +314,7 @@ const decodeRow = (row: ScheduledTaskRow, origin: WebhookOrigin | null = null) =
       lastRunError: row.last_run_error,
       runCount: row.run_count,
       ...(webhook === undefined ? {} : { webhook }),
+      ...(action === undefined ? {} : { action }),
     });
   }).pipe(
     Effect.mapError((cause) => {
@@ -362,6 +369,7 @@ export const layer = Layer.effect(
     const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const secretRequests = yield* SecretRequests.SecretRequests;
+    const scriptRunner = yield* ScheduledScriptRunner.ScheduledScriptRunner;
     const scheduler = yield* Scheduler.Scheduler;
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
@@ -372,6 +380,7 @@ export const layer = Layer.effect(
     const webhookQueued = yield* Ref.make<ReadonlyMap<string, number>>(new Map());
     const webhookRateWindows = yield* Ref.make<ReadonlyMap<ScheduledTaskId, RateWindow>>(new Map());
     const activeRuns = yield* Ref.make<ReadonlySet<ScheduledTaskId>>(new Set());
+    const serviceScope = yield* Effect.scope;
     // Sliding(1) coalesces the dirty-signal: every notification triggers a
     // full list() re-emit anyway, so a slow subscriber only ever needs the
     // latest signal — an unbounded backlog would just grow memory.
@@ -401,7 +410,8 @@ export const layer = Layer.effect(
         last_run_error,
         run_count,
         webhook_token,
-        webhook_secret
+        webhook_secret,
+        action_json
       FROM scheduled_tasks
       ORDER BY updated_at DESC, task_id ASC
     `;
@@ -435,7 +445,8 @@ export const layer = Layer.effect(
         last_run_error,
         run_count,
         webhook_token,
-        webhook_secret
+        webhook_secret,
+        action_json
       FROM scheduled_tasks
       WHERE task_id = ${id}
     `;
@@ -513,7 +524,8 @@ export const layer = Layer.effect(
           last_run_error,
           run_count,
           webhook_token,
-          webhook_secret
+          webhook_secret,
+          action_json
         )
         SELECT
           ${task.id},
@@ -537,7 +549,8 @@ export const layer = Layer.effect(
           ${task.lastRunError},
           ${task.runCount},
           ${webhook.token},
-          ${webhook.secret}
+          ${webhook.secret},
+          ${task.action === undefined ? null : JSON.stringify(task.action)}
         WHERE ${requireExisting ? 0 : 1} = 1
            OR EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id = ${task.id})
         ON CONFLICT (task_id)
@@ -552,6 +565,7 @@ export const layer = Layer.effect(
           model_selection_json = excluded.model_selection_json,
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
+          action_json = excluded.action_json,
           creation_source = excluded.creation_source,
           updated_at = excluded.updated_at,
           next_run_at = excluded.next_run_at,
@@ -679,6 +693,12 @@ export const layer = Layer.effect(
         }
         return task;
       }
+      const unreserve = Ref.update(activeRuns, (active) => {
+        const next = new Set(active);
+        next.delete(task.id);
+        return next;
+      });
+      let detached = false;
 
       return yield* Effect.gen(function* () {
         const startedAt = yield* localNow;
@@ -718,14 +738,79 @@ export const layer = Layer.effect(
               ? "The task was replaced before this delivery ran."
               : active.schedule.type !== "webhook"
                 ? "The task's trigger changed before this delivery ran."
-                : !active.enabled
-                  ? "The task was paused before this delivery ran."
-                  : null;
+                : (active.action?.type ?? "agentTurn") !== (task.action?.type ?? "agentTurn")
+                  ? "The task's action changed before this delivery ran."
+                  : !active.enabled
+                    ? "The task was paused before this delivery ran."
+                    : null;
           if (reason !== null) return yield* new WebhookDeliverySkipped({ reason });
         }
 
         yield* markRunning(active.id, startedAtIso);
         yield* notifyChanged;
+
+        const recordCompletion = Effect.fn("ScheduledTaskService.recordCompletion")(function* (
+          error: string | null,
+        ) {
+          const completedAt = yield* localNow;
+          const lastRunStatus = error === null ? ("succeeded" as const) : ("failed" as const);
+          const current = yield* findTask(task.id);
+          const scheduleSource = current ?? task;
+          const completed: ScheduledTask = {
+            ...scheduleSource,
+            updatedAt: iso(completedAt),
+            lastRunAt: startedAtIso,
+            nextRunAt: nextRunAt(scheduleSource, completedAt),
+            lastRunStatus,
+            lastRunError: error,
+            runCount: scheduleSource.runCount + 1,
+          };
+          if (current !== null) {
+            // startedAtIso in the guard ensures this writes only to the row this
+            // run marked as running — a task deleted mid-run and recreated with
+            // the same id (idempotent commandId replay) must not be stamped.
+            yield* markCompleted({
+              id: task.id,
+              completedAtIso: completed.updatedAt,
+              nextRunAtIso: completed.nextRunAt,
+              status: lastRunStatus,
+              error,
+              startedAtIso,
+            });
+            yield* notifyChanged;
+          }
+          return completed;
+        });
+
+        const action = active.action;
+        if (action?.type === "script") {
+          const runScript = Effect.exit(
+            scriptRunner.run({ projectId: active.projectId, scriptId: action.scriptId }),
+          ).pipe(
+            Effect.flatMap((exit) =>
+              recordCompletion(
+                exit._tag === "Success" ? exit.value.failure : errorMessage(exit.cause),
+              ),
+            ),
+          );
+          // A webhook run is already in the background, one delivery at a time per task.
+          if (webhook !== undefined) return yield* runScript;
+          // Scheduled and manual runs return once the script starts: a long script must not hold
+          // the poll that runs every other due task, nor a client waiting on run-now.
+          detached = true;
+          yield* runScript.pipe(
+            Effect.onError((cause) => releaseStuckRun(task, errorMessage(cause))),
+            Effect.ensuring(unreserve),
+            Effect.forkIn(serviceScope),
+          );
+          return {
+            ...active,
+            updatedAt: startedAtIso,
+            lastRunAt: startedAtIso,
+            lastRunStatus: "running",
+            lastRunError: null,
+          } satisfies ScheduledTask;
+        }
 
         const fireKey =
           webhook === undefined
@@ -777,45 +862,13 @@ export const layer = Layer.effect(
                 }),
               );
 
-        const completedAt = yield* localNow;
-        const runSucceeded = result._tag === "Success";
-        const lastRunStatus = runSucceeded ? ("succeeded" as const) : ("failed" as const);
-        const lastRunError = runSucceeded ? null : errorMessage(result.cause);
-        const current = yield* findTask(task.id);
-        const scheduleSource = current ?? task;
-        const completed: ScheduledTask = {
-          ...scheduleSource,
-          updatedAt: iso(completedAt),
-          lastRunAt: startedAtIso,
-          nextRunAt: nextRunAt(scheduleSource, completedAt),
-          lastRunStatus,
-          lastRunError,
-          runCount: scheduleSource.runCount + 1,
-        };
-        if (current !== null) {
-          // startedAtIso in the guard ensures this writes only to the row this
-          // run marked as running — a task deleted mid-run and recreated with
-          // the same id (idempotent commandId replay) must not be stamped.
-          yield* markCompleted({
-            id: task.id,
-            completedAtIso: completed.updatedAt,
-            nextRunAtIso: completed.nextRunAt,
-            status: lastRunStatus,
-            error: lastRunError,
-            startedAtIso,
-          });
-          yield* notifyChanged;
-        }
-        return completed;
+        return yield* recordCompletion(
+          result._tag === "Success" ? null : errorMessage(result.cause),
+        );
       }).pipe(
         Effect.onError((cause) => releaseStuckRun(task, errorMessage(cause))),
-        Effect.ensuring(
-          Ref.update(activeRuns, (active) => {
-            const next = new Set(active);
-            next.delete(task.id);
-            return next;
-          }),
-        ),
+        // A detached script run releases its reservation when it finishes.
+        Effect.ensuring(Effect.suspend(() => (detached ? Effect.void : unreserve))),
       );
     });
 
@@ -933,6 +986,33 @@ export const layer = Layer.effect(
         }),
       );
 
+    const validateScriptAction = Effect.fn("ScheduledTaskService.validateScriptAction")(function* (
+      id: ScheduledTaskId,
+      input: ScheduledTaskUpsertInput,
+      scriptId: string,
+    ) {
+      if (input.threadId != null) {
+        return yield* taskError("A script task runs on its own and cannot be bound to a thread.", {
+          taskId: id,
+        });
+      }
+      if (input.workspaceStrategy.type !== "root" || input.workspaceStrategy.branch !== undefined) {
+        return yield* taskError(
+          "A script task runs in the project root as it is checked out; choose the root workspace.",
+          { taskId: id },
+        );
+      }
+      const script = yield* scriptRunner.findScript({ projectId: input.projectId, scriptId });
+      if (script === null) {
+        return yield* taskError(
+          `Project script "${scriptId}" is not configured for this project.`,
+          {
+            taskId: id,
+          },
+        );
+      }
+    });
+
     const upsert: ScheduledTaskService["Service"]["upsert"] = (input) =>
       Effect.gen(function* () {
         const now = yield* localNow;
@@ -955,6 +1035,13 @@ export const layer = Layer.effect(
         // keep their run history, and so real load failures propagate instead
         // of silently resetting an existing row.
         const existingTask = yield* findTask(id);
+        // A client that does not know actions (a stock app) leaves the stored one alone. An agent
+        // turn is stored as no action, as stock servers write every task.
+        const requestedAction = input.action ?? existingTask?.action;
+        const action = requestedAction?.type === "script" ? requestedAction : undefined;
+        if (action !== undefined) {
+          yield* validateScriptAction(id, input, action.scriptId);
+        }
         // Keep the existing next_run_at when the schedule itself is untouched:
         // editing a title or prompt must not postpone (or resurrect) a due
         // run — only schedule/enabled changes restart the clock.
@@ -1037,6 +1124,7 @@ export const layer = Layer.effect(
           lastRunStatus: existingTask?.lastRunStatus ?? "never",
           lastRunError: existingTask?.lastRunError ?? null,
           runCount: existingTask?.runCount ?? 0,
+          ...(action === undefined ? {} : { action }),
         };
         yield* saveTask(task, input.requireExisting === true, webhook);
         yield* notifyChanged;
@@ -1304,8 +1392,6 @@ export const layer = Layer.effect(
         });
       });
 
-    const serviceScope = yield* Effect.scope;
-
     const observeDelivery = (
       request: WebhookTriggerRequest,
       outcome: WebhookDeliveryOutcome,
@@ -1496,14 +1582,20 @@ export const layer = Layer.effect(
               return { _tag: "expired" as const };
             }
 
+            // A script gets no request data: nothing from the sender reaches its shell, so its
+            // prompt is never filled in.
+            const runsScript = task.action?.type === "script";
             const frameId = yield* crypto.randomBytes(6).pipe(
               Effect.map((bytes) => Buffer.from(bytes).toString("hex")),
               Effect.mapError((cause) => taskError("Could not generate frame id.", { cause })),
             );
-            const rendered = renderWebhookPrompt(task.prompt, request, frameId);
+            const rendered = runsScript ? null : renderWebhookPrompt(task.prompt, request, frameId);
             // Providers trim the prompt before checking, so whitespace around
             // it is free.
-            if (rendered.prompt.trim().length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
+            if (
+              rendered !== null &&
+              rendered.prompt.trim().length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS
+            ) {
               yield* log("dispatch_failed", {
                 signatureVerified: signature !== null,
                 missing: rendered.missing,
@@ -1538,8 +1630,9 @@ export const layer = Layer.effect(
             });
             yield* log("accepted", {
               signatureVerified: signature !== null,
-              missing: rendered.missing,
-              renderedPrompt: rendered.prompt,
+              ...(rendered === null
+                ? {}
+                : { missing: rendered.missing, renderedPrompt: rendered.prompt }),
             }).pipe(Effect.onError(() => release));
             yield* observe("accepted");
             const permit = yield* webhookPermit(task.id);
@@ -1548,11 +1641,19 @@ export const layer = Layer.effect(
                 Effect.annotateCurrentSpan({ "scheduled_task.webhook.run_outcome": outcome }),
                 Metrics.increment(Metrics.webhookRunsTotal, { outcome }),
               ]);
-            yield* runTask(task, "webhook", { deliveryId, prompt: rendered.prompt }).pipe(
+            yield* runTask(task, "webhook", {
+              deliveryId,
+              prompt: rendered?.prompt ?? task.prompt,
+            }).pipe(
               Effect.flatMap((completed) =>
                 completed.lastRunStatus === "failed"
                   ? runOutcome("failed").pipe(
-                      Effect.andThen(markDeliveryFailed(deliveryId, "The run failed to start.")),
+                      Effect.andThen(
+                        markDeliveryFailed(
+                          deliveryId,
+                          runsScript ? "The script failed." : "The run failed to start.",
+                        ),
+                      ),
                     )
                   : runOutcome("started"),
               ),

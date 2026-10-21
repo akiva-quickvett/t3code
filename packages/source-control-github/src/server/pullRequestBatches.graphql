@@ -35,6 +35,12 @@ query PullRequestSummary($owner: String!, $name: String!, $number: Int!, $stacks
           }
         }
       }
+      labels(first: 100) {
+        nodes {
+          name
+          color
+        }
+      }
       commits(last: 1) {
         nodes {
           commit {
