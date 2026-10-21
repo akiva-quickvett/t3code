@@ -49,6 +49,26 @@ saved totals first, then updates them when Cursor's API responds.
 If recent work is missing or a new model shows no cost, refresh to rescan session history and
 update model pricing.
 
+## See what a piece of work cost
+
+On web or desktop, open a thread's menu in the sidebar or the chat header, or the command palette,
+and choose **Cost of this work**. It shows the estimated API-equivalent cost and tokens of that
+thread and every thread it launched or delegated to, including supervised threads and subagents on
+any account of that environment, with one line per thread. Like **Usage**, it is an estimate, not
+your bill: it uses the same model prices, and usage with no known price is counted but left out of
+the cost.
+
+Usage is matched to threads through their provider sessions. Cursor and Antigravity usage is
+included only where its history names the same session as the thread, so it may be missing, and a
+provider's own built-in subagents count toward the thread that ran them. Deleted threads, and the
+threads under them, are not included. A forked thread does not count the conversation it copied, though a fork of a fork may count
+what its own source had copied.
+History starts on the day the tree's oldest thread was created, at most 92 days ago. A very large tree
+lists its first 200 threads; the totals still include the rest.
+
+Agents with orchestration access can read the same figures with the `t3_usage_thread_tree` tool,
+for example to report what a goal cost.
+
 ## Set custom model prices
 
 On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,

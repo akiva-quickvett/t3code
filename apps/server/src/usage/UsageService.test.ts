@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
+  ThreadId,
   UsageDay,
   type UsageSource,
   type UsageSummaryInput,
@@ -34,6 +35,8 @@ import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import * as ServerConfig from "../config.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import { SCAN_CACHE_FILE_NAME } from "./usageScanCache.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAccountReader";
 import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
@@ -45,6 +48,7 @@ import * as ProviderHostLive from "../provider/ProviderHostLive.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { totalTokens, type UsageRecord } from "@t3tools/provider-core/server/usage";
 import * as UsageService from "./UsageService.ts";
+import { seedProviderThread, seedThread } from "./usageThreadTreeTestRows.ts";
 
 const encodeUnknownJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -139,6 +143,7 @@ const layerService = (input: {
     Layer.provideMerge(ProviderHostLive.layer),
     Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
     Layer.provideMerge(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
+    Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), NodePath.join(input.home, input.prefix)),
     ),
@@ -1548,7 +1553,7 @@ describe("UsageService", () => {
 
         yield* Effect.gen(function* () {
           const { stateDir } = yield* ServerConfig.ServerConfig;
-          const cachePath = NodePath.join(stateDir, "usage-scan-cache-v5.json");
+          const cachePath = NodePath.join(stateDir, SCAN_CACHE_FILE_NAME);
           const legacyPath = NodePath.join(stateDir, "usage-scan-cache.json");
           const first = yield* UsageService.make;
           yield* first.readSummary(WINDOW);
@@ -2472,4 +2477,300 @@ describe("UsageService.readLimitsForAgent", () => {
       { usageHeadroom: { sessionLowPercent: 50, weeklyLowPercent: 95 } },
     );
   });
+});
+
+describe("UsageService.readThreadTree", () => {
+  const NOW = Date.parse("2026-08-03T12:00:00.000Z");
+  const RATES = { "claude-fable-5": { input_cost_per_token: 1e-5, output_cost_per_token: 5e-5 } };
+  const costOf = (outputTokens: number) => 10 * 1e-5 + outputTokens * 5e-5;
+
+  function sessionLine(input: {
+    readonly id: string;
+    readonly sessionId: string;
+    readonly outputTokens: number;
+    readonly model?: string;
+    /** Set on the copies of its source's history that a forked Claude session starts with. */
+    readonly forkedFrom?: string;
+  }): string {
+    return `${JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-08-01T10:00:00Z",
+      requestId: `req_${input.id}`,
+      sessionId: input.sessionId,
+      ...(input.forkedFrom === undefined ? {} : { forkedFrom: { sessionId: input.forkedFrom } }),
+      message: {
+        id: `msg_${input.id}`,
+        model: input.model ?? "claude-fable-5",
+        usage: { input_tokens: 10, output_tokens: input.outputTokens },
+      },
+    })}\n`;
+  }
+
+  const writeTranscript = (home: string, account: string, name: string, lines: string[]) =>
+    Effect.promise(async () => {
+      const dir = NodePath.join(home, account, "projects", "proj");
+      await NodeFSP.mkdir(dir, { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(dir, `${name}.jsonl`), lines.join(""));
+    });
+
+  const withTree = <A, E, R>(
+    prefix: string,
+    use: (input: {
+      readonly home: string;
+      readonly service: Effect.Success<typeof UsageService.make>;
+    }) => Effect.Effect<A, E, R>,
+  ) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const { home } = yield* setup;
+      return yield* Effect.gen(function* () {
+        const service = yield* UsageService.make;
+        return yield* use({ home, service });
+      }).pipe(
+        Effect.provide(
+          layerService({
+            prefix,
+            home,
+            ratesDocument: RATES,
+            settings: {
+              providerInstances: {
+                [ProviderInstanceId.make("claudeAgent")]: {
+                  driver: ProviderDriverKind.make("claudeAgent"),
+                  config: { homePath: NodePath.join(home, "claude") },
+                },
+                [ProviderInstanceId.make("claude_personal")]: {
+                  driver: ProviderDriverKind.make("claudeAgent"),
+                  displayName: "me@example.com",
+                  config: { homePath: NodePath.join(home, "claude-personal") },
+                },
+              },
+            },
+          }),
+        ),
+      );
+    }).pipe(Effect.scoped);
+
+  it.effect("totals a supervised tree across accounts, from its oldest thread's day", () =>
+    withTree("usage-thread-tree", ({ home, service }) =>
+      Effect.gen(function* () {
+        yield* seedThread({ id: "meta", createdAt: "2026-07-01T00:00:00.000Z", preset: "meta" });
+        yield* seedThread({
+          id: "slice",
+          createdAt: "2026-08-01T00:00:00.000Z",
+          preset: "slice",
+          supervisorThreadId: "meta",
+        });
+        yield* seedThread({
+          id: "broker",
+          createdAt: "2026-08-01T01:00:00.000Z",
+          preset: "broker",
+          parentThreadId: "slice",
+          relationshipToParent: "subagent",
+        });
+        yield* seedThread({ id: "outsider", createdAt: "2026-08-01T00:00:00.000Z" });
+        for (const [threadId, instanceId, nativeId] of [
+          ["slice", "claudeAgent", "session-slice"],
+          ["broker", "claude_personal", "session-broker"],
+          ["outsider", "claudeAgent", "session-outsider"],
+        ] as const) {
+          yield* seedProviderThread({
+            id: `pt-${threadId}`,
+            threadId,
+            driver: "claudeAgent",
+            instanceId,
+            nativeId,
+            createdAt: "2026-08-01T02:00:00.000Z",
+          });
+        }
+        yield* writeTranscript(home, "claude", "slice", [
+          sessionLine({ id: "1", sessionId: "session-slice", outputTokens: 100 }),
+        ]);
+        yield* writeTranscript(home, "claude-personal", "broker", [
+          sessionLine({ id: "2", sessionId: "session-broker", outputTokens: 200 }),
+          sessionLine({
+            id: "3",
+            sessionId: "session-broker",
+            outputTokens: 300,
+            model: "unpriced-model",
+          }),
+        ]);
+        yield* writeTranscript(home, "claude", "outsider", [
+          sessionLine({ id: "4", sessionId: "session-outsider", outputTokens: 9000 }),
+        ]);
+
+        const tree = yield* service.readThreadTree({ threadId: ThreadId.make("slice") });
+        assert.strictEqual(tree.rootThreadId, "meta");
+        assert.strictEqual(tree.sinceDay, "2026-08-01");
+        assert.deepStrictEqual(
+          tree.threads.map((row) => [
+            row.threadId,
+            row.parentThreadId,
+            row.depth,
+            row.preset,
+            row.tokens,
+            row.unpricedRecords,
+          ]),
+          [
+            ["slice", null, 0, "slice", 110, 0],
+            ["broker", "slice", 1, "broker", 520, 1],
+          ],
+        );
+        assert.closeTo(tree.threads[0]!.costUsd, costOf(100), 1e-9);
+        assert.closeTo(tree.threads[1]!.costUsd, costOf(200), 1e-9);
+        assert.strictEqual(tree.tokens, 630);
+        assert.closeTo(tree.costUsd, costOf(100) + costOf(200), 1e-9);
+        assert.strictEqual(tree.unpricedRecords, 1);
+
+        const fromMeta = yield* service.readThreadTree({ threadId: ThreadId.make("meta") });
+        assert.strictEqual(fromMeta.sinceDay, "2026-07-01");
+        assert.strictEqual(fromMeta.tokens, 630);
+
+        const payload = JSON.stringify(tree);
+        for (const secret of ["example.com", home, ".jsonl", "claude_personal", "session-"]) {
+          assert.notInclude(payload, secret);
+        }
+      }),
+    ),
+  );
+
+  /**
+   * The slice's Claude session was forked into the broker's: the broker's transcript starts with
+   * copies of the slice's records, then has its own turn. readdir order decides which file is read
+   * first, so each layout swaps the two names; under any order one layout reads the fork first.
+   */
+  const seedForkedSession = (home: string, forkFileFirst: boolean) =>
+    Effect.gen(function* () {
+      yield* seedThread({ id: "slice", createdAt: "2026-08-01T00:00:00.000Z", preset: "slice" });
+      yield* seedThread({
+        id: "broker",
+        createdAt: "2026-08-01T01:00:00.000Z",
+        parentThreadId: "slice",
+        relationshipToParent: "subagent",
+      });
+      for (const [threadId, nativeId] of [
+        ["slice", "session-source"],
+        ["broker", "session-fork"],
+      ] as const) {
+        yield* seedProviderThread({
+          id: `pt-${threadId}`,
+          threadId,
+          driver: "claudeAgent",
+          instanceId: "claudeAgent",
+          nativeId,
+          createdAt: "2026-08-01T02:00:00.000Z",
+        });
+      }
+      const source = [
+        sessionLine({ id: "1", sessionId: "session-source", outputTokens: 100 }),
+        sessionLine({ id: "2", sessionId: "session-source", outputTokens: 200 }),
+      ];
+      const fork = [
+        sessionLine({
+          id: "1",
+          sessionId: "session-fork",
+          outputTokens: 100,
+          forkedFrom: "session-source",
+        }),
+        sessionLine({
+          id: "2",
+          sessionId: "session-fork",
+          outputTokens: 200,
+          forkedFrom: "session-source",
+        }),
+        sessionLine({ id: "3", sessionId: "session-fork", outputTokens: 400 }),
+      ];
+      const [first, second] = forkFileFirst ? [fork, source] : [source, fork];
+      yield* writeTranscript(home, "claude", "a", first);
+      yield* writeTranscript(home, "claude", "b", second);
+    });
+
+  it.effect.each(["a", "b"] as const)(
+    "keeps a forked session's copied history with its source (fork file %s)",
+    (forkFile) =>
+      withTree("usage-thread-tree-fork", ({ home, service }) =>
+        Effect.gen(function* () {
+          yield* seedForkedSession(home, forkFile === "a");
+
+          const slice = yield* service.readThreadTree({ threadId: ThreadId.make("slice") });
+          assert.deepStrictEqual(
+            slice.threads.map((row) => [row.threadId, row.tokens]),
+            [
+              ["slice", 320],
+              ["broker", 410],
+            ],
+          );
+          assert.strictEqual(slice.tokens, 730);
+          assert.closeTo(slice.costUsd, costOf(100) + costOf(200) + costOf(400), 1e-9);
+
+          const broker = yield* service.readThreadTree({ threadId: ThreadId.make("broker") });
+          assert.strictEqual(broker.tokens, 410);
+          assert.closeTo(broker.costUsd, costOf(400), 1e-9);
+        }),
+      ),
+  );
+
+  it.effect("re-parses live Claude transcripts from a v5 cache and keeps deleted ones", () =>
+    withTree("usage-thread-tree-v5-upgrade", ({ home }) =>
+      Effect.gen(function* () {
+        yield* seedForkedSession(home, true);
+        yield* writeTranscript(home, "claude", "deleted", [
+          sessionLine({ id: "9", sessionId: "session-gone", outputTokens: 50 }),
+        ]);
+        const { stateDir } = yield* ServerConfig.ServerConfig;
+        const first = yield* UsageService.make;
+        yield* first.readThreadTree({ threadId: ThreadId.make("slice") });
+        yield* first.awaitPersisted;
+
+        // v5 gave a fork's copies the fork's session; rewrite the cache the way v5 wrote it.
+        const v5Path = NodePath.join(stateDir, "usage-scan-cache-v5.json");
+        const v5 = yield* Effect.promise(async () => {
+          const cachePath = NodePath.join(stateDir, SCAN_CACHE_FILE_NAME);
+          const document = decodeUnknownJsonString(await NodeFSP.readFile(cachePath, "utf8")) as {
+            sessions: string[];
+            files: Record<string, { r: unknown[][] }>;
+          };
+          const forkSession = document.sessions.indexOf("session-fork");
+          const forkFile = Object.entries(document.files).find(([path]) =>
+            path.endsWith(`${NodePath.sep}a.jsonl`),
+          )?.[1];
+          if (forkSession < 0 || forkFile === undefined) throw new Error("fork not cached");
+          forkFile.r = forkFile.r.map((row) => [row[0], row[1], forkSession, ...row.slice(3)]);
+          const text = encodeUnknownJsonString({ ...document, version: 5 });
+          await NodeFSP.writeFile(v5Path, text);
+          await NodeFSP.rm(cachePath);
+          await NodeFSP.rm(NodePath.join(home, "claude", "projects", "proj", "deleted.jsonl"));
+          return text;
+        });
+
+        const upgraded = yield* UsageService.make;
+        const broker = yield* upgraded.readThreadTree({ threadId: ThreadId.make("broker") });
+        assert.strictEqual(broker.tokens, 410);
+        const summary = yield* upgraded.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(summary), 100 + 200 + 400 + 50);
+        assert.strictEqual(yield* Effect.promise(() => NodeFSP.readFile(v5Path, "utf8")), v5);
+      }),
+    ),
+  );
+
+  it.effect("answers zeros for a thread with no usage and fails for an unknown one", () =>
+    withTree("usage-thread-tree-empty", ({ service }) =>
+      Effect.gen(function* () {
+        yield* seedThread({ id: "idle", createdAt: "2026-08-02T00:00:00.000Z" });
+        yield* seedThread({ id: "gone", createdAt: "2026-08-02T00:00:00.000Z", deleted: true });
+
+        const idle = yield* service.readThreadTree({ threadId: ThreadId.make("idle") });
+        assert.deepStrictEqual(
+          [idle.tokens, idle.costUsd, idle.unpricedRecords, idle.threads.length],
+          [0, 0, 0, 1],
+        );
+
+        for (const threadId of ["missing", "gone"]) {
+          const error = yield* service
+            .readThreadTree({ threadId: ThreadId.make(threadId) })
+            .pipe(Effect.flip);
+          assert.strictEqual(error.reason, "threadNotFound");
+        }
+      }),
+    ),
+  );
 });

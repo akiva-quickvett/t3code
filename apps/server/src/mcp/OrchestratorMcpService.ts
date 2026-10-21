@@ -2361,6 +2361,7 @@ const make = Effect.gen(function* () {
             supervisedWakes: settings.supervisedWakes,
             maxBatchThreads: 20,
             usageLimits: true,
+            usageThreadTree: true,
           },
         };
       }),

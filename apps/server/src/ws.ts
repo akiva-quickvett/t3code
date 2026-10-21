@@ -101,6 +101,7 @@ import {
   WsRpcGroup,
   ChatChannelRpcGroup,
   PodRuntimeRpcGroup,
+  UsageRpcGroup,
   ServerSettings as ServerSettingsSchema,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
@@ -565,7 +566,7 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-// Chat channel and pod RPCs have their own handler layers; see ChatChannelRpcGroup.
+// Chat channel, pod and usage RPCs have their own handler layers; see ChatChannelRpcGroup.
 const ServerCoreWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.chatChannelsSubscribe,
   WS_METHODS.chatChannelsMutate,
@@ -578,6 +579,9 @@ const ServerCoreWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.podRuntimeRecreateAgentContainer,
   WS_METHODS.podRuntimeOpenShell,
   WS_METHODS.podRuntimeRemove,
+  WS_METHODS.serverGetUsageSummary,
+  WS_METHODS.serverRefreshUsageRates,
+  WS_METHODS.serverGetUsageThreadTree,
 );
 const ServerChatChannelRpcGroup = ChatChannelRpcGroup.middleware(RpcInstrumentation);
 
@@ -592,6 +596,7 @@ const layerChatChannelRpc = ServerChatChannelRpcGroup.toLayer(
   }),
 );
 const ServerPodRuntimeRpcGroup = PodRuntimeRpcGroup.middleware(RpcInstrumentation);
+const ServerUsageRpcGroup = UsageRpcGroup.middleware(RpcInstrumentation);
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
@@ -1271,7 +1276,6 @@ const layerWsRpc = (
               ),
               Effect.orElseSucceed(() => null),
             );
-      const usage = yield* UsageService.UsageService;
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
@@ -2432,8 +2436,6 @@ const layerWsRpc = (
           processResourceMonitor.readHistory(input),
         [WS_METHODS.serverGetResourceTelemetryHistory]: (input) =>
           resourceTelemetry.readHistory(input),
-        [WS_METHODS.serverGetUsageSummary]: (input) => usage.readSummary(input),
-        [WS_METHODS.serverRefreshUsageRates]: (_input) => usage.refreshRates,
         [WS_METHODS.serverRetryResourceTelemetry]: (_input) => resourceTelemetry.retry,
         [WS_METHODS.serverCheckOtlpEndpoint]: (input) => otlpEndpointCheck.check(input),
         [WS_METHODS.serverSignalProcess]: (input) => processDiagnostics.signal(input),
@@ -3149,6 +3151,17 @@ const layerPodRuntimeRpc = ServerPodRuntimeRpcGroup.toLayer(
   }),
 );
 
+const layerUsageRpc = ServerUsageRpcGroup.toLayer(
+  Effect.gen(function* () {
+    const usage = yield* UsageService.UsageService;
+    return ServerUsageRpcGroup.of({
+      [WS_METHODS.serverGetUsageSummary]: (input) => usage.readSummary(input),
+      [WS_METHODS.serverRefreshUsageRates]: (_input) => usage.refreshRates,
+      [WS_METHODS.serverGetUsageThreadTree]: (input) => usage.readThreadTree(input),
+    });
+  }),
+);
+
 // RpcServer's default sends a socket-level Defect frame instead, and the client
 // ends every pending request on the socket with it.
 export const WS_RPC_SERVER_OPTIONS = {
@@ -3238,6 +3251,7 @@ export const layer = Layer.unwrap(
               ),
               layerChatChannelRpc,
               layerPodRuntimeRpc,
+              layerUsageRpc,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Request fibers run in the handlers' context, so this reporter sees

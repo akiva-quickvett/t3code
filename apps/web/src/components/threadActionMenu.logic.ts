@@ -19,6 +19,7 @@ export type ThreadActionMenuId =
   | "rename"
   | "regenerate-title"
   | "mark-unread"
+  | "usage-cost"
   | "copy"
   | "copy-path"
   | "copy-branch"
@@ -86,6 +87,8 @@ export interface ThreadActionMenuState {
     readonly pinning: boolean;
     readonly titleRegeneration: boolean;
     readonly rolePresets: boolean;
+    /** The environment reports thread usage and this connection may read usage. */
+    readonly threadUsage: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
 }
@@ -97,6 +100,7 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
     "new-ticket",
     "project-settings",
     "mark-unread",
+    "usage-cost",
     "copy",
     "copy-path",
     "copy-branch",
@@ -196,6 +200,9 @@ export function buildThreadActionMenuItems(
             ],
           },
         ]
+      : []),
+    ...(state.supports.threadUsage
+      ? [{ id: "usage-cost" as const, label: "Cost of this work", icon: "coins" }]
       : []),
     {
       id: "copy",

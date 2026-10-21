@@ -9,6 +9,16 @@ import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
 import * as UsageService from "../../../usage/UsageService.ts";
 
+const requireOrchestration = McpInvocationContext.requireMcpCapability("orchestration").pipe(
+  Effect.mapError(
+    () =>
+      new OrchestratorMcpFailure({
+        code: "capability_denied",
+        message: "This MCP credential does not grant orchestration capabilities.",
+      }),
+  ),
+);
+
 const handlers = {
   orchestrator_capabilities: McpToolAccess.reads(() =>
     Effect.gen(function* () {
@@ -18,16 +28,26 @@ const handlers = {
     }),
   ),
   t3_usage_limits: McpToolAccess.reads((input) =>
-    McpInvocationContext.requireMcpCapability("orchestration").pipe(
-      Effect.mapError(
-        () =>
-          new OrchestratorMcpFailure({
-            code: "capability_denied",
-            message: "This MCP credential does not grant orchestration capabilities.",
-          }),
-      ),
+    requireOrchestration.pipe(
       Effect.andThen(UsageService.UsageService),
       Effect.flatMap((usage) => usage.readLimitsForAgent(input)),
+    ),
+  ),
+  t3_usage_thread_tree: McpToolAccess.reads((input) =>
+    requireOrchestration.pipe(
+      Effect.andThen(UsageService.UsageService),
+      Effect.flatMap((usage) =>
+        usage.readThreadTree(input).pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({
+                code:
+                  error.reason === "threadNotFound" ? "thread_not_found" : "orchestration_error",
+                message: error.detail,
+              }),
+          ),
+        ),
+      ),
     ),
   ),
   delegate_task: McpToolAccess.actsAsCaller((input) =>

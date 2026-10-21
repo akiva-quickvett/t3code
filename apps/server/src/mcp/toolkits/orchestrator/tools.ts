@@ -32,6 +32,8 @@ import {
   OrchestratorMcpThreadWaitResult,
   ThreadMetadataMcpUpdateInput,
   ThreadMetadataMcpUpdateResult,
+  UsageThreadTree,
+  UsageThreadTreeInput,
 } from "@t3tools/contracts";
 import { Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
@@ -76,6 +78,20 @@ const UsageLimitsTool = Tool.make("t3_usage_limits", {
   dependencies: [McpInvocationContext.McpInvocationContext, UsageService.UsageService],
 })
   .annotate(Tool.Title, "Read usage limits")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const UsageThreadTreeTool = Tool.make("t3_usage_thread_tree", {
+  description:
+    "Read the estimated token use and API-equivalent cost of a thread and every thread it launched or delegated to, transitively, including supervised threads and subagents on any provider instance of this environment, with one row per thread (parentThreadId, depth, title, role preset). Use it to report what a goal cost. At most 200 rows are returned; omittedThreads counts the rest, which the totals still include. Costs use the Usage page's price table and overrides; unpricedRecords counts usage with no known rate, left out of costUsd rather than guessed. Usage is matched to threads through provider sessions, so usage whose history names no matching session, possible for Cursor and Antigravity, is not included. sinceDay is the first day of history read. rootThreadId is the top of the work tree this thread belongs to.",
+  parameters: UsageThreadTreeInput,
+  success: UsageThreadTree,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: [McpInvocationContext.McpInvocationContext, UsageService.UsageService],
+})
+  .annotate(Tool.Title, "Read thread tree usage")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
@@ -291,6 +307,7 @@ const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
   UsageLimitsTool,
+  UsageThreadTreeTool,
   DelegateTaskTool,
   TaskStatusTool,
   TaskCancelTool,
