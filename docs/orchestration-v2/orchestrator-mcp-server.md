@@ -416,8 +416,10 @@ new thread may not run with broader runtime or interaction modes than the caller
 
 A retry with the same `clientRequestId` in the same provider session replays the
 accepted launch and returns the same thread, with the preset and supervisor it was
-created with. Without one, inspect existing threads after a failed or lost response
-before launching again.
+created with. The retry is checked again before it replays, so it fails if the
+preset, base ref, or provider is gone by then; find the existing thread with
+`t3_thread_list`. Without a `clientRequestId`, inspect existing threads after a
+failed or lost response before launching again.
 
 `supervise: true` makes the caller the thread's supervisor
 (`lineage.supervisorThreadId`, see [Supervised Threads](#supervised-threads)), and
