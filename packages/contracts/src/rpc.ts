@@ -2019,6 +2019,13 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 ) {}
 
 /** Part of WsRpcGroup, with its own server handler layer, as ChatChannelRpcGroup. */
+export const UsageRpcGroup = RpcGroup.make(
+  WsServerGetUsageSummaryRpc,
+  WsServerRefreshUsageRatesRpc,
+  WsServerGetUsageThreadTreeRpc,
+);
+
+/** Part of WsRpcGroup, with its own server handler layer, as ChatChannelRpcGroup. */
 export const PodRuntimeRpcGroup = RpcGroup.make(
   WsPodRuntimeSubscribeRpc,
   WsPodRuntimeStatusRpc,
