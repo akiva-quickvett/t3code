@@ -54,13 +54,13 @@ and `seeds` again when you retry it, so write seeds that are safe to repeat.
 
 The default agent image, `t3.invalid/pod-agent`, is one T3 Code builds on your Docker host the
 first time a pod needs it, which takes a few minutes and needs network access once. Its tag is a
-digest of its recipe, so an update that changes the image builds it again and removes the earlier
-builds no pod still uses. It is
+digest of its recipe, so an update that changes the image builds it again; earlier builds are
+removed once they are over a week old and no pod uses them. It is
 Debian-based, with `curl`, `git`, `ssh`, the Docker CLI with compose, and the Claude, Codex, Pi
 and Grok CLIs; it holds no credentials, since logins come from the config directories the pod
 mounts. On Linux, a provider whose binary path is absolute runs your machine's own install,
-mounted read-only; a bare command name runs the image's copy. Most of its size, about 1.2 GB, is
-the provider CLIs.
+mounted read-only; a bare command name runs the image's copy. It takes about 1.8 GB on disk
+(0.69 GB compressed), of which the provider CLIs are 1.26 GB.
 
 To use another image, set `podRuntime.defaultImage` in the server settings. A new default applies
 to pods created after, and to a pod's agent container when it is recreated: **Recreate pod**, or

@@ -606,9 +606,11 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
   let operatingSystem: string | undefined;
   let unreadableUntil = 0;
   const readOperatingSystem = (timeoutMs?: number) =>
-    run("info", ["info", "--format", "{{.OperatingSystem}}"], {
-      ...(timeoutMs === undefined ? {} : { timeoutMs }),
-    }).pipe(
+    run(
+      "info",
+      ["info", "--format", "{{.OperatingSystem}}"],
+      timeoutMs === undefined ? {} : { timeoutMs },
+    ).pipe(
       Effect.map((stdout) => {
         operatingSystem = stdout.trim();
         return operatingSystem;
