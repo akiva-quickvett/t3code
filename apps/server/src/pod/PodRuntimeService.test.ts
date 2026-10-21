@@ -61,6 +61,7 @@ const harness = (options: {
   readonly enabled?: boolean;
   readonly publishOnTailnet?: boolean;
   readonly dnsServers?: ReadonlyArray<string>;
+  readonly dockerHost?: string;
   readonly projectFile?: T3ProjectFile | null;
   readonly network?: FakeHostNetwork;
   readonly router?: FakePodHostnameRouter;
@@ -81,6 +82,7 @@ const harness = (options: {
         enabled: options.enabled ?? true,
         publishOnTailnet: options.publishOnTailnet ?? false,
         ...(options.dnsServers === undefined ? {} : { dnsServers: options.dnsServers }),
+        ...(options.dockerHost === undefined ? {} : { dockerHost: options.dockerHost }),
       },
     }),
     Layer.mock(ProjectService.ProjectService)({
@@ -1305,8 +1307,9 @@ describe("PodRuntimeService resolvers", () => {
           const { id } = yield* pods.create({ projectId, worktreePath });
           yield* pods.drain;
           const dind = driver
-            .containers()
+            .containers(options.dockerHost)
             .find((container) => container.name === `t3-envtest-${id}-dind`)?.spec;
+          expect(dind).toBeDefined();
           return { dns: dind?.dns, command: dind?.command.slice(3) };
         }),
       options,
@@ -1325,6 +1328,10 @@ describe("PodRuntimeService resolvers", () => {
         expect(
           yield* dindDns({ network: network(HOST_RESOLV_CONF), dnsServers: ["9.9.9.9"] }),
         ).toEqual({ dns: ["9.9.9.9"], command: ["--dns", "9.9.9.9"] });
+        // A remote daemon's network may not reach this host's resolvers: Docker's own DNS.
+        expect(
+          yield* dindDns({ network: network(HOST_RESOLV_CONF), dockerHost: "tcp://10.0.0.5:2375" }),
+        ).toEqual({ dns: undefined, command: [] });
         // Nothing reachable found: Docker's own DNS, as before.
         expect(yield* dindDns({ network: network("nameserver 127.0.0.53\n") })).toEqual({
           dns: undefined,

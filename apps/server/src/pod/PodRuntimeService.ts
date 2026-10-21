@@ -142,6 +142,9 @@ export class PodRuntimeService extends Context.Service<
 >()("t3/pod/PodRuntimeService") {}
 
 const POD_SHELL_TERMINAL_ID = "pod-shell";
+/** Docker's default endpoint or a socket on this machine. */
+const isLocalDockerHost = (dockerHost: string) =>
+  dockerHost.length === 0 || dockerHost.startsWith("unix://");
 const OPERATION_CRASHED = "The pod operation stopped unexpectedly; see the server log.";
 const isPodRuntimeId = Schema.is(PodRuntimeId);
 const EMPTY_POD_CONFIG: T3ProjectFilePod = { services: {} };
@@ -540,16 +543,23 @@ const make = Effect.gen(function* () {
   /**
    * Explicit resolvers for the daemon and its stack. Docker's own DNS on the
    * pods network can fail where the host's resolvers answer, so a pod of ports
-   * asks the host's upstreams unless the setting names others. A pod in
-   * hostname mode asks the proxy's DNS server first, which answers its domain
-   * and forwards the rest.
+   * on this machine's daemon asks the host's upstreams unless the setting names
+   * others; a remote daemon's network may not reach them. A pod in hostname
+   * mode asks the proxy's DNS server first, which answers its domain and
+   * forwards the rest.
    */
-  const podResolvers = (proxyDns: string | undefined, configured: ReadonlyArray<string>) =>
+  const podResolvers = (
+    dockerHost: string,
+    proxyDns: string | undefined,
+    configured: ReadonlyArray<string>,
+  ) =>
     proxyDns !== undefined
       ? Effect.succeed([proxyDns, ...configured])
       : configured.length > 0
         ? Effect.succeed(configured)
-        : hostNetwork.resolvConf.pipe(Effect.map(PodHostPorts.upstreamNameservers));
+        : isLocalDockerHost(dockerHost)
+          ? hostNetwork.resolvConf.pipe(Effect.map(PodHostPorts.upstreamNameservers))
+          : Effect.succeed([]);
 
   const operationContext = Effect.fn("PodRuntimeService.operationContext")(function* (
     record: PodRuntimeRecord,
@@ -592,7 +602,11 @@ const make = Effect.gen(function* () {
       seeds: yield* seedsFor(root),
       podEnv: podServices.env,
       publish: podServices.publish,
-      dns: yield* podResolvers(podServices.record.dnsAddress, podRuntime.dnsServers),
+      dns: yield* podResolvers(
+        record.dockerHost,
+        podServices.record.dnsAddress,
+        podRuntime.dnsServers,
+      ),
       proxyCaRoot: hostnameMode ? proxy.caRootPath : null,
     });
     return {

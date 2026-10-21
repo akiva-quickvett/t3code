@@ -119,7 +119,10 @@ T3 Code's route files are named `t3-*.caddy`. `orch pod status` currently lists 
 routes; leave them, since they serve running pods and T3 Code removes its own.
 
 Inside the pod, the stack's containers resolve `*.pods.internal` too, and the agent container
-trusts the proxy's certificates, so commands there can reach any pod's hostname.
+trusts the proxy's certificates, so commands there can reach any pod's hostname. Lookups of those
+hostnames can take a few seconds, because orch's DNS server does not answer IPv6 lookups yet (a fix
+is pending in orch); busybox tools such as the default image's `wget` give up with `bad address`,
+so use an agent image with `curl` or another glibc-based tool for requests to pod hostnames.
 
 If the proxy is missing when a pod is created, the pod still starts on ports and Diagnostics says
 why; **Recreate pod** once the proxy is back moves it to hostnames. If only its route cannot be put
