@@ -110,14 +110,17 @@ on the machine running T3 Code:
    Serve uses 443; a serve on 443 set up any other way, such as one `t3 pair` left running, is not
    detected, so check `tailscale serve status`.
 
+T3 Code's route files are named `t3-*.caddy`. `orch pod status` currently lists them as stale
+routes; leave them, since they serve running pods and T3 Code removes its own.
+
 Inside the pod, the stack's containers resolve `*.pods.internal` too, and the agent container
 trusts the proxy's certificates, so commands there can reach any pod's hostname.
 
 If the proxy is missing when a pod is created, the pod still starts on ports and Diagnostics says
 why; **Recreate pod** once the proxy is back moves it to hostnames. If only its route cannot be put
-in place, its links use ports until it starts again. The proxy's container names, network, domain,
-routes directory and certificate are orch's defaults; change them under `podRuntime.hostnameProxy`
-in the server settings if your setup differs.
+in place, Diagnostics says why and its hostnames do not open until the pod starts again with the
+route. The proxy's container names, network, domain, routes directory and certificate are orch's
+defaults; change them under `podRuntime.hostnameProxy` in the server settings if your setup differs.
 
 If image pulls inside a pod fail with `server misbehaving`, Docker's DNS is failing on the pods
 network: set `podRuntime.dnsServers` in the server settings (for example `["192.168.1.1"]`) and

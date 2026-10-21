@@ -105,6 +105,7 @@ describe("PodHostnameRouter", () => {
         proxy,
         stem: STEM,
         upstreamContainer: DIND,
+        routed: false,
         routes: ROUTES,
       });
       expect(failure).toBeNull();
@@ -142,6 +143,7 @@ describe("PodHostnameRouter", () => {
           proxy,
           stem: STEM,
           upstreamContainer: DIND,
+          routed: true,
           routes: ROUTES,
         }),
       ).toBeNull();
@@ -159,6 +161,7 @@ describe("PodHostnameRouter", () => {
           proxy,
           stem: STEM,
           upstreamContainer: DIND,
+          routed: false,
           routes: ROUTES.slice(0, 1),
         });
         const previous = read(`${STEM}.caddy`);
@@ -170,6 +173,7 @@ describe("PodHostnameRouter", () => {
           proxy,
           stem: STEM,
           upstreamContainer: DIND,
+          routed: false,
           routes: ROUTES,
         });
         expect(failure).toBe(
@@ -179,6 +183,28 @@ describe("PodHostnameRouter", () => {
         expect(files()).toEqual([ORCH_ROUTE, `${STEM}.caddy`]);
         expect(read(`${STEM}.caddy`)).toBe(previous);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reloads a route already on disk that the proxy may not be running yet", () =>
+    Effect.gen(function* () {
+      const { router, proxy, driver, read } = yield* setup();
+      const install = (routed: boolean) =>
+        router.install({
+          dockerHost: "",
+          proxy,
+          stem: STEM,
+          upstreamContainer: DIND,
+          routed,
+          routes: ROUTES,
+        });
+      yield* install(false);
+      const placed = read(`${STEM}.caddy`);
+      driver.calls.length = 0;
+      // As after a crash between placing the file and reloading the proxy.
+      expect(yield* install(false)).toBeNull();
+      expect(proxyCommands(driver)).toEqual(["caddy reload"]);
+      expect(read(`${STEM}.caddy`)).toBe(placed);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   it.effect("puts the previous route back when the reload fails", () =>
@@ -191,6 +217,7 @@ describe("PodHostnameRouter", () => {
         proxy,
         stem: STEM,
         upstreamContainer: DIND,
+        routed: false,
         routes: ROUTES,
       });
       expect(failure).toBe("reloading the proxy failed: connection refused");
@@ -208,6 +235,7 @@ describe("PodHostnameRouter", () => {
           proxy,
           stem: STEM,
           upstreamContainer: DIND,
+          routed: false,
           routes: ROUTES,
         });
       };
@@ -242,6 +270,7 @@ describe("PodHostnameRouter", () => {
         proxy,
         stem: STEM,
         upstreamContainer: DIND,
+        routed: false,
         routes: ROUTES,
       });
       driver.calls.length = 0;
@@ -278,6 +307,7 @@ describe("PodHostnameRouter", () => {
           proxy,
           stem: STEM,
           upstreamContainer: DIND,
+          routed: false,
           routes: ROUTES,
         }),
       ).toBe(`${DIND} is not on the pods network`);
@@ -302,6 +332,7 @@ describe("PodHostnameRouter", () => {
           proxy,
           stem: STEM,
           upstreamContainer: DIND,
+          routed: false,
           routes: ROUTES,
         }),
       ).toBeNull();
@@ -340,6 +371,33 @@ describe("PodHostnameRouter", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("puts stale routes back when the proxy does not reload without them", () =>
+    Effect.gen(function* () {
+      const { router, proxy, driver, files, read, routesDir } = yield* setup();
+      NodeFs.writeFileSync(`${routesDir}/t3-envtest-pod-gone.caddy`, "gone route");
+      NodeFs.writeFileSync(`${routesDir}/t3-envtest-pod-gone.validate`, "leftover");
+      driver.execExitCode((call) => (call.command?.[1] === "reload" ? 1 : 0));
+      yield* router.prune({
+        dockerHost: "",
+        proxy,
+        prefix: "t3-envtest-",
+        keep: Effect.succeed(new Set<string>()),
+      });
+      expect(files()).toEqual([ORCH_ROUTE, "t3-envtest-pod-gone.caddy"]);
+      expect(read("t3-envtest-pod-gone.caddy")).toBe("gone route");
+
+      // The next startup retries, and a reload that works lets them go.
+      driver.execExitCode(() => 0);
+      yield* router.prune({
+        dockerHost: "",
+        proxy,
+        prefix: "t3-envtest-",
+        keep: Effect.succeed(new Set<string>()),
+      });
+      expect(files()).toEqual([ORCH_ROUTE]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("never writes, renames or removes a file it does not own, whatever happens", () =>
     Effect.gen(function* () {
       const { router, proxy, driver, files, read, routesDir } = yield* setup();
@@ -361,7 +419,14 @@ describe("PodHostnameRouter", () => {
         return call.command?.[1] === "validate" ? validateExit : reloadExit;
       });
       const install = (routes = ROUTES) =>
-        router.install({ dockerHost: "", proxy, stem: STEM, upstreamContainer: DIND, routes });
+        router.install({
+          dockerHost: "",
+          proxy,
+          stem: STEM,
+          upstreamContainer: DIND,
+          routed: false,
+          routes,
+        });
 
       yield* install();
       validateExit = 1;
@@ -394,6 +459,7 @@ describe("PodHostnameRouter", () => {
         proxy,
         stem: STEM,
         upstreamContainer: DIND,
+        routed: false,
         routes: ROUTES.slice(0, 1),
       });
       const previous = read(`${STEM}.caddy`);
@@ -404,6 +470,7 @@ describe("PodHostnameRouter", () => {
           proxy,
           stem: STEM,
           upstreamContainer: DIND,
+          routed: false,
           routes: ROUTES,
         }),
       ).toMatch(/^reloading the proxy failed/);

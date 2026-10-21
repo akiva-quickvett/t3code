@@ -205,18 +205,21 @@ const make = Effect.gen(function* () {
     );
 
   /**
-   * The preview's server list shows a pod's services exactly while their URLs
-   * do. A hostname is probed at its loopback port: the server's own fetch does
-   * not trust the proxy's CA.
+   * The preview's server list shows a pod's services while they can open: a
+   * hostname only while its route is in place. It is probed at its loopback
+   * port, since the server's own fetch does not trust the proxy's CA.
    */
   const publishToDiscovery = (record: PodRuntimeRecord) => {
     const owner = `pod:${record.snapshot.id}`;
-    const urls = record.snapshot.services.flatMap((service) => {
-      const hostPort = record.hostPorts?.[service.name];
-      if (service.url === null || hostPort === undefined) return [];
-      const loopback = podServiceUrl(POD_LOOPBACK_ADDRESS, hostPort);
-      return [service.url === loopback ? loopback : { url: service.url, probeUrl: loopback }];
-    });
+    const urls = record.snapshot.services.flatMap(
+      (service): ReadonlyArray<string | { readonly url: string; readonly probeUrl: string }> => {
+        const hostPort = record.hostPorts?.[service.name];
+        if (service.url === null || hostPort === undefined) return [];
+        const loopback = podServiceUrl(POD_LOOPBACK_ADDRESS, hostPort);
+        if (service.url === loopback) return [loopback];
+        return record.routed === true ? [{ url: service.url, probeUrl: loopback }] : [];
+      },
+    );
     return portDiscovery.registerConfiguredUrls({ owner, urls });
   };
 
@@ -680,6 +683,7 @@ const make = Effect.gen(function* () {
             proxy,
             stem,
             upstreamContainer: dind,
+            routed: record.routed === true,
             routes: record.snapshot.services.flatMap((service) => {
               const hostname = hostnames[service.name];
               return hostname === undefined
@@ -702,7 +706,7 @@ const make = Effect.gen(function* () {
             ? (record.snapshot.hostnameProblem ?? null)
             : null
           : desired
-            ? `Its proxy route is not in place: ${failed}. Links use ports until the pod starts again.`
+            ? `Its proxy route is not in place: ${failed}. Its hostnames will not open until the pod starts again with the route.`
             : `Its proxy route could not be taken away: ${failed}.`;
       return routesUpdated(
         record,

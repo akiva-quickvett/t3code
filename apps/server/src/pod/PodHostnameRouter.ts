@@ -82,6 +82,8 @@ export class PodHostnameRouter extends Context.Service<
       readonly stem: string;
       /** The container the routes reach, which must be on the proxy's network. */
       readonly upstreamContainer: string;
+      /** The proxy already serves this route, as far as the pod knows. */
+      readonly routed: boolean;
       readonly routes: ReadonlyArray<PodRoute>;
     }) => Effect.Effect<string | null>;
     /** Takes `<stem>.caddy` away; null once the proxy no longer serves it. */
@@ -224,7 +226,10 @@ const make = Effect.gen(function* () {
         if (upstream?.networks[proxy.network] === undefined)
           return `${input.upstreamContainer} is not on the ${proxy.network} network`;
         const previous = yield* fileSystem.readFileString(file).pipe(Effect.option);
-        if (Option.isSome(previous) && previous.value === text) return null;
+        // The file can be in place without the proxy running it: a reload failed
+        // or the server stopped between the two. It was validated before it was.
+        if (Option.isSome(previous) && previous.value === text)
+          return input.routed ? null : yield* reload(input.dockerHost, proxy);
         const candidateName = `${stem}${CANDIDATE_SUFFIX}`;
         const candidate = path.join(proxy.routesDir, candidateName);
         const checkName = `${stem}${CHECK_SUFFIX}`;
@@ -279,11 +284,7 @@ const make = Effect.gen(function* () {
         // Leaves the directory as the proxy still runs it, for everyone's next reload.
         yield* Option.match(previous, {
           onNone: () => remove(file),
-          onSome: (content) =>
-            fileSystem.writeFileString(candidate, content).pipe(
-              Effect.andThen(fileSystem.rename(candidate, file)),
-              Effect.catch(() => remove(candidate)),
-            ),
+          onSome: (content) => putBack(file, content),
         });
         return failed;
       }),
@@ -308,27 +309,43 @@ const make = Effect.gen(function* () {
       }),
     );
 
+  /** Writes `content` to `file` through a temporary name the proxy never imports. */
+  const putBack = (file: string, content: string) => {
+    const temporary = file.slice(0, -ROUTE_SUFFIX.length) + CANDIDATE_SUFFIX;
+    return fileSystem.writeFileString(temporary, content).pipe(
+      Effect.andThen(fileSystem.rename(temporary, file)),
+      Effect.catch(() => remove(temporary)),
+    );
+  };
+
   const prune: PodHostnameRouter["Service"]["prune"] = (input) =>
     lock.withPermits(1)(
       Effect.gen(function* () {
-        let removedRoute = false;
         const keep = yield* input.keep;
+        const removedRoutes = new Map<string, string>();
         for (const name of yield* listRoutes(input.proxy)) {
           if (!name.startsWith(input.prefix)) continue;
           const suffix = [CANDIDATE_SUFFIX, ROUTE_SUFFIX, CHECK_SUFFIX].find((end) =>
             name.endsWith(end),
           );
           if (suffix === undefined || keep.has(name.slice(0, -suffix.length))) continue;
-          yield* remove(path.join(input.proxy.routesDir, name));
-          if (suffix === ROUTE_SUFFIX) removedRoute = true;
+          const file = path.join(input.proxy.routesDir, name);
+          if (suffix === ROUTE_SUFFIX) {
+            const content = yield* fileSystem.readFileString(file).pipe(Effect.option);
+            if (Option.isNone(content)) continue;
+            removedRoutes.set(file, content.value);
+          }
+          yield* remove(file);
         }
-        if (!removedRoute) return;
+        if (removedRoutes.size === 0) return;
         const probed = yield* probeProxy(input.dockerHost, input.proxy);
         const failed = "reason" in probed ? null : yield* reload(input.dockerHost, input.proxy);
-        if (failed !== null)
-          yield* Effect.logWarning("stale pod routes were removed but the proxy did not reload", {
-            reason: failed,
-          });
+        if (failed === null) return;
+        // The proxy still serves them; put them back so the next startup retries.
+        for (const [file, content] of removedRoutes) yield* putBack(file, content);
+        yield* Effect.logWarning("stale pod routes kept: the proxy did not reload without them", {
+          reason: failed,
+        });
       }),
     );
 

@@ -1156,37 +1156,53 @@ describe("PodRuntimeService hostnames", () => {
     }).pipe(Effect.scoped);
   });
 
-  it.effect("keeps links on ports while the proxy refuses the route, and says why", () => {
-    const driver = makeFakeContainerDriver();
-    const router = makeFakePodHostnameRouter();
-    router.failInstall("the proxy rejected the route: unrecognized directive");
-    return withPods(
-      driver,
-      (pods) =>
-        Effect.gen(function* () {
-          const { id } = yield* pods.create({ projectId, worktreePath });
-          yield* pods.drain;
-          const running = yield* pods.awaitSettled(id);
-          expect(running).toMatchObject({
-            state: "running",
-            lastError: null,
-            hostnameProblem:
-              "Its proxy route is not in place: the proxy rejected the route: unrecognized directive. Links use ports until the pod starts again.",
-          });
-          expect(running.services[0]?.url).toBe("http://127.0.0.1:20000");
+  it.effect(
+    "keeps the hostname links its stack is set up for while the route is not in place",
+    () => {
+      const driver = makeFakeContainerDriver();
+      const router = makeFakePodHostnameRouter();
+      router.failInstall("the proxy rejected the route: unrecognized directive");
+      return Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const worktree = yield* fileSystem.makeTempDirectoryScoped();
+        const { base, discovery } = harness({
+          driver,
+          router,
+          projectFile: hostnameProject({ WEB: "{web.url}" }),
+        });
+        const context = yield* Layer.build(base);
+        const pods = Context.get(
+          yield* Layer.build(PodRuntimeService.layer).pipe(Effect.provide(context)),
+          PodRuntimeService.PodRuntimeService,
+        );
+        const { id } = yield* pods.create({ projectId, worktreePath: worktree });
+        yield* pods.drain;
+        const running = yield* pods.awaitSettled(id);
+        expect(running).toMatchObject({
+          state: "running",
+          lastError: null,
+          hostnameProblem:
+            "Its proxy route is not in place: the proxy rejected the route: unrecognized directive. Its hostnames will not open until the pod starts again with the route.",
+        });
+        // The link and the stack's .env tell the same story; the list waits for the route.
+        expect(running.services[0]?.url).toBe(`https://${hostname(id, "web")}`);
+        expect(yield* fileSystem.readFileString(`${worktree}/.env`)).toBe(
+          `WEB=https://${hostname(id, "web")}\n`,
+        );
+        expect(discovery.has(`pod:${id}`)).toBe(false);
 
-          router.failInstall(null);
-          yield* pods.stop(id);
-          yield* pods.drain;
-          yield* pods.start(id);
-          yield* pods.drain;
-          const routed = yield* pods.awaitSettled(id);
-          expect(routed).not.toHaveProperty("hostnameProblem");
-          expect(routed.services[0]?.url).toBe(`https://${hostname(id, "web")}`);
-        }),
-      { router, projectFile: hostnameProject() },
-    );
-  });
+        router.failInstall(null);
+        yield* pods.stop(id);
+        yield* pods.drain;
+        yield* pods.start(id);
+        yield* pods.drain;
+        const routed = yield* pods.awaitSettled(id);
+        expect(routed).not.toHaveProperty("hostnameProblem");
+        expect(routed.services[0]?.url).toBe(`https://${hostname(id, "web")}`);
+        expect(discovery.get(`pod:${id}`)).toHaveLength(2);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+    },
+  );
 
   it.effect("puts routes back and drops stale ones of this environment on restart", () => {
     const driver = makeFakeContainerDriver();

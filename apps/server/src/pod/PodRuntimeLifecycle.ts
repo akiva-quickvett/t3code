@@ -361,7 +361,9 @@ export const podHostnameUrl = (hostname: string) => `https://${hostname}`;
 
 /**
  * A removed pod holds no ports or hostnames; a pod's services are reachable
- * only while it runs, on their hostnames only while its route is in place.
+ * only while it runs. A pod built for hostnames links them even while its
+ * route is not in place: its stack was configured for them, so a port link
+ * would not work either, and its hostname problem says why.
  */
 const publishServices = (record: PodRuntimeRecord): PodRuntimeRecord => {
   const { hostPorts, tailnetAddress, hostnames, dnsAddress: _dns, ...unallocated } = record;
@@ -370,7 +372,7 @@ const publishServices = (record: PodRuntimeRecord): PodRuntimeRecord => {
   const services = record.snapshot.services.map(({ name, port }) => {
     const hostPort = state === "running" ? hostPorts?.[name] : undefined;
     if (hostPort === undefined) return { name, port, url: null };
-    const hostname = record.routed === true ? hostnames?.[name] : undefined;
+    const hostname = hostnames?.[name];
     return {
       name,
       port,
