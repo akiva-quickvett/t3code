@@ -232,6 +232,7 @@ function makeThreadCreatedEvent(input: {
   readonly threadId: ThreadId;
   readonly now: DateTime.Utc;
   readonly projectId?: ProjectId;
+  readonly rolePresetId?: string;
 }) {
   return Effect.gen(function* () {
     const projectId =
@@ -269,6 +270,9 @@ function makeThreadCreatedEvent(input: {
       settledAt: null,
       lastVisitedAt: null,
       deletedAt: null,
+      ...(input.rolePresetId === undefined
+        ? {}
+        : { rolePreset: { id: input.rolePresetId, label: input.rolePresetId } }),
     };
     return {
       id: yield* input.idAllocator.allocate.event({ threadId: input.threadId }),
@@ -4928,21 +4932,44 @@ const podPlacement = (
   ) => Effect.Effect<ProviderSessionPlacement, ProviderPodRefusedError>,
 ): typeof PodProviderPlacement.Service => ({
   place: (input) => place(input.runsIn),
-  podOf: () => Effect.succeed(POD_ID),
+  podFor: () => Effect.succeed(POD_ID),
 });
 
-const openThread = (name: string, runsIn?: "host" | "pod") =>
+/** Every thread lands in the pod while `inPod` holds, on the host otherwise. */
+const switchablePlacement = (inPod: Ref.Ref<boolean>): typeof PodProviderPlacement.Service => ({
+  place: () =>
+    Ref.get(inPod).pipe(
+      Effect.map((pod): ProviderSessionPlacement =>
+        pod
+          ? { type: "pod", podId: POD_ID, mcpEndpoint: POD_ENDPOINT, agentRecreated: false }
+          : { type: "host" },
+      ),
+    ),
+  podFor: () => Ref.get(inPod).pipe(Effect.map((pod) => (pod ? POD_ID : undefined))),
+});
+
+/** `rolePresetId` names a seeded preset; `review-t3-grok` runs on the host. */
+const openThread = (name: string, rolePresetId?: string, sharedSessionId?: ProviderSessionId) =>
   Effect.gen(function* () {
     const eventSink = yield* EventSink.EventSinkV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const threadId = ThreadId.make(name);
-    const providerSessionId = yield* idAllocator.allocate.providerSession({
-      providerInstanceId: modelSelection.instanceId,
-      threadId,
-    });
+    const providerSessionId =
+      sharedSessionId ??
+      (yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      }));
     yield* eventSink.write({
-      events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now: yield* DateTime.now })],
+      events: [
+        yield* makeThreadCreatedEvent({
+          idAllocator,
+          threadId,
+          now: yield* DateTime.now,
+          ...(rolePresetId === undefined ? {} : { rolePresetId }),
+        }),
+      ],
     });
     const opened = yield* manager
       .open({
@@ -4950,7 +4977,6 @@ const openThread = (name: string, runsIn?: "host" | "pod") =>
         providerSessionId,
         modelSelection,
         runtimePolicy,
-        ...(runsIn === undefined ? {} : { runsIn }),
       })
       .pipe(Effect.exit);
     return { threadId, providerSessionId, opened };
@@ -4964,12 +4990,17 @@ it.effect("ProviderSessionManagerV2 gives a pod session the pod listener's endpo
     >([]);
     yield* Effect.gen(function* () {
       const registry = yield* McpSessionRegistry.McpSessionRegistry;
-      const { opened } = yield* openThread("thread-pod-endpoint");
+      const { opened, providerSessionId } = yield* openThread("thread-pod-endpoint");
       assert.isTrue(Exit.isSuccess(opened));
       const issued = (yield* Ref.get(mcpConfigs)).at(-1);
       assert.equal(issued?.endpoint, POD_ENDPOINT);
       const scope = yield* registry.resolve(issued!.authorizationHeader.replace(/^Bearer\s+/, ""));
       assert.isTrue(scope?.capabilities.has("orchestration"));
+      // Releasing the pod session revokes its credential, as on the host.
+      yield* (yield* ProviderSessionManager.ProviderSessionManagerV2).close(providerSessionId);
+      assert.isUndefined(
+        yield* registry.resolve(issued!.authorizationHeader.replace(/^Bearer\s+/, "")),
+      );
     }).pipe(
       Effect.provide(
         layerTest({
@@ -4998,7 +5029,7 @@ it.effect(
       const runsInSeen: Array<string | undefined> = [];
       yield* Effect.gen(function* () {
         const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
-        const { threadId, opened } = yield* openThread("thread-pod-refused", "pod");
+        const { threadId, opened } = yield* openThread("thread-pod-refused", "review-t3-grok");
         assert.isTrue(Exit.isFailure(opened));
         const failure = Exit.isFailure(opened) ? Cause.squash(opened.cause) : undefined;
         assert.instanceOf(failure, ProviderSessionManager.ProviderSessionOpenError);
@@ -5008,7 +5039,8 @@ it.effect(
             : undefined,
           "Cursor cannot run in a pod.",
         );
-        assert.deepEqual(runsInSeen, ["pod"]);
+        // The manager reads where the thread's role preset runs.
+        assert.deepEqual(runsInSeen, ["host"]);
         assert.isUndefined(yield* mcpSessions.read(threadId));
         assert.equal((yield* Ref.get(state)).openCount, 0);
       }).pipe(
@@ -5016,6 +5048,7 @@ it.effect(
           layerTest({
             state,
             idleTimeoutMs: 60_000,
+            serverSettingsLayer: ServerSettings.layerTest(),
             podPlacement: podPlacement((runsIn) => {
               runsInSeen.push(runsIn);
               return Effect.fail(
@@ -5056,6 +5089,79 @@ it.effect(
                   mcpEndpoint: POD_ENDPOINT,
                   agentRecreated,
                 })),
+              ),
+            ),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect.each([
+  { first: "host", second: "pod" },
+  { first: "pod", second: "host" },
+] as const)(
+  "ProviderSessionManagerV2 keeps a $second thread out of a shared session placed on the $first",
+  ({ first, second }) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const inPod = yield* Ref.make(first === "pod");
+      const shared = IdAllocator.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* Effect.gen(function* () {
+        const opened = yield* openThread("thread-shared-first", undefined, shared);
+        assert.isTrue(Exit.isSuccess(opened.opened));
+        yield* Ref.set(inPod, second === "pod");
+        const joined = yield* openThread("thread-shared-second", undefined, shared);
+        assert.isTrue(Exit.isFailure(joined.opened));
+        const failure = Exit.isFailure(joined.opened)
+          ? Cause.squash(joined.opened.cause)
+          : undefined;
+        assert.instanceOf(
+          (failure as ProviderSessionManager.ProviderSessionOpenError).cause,
+          ProviderPodRefusedError,
+        );
+        assert.equal((yield* Ref.get(state)).openCount, 1);
+      }).pipe(
+        Effect.provide(
+          layerTest({ state, idleTimeoutMs: 60_000, podPlacement: switchablePlacement(inPod) }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 leaves host sessions alone when a pod's agent container is replaced",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const mode = yield* Ref.make<"host" | "pod" | "recreate">("host");
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        // A runsIn: host session on the pod's worktree, then a pod session that recreates.
+        const host = yield* openThread("thread-host-on-pod-worktree", "review-t3-grok");
+        yield* Ref.set(mode, "recreate");
+        const pod = yield* openThread("thread-pod-recreates");
+        assert.isTrue(Exit.isSuccess(pod.opened));
+        assert.isTrue(Option.isSome(yield* manager.get(host.providerSessionId)));
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            podPlacement: podPlacement(() =>
+              Ref.get(mode).pipe(
+                Effect.map((current): ProviderSessionPlacement =>
+                  current === "host"
+                    ? { type: "host" }
+                    : {
+                        type: "pod",
+                        podId: POD_ID,
+                        mcpEndpoint: POD_ENDPOINT,
+                        agentRecreated: current === "recreate",
+                      },
+                ),
               ),
             ),
           }),

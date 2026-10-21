@@ -810,6 +810,7 @@ describe("CodexAdapterV2 process spawning", () => {
       Effect.gen(function* () {
         const spawned: Array<{ command: string; args: ReadonlyArray<string> }> = [];
         const launches: Array<Omit<PodExecSpec, "user">> = [];
+        let stops = 0;
         const spawner = ChildProcessSpawner.make((command) => {
           if (ChildProcess.isStandardCommand(command))
             spawned.push({ command: command.command, args: command.args });
@@ -837,7 +838,12 @@ describe("CodexAdapterV2 process spawning", () => {
           command: (hostCommand) => Effect.succeed(`/opt/t3/provider-bin${hostCommand}`),
           launch: (_target, spec) => {
             launches.push(spec);
-            return { command: "docker", args: ["exec", "agent", ...spec.command], env: {} };
+            return {
+              command: "docker",
+              args: ["exec", "agent", ...spec.command],
+              env: {},
+              stop: Effect.sync(() => stops++),
+            };
           },
         };
         const factory = yield* CodexAdapterV2.CodexAppServerClientFactory.pipe(
@@ -885,6 +891,8 @@ describe("CodexAdapterV2 process spawning", () => {
           CUSTOM: "1",
           CODEX_HOME: "/home/dev/.codex-work",
         });
+        // The session's scope closing stops what the launch started in the container.
+        assert.equal(stops, 1);
       }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 

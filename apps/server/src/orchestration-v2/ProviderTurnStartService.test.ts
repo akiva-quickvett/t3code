@@ -799,24 +799,6 @@ effectIt.effect("reads only thread state before taking the startup lease", () =>
   }),
 );
 
-effectIt.effect("tells the session open where the thread's role preset runs", () =>
-  Effect.gen(function* () {
-    const harness = makeLocalCommandHarness({
-      text: "Continue",
-      worktreePath: "/tmp/provider-start-runs-in",
-      failReadsAfterRunning: true,
-    });
-    const projection = harness.projection();
-    // A seeded default that runs on the host.
-    harness.setProjection({
-      ...projection,
-      thread: { ...projection.thread, rolePreset: { id: "review-t3-grok", label: "Reviewer" } },
-    });
-    yield* harness.start;
-    expect(harness.open).toHaveBeenCalledWith(expect.objectContaining({ runsIn: "host" }));
-  }),
-);
-
 effectIt.effect("reads current startup state after waiting for the workspace lease", () =>
   Effect.gen(function* () {
     const worktreePath = "/tmp/provider-start-fresh-state";

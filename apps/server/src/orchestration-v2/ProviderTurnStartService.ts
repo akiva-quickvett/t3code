@@ -138,17 +138,18 @@ export const layer: Layer.Layer<
     // What each provider thread was last told about its role, for providers that
     // take it in the prompt. A restart forgets this, so the role is repeated once.
     const deliveredRoleKeys = new Map<string, string>();
-    const resolveThreadPreset = (thread: OrchestrationV2AppThread) => {
+    const resolveThreadRole = (thread: OrchestrationV2AppThread) => {
       const rolePreset = thread.rolePreset;
       if (rolePreset == null) return Effect.succeed(undefined);
       return serverSettings.getSettings.pipe(
-        Effect.map((settings) =>
-          findAgentRolePreset({
+        Effect.map((settings) => {
+          const preset = findAgentRolePreset({
             settings,
             projectId: thread.projectId,
             id: rolePreset.id,
-          }),
-        ),
+          });
+          return preset === undefined ? undefined : adapterRole(preset);
+        }),
         Effect.catch((cause) =>
           Effect.logWarning("Could not read the thread's role preset.", {
             threadId: thread.id,
@@ -157,10 +158,6 @@ export const layer: Layer.Layer<
         ),
       );
     };
-    const resolveThreadRole = (thread: OrchestrationV2AppThread) =>
-      resolveThreadPreset(thread).pipe(
-        Effect.map((preset) => (preset === undefined ? undefined : adapterRole(preset))),
-      );
     // Only Claude logins carry an organization for now; other drivers keep handing off silently.
     const instanceOrganization = (instanceId: ProviderInstanceId) =>
       providerAdapters.getMetadata === undefined
@@ -573,14 +570,12 @@ export const layer: Layer.Layer<
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
       );
-      const runsIn = (yield* resolveThreadPreset(projection.thread))?.runsIn;
       const sessionResult = yield* Effect.result(
         providerSessions.open({
           threadId: projection.thread.id,
           providerSessionId,
           modelSelection: run.modelSelection,
           runtimePolicy: resolvedRuntimePolicy,
-          ...(runsIn === undefined ? {} : { runsIn }),
           ...(existingSessionProjection === undefined
             ? {}
             : { resumeFromSession: existingSessionProjection }),

@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import type * as ContainerDriver from "../pod/ContainerDriver.ts";
+import { POD_HOST_ALIAS } from "../pod/PodContainerPlan.ts";
 import type * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 
 /** Drivers whose sessions are a process T3 spawns, which `docker exec` can put in a pod. */
@@ -41,6 +42,10 @@ export const podEnvironmentValues = (
     ),
   );
 
+/** Whether an MCP URL is the pod-facing listener's rather than the server's own. */
+export const isPodMcpEndpoint = (endpoint: string) =>
+  URL.canParse(endpoint) && new URL(endpoint).hostname === POD_HOST_ALIAS;
+
 export class ProviderPodRefusedError extends Schema.TaggedError<ProviderPodRefusedError>()(
   "ProviderPodRefusedError",
   {
@@ -65,6 +70,12 @@ export type ProviderSessionPlacement =
 
 export const HOST_PLACEMENT: ProviderSessionPlacement = { type: "host" };
 
+export interface ProviderPlacementInput {
+  readonly cwd: string | null;
+  readonly driver: ProviderDriverKind;
+  readonly runsIn: AgentRolePresetRunsIn | undefined;
+}
+
 /**
  * Where a provider session runs. A pod's worktree runs Claude and Codex in the
  * pod; another driver runs on the host only when the thread's role preset
@@ -72,20 +83,33 @@ export const HOST_PLACEMENT: ProviderSessionPlacement = { type: "host" };
  * by accident while the worktree's stack lives in the pod.
  */
 export const PodProviderPlacement = Context.Reference<{
-  readonly place: (input: {
-    readonly cwd: string | null;
-    readonly driver: ProviderDriverKind;
-    readonly instanceId: ProviderInstanceId;
-    readonly runsIn: AgentRolePresetRunsIn | undefined;
-  }) => Effect.Effect<ProviderSessionPlacement, ProviderPodRefusedError>;
-  /** The pod whose worktree holds `cwd`. */
-  readonly podOf: (cwd: string) => Effect.Effect<PodRuntimeId | undefined>;
+  /** Prepares the session's place: a pod session gets a running pod with its account mounted. */
+  readonly place: (
+    input: ProviderPlacementInput & {
+      readonly instanceId: ProviderInstanceId;
+      /** Whether another session in the pod is mid-turn, which an agent-container recreate would end. */
+      readonly podBusy: (podId: PodRuntimeId) => Effect.Effect<boolean>;
+    },
+  ) => Effect.Effect<ProviderSessionPlacement, ProviderPodRefusedError>;
+  /** Where the session must run, the pod or the host (undefined), without preparing it. */
+  readonly podFor: (
+    input: ProviderPlacementInput,
+  ) => Effect.Effect<PodRuntimeId | undefined, ProviderPodRefusedError>;
 }>("t3/provider/PodProviderSessions/PodProviderPlacement", {
   defaultValue: () => ({
     place: () => Effect.succeed(HOST_PLACEMENT),
-    podOf: () => Effect.succeed(undefined),
+    podFor: () => Effect.succeed(undefined),
   }),
 });
+
+export interface PodProviderLaunch extends ContainerDriver.PodExecLaunch {
+  /**
+   * Ends every process the launch started in the container, children
+   * included. Stopping the host's docker CLI does not: it forwards no signal
+   * to the process it runs.
+   */
+  readonly stop: Effect.Effect<void>;
+}
 
 /**
  * How a pod-capable driver spawns its process: the pod for a path on a pod's
@@ -97,11 +121,14 @@ export const ProviderPodProcess = Context.Reference<{
   ) => Effect.Effect<WorkspaceExecutionTarget.PodExecutionTarget | undefined>;
   /** Where the host's provider binary runs from in the pod. */
   readonly command: (hostCommand: string) => Effect.Effect<string>;
-  /** A host command that runs `spec` in the pod as the host user, with only the env it names. */
+  /**
+   * A host command that runs `spec` in the pod as the host user, with only
+   * the env it names, and how to stop what it started there.
+   */
   readonly launch: (
     target: WorkspaceExecutionTarget.PodExecutionTarget,
     spec: Omit<ContainerDriver.PodExecSpec, "user">,
-  ) => ContainerDriver.PodExecLaunch;
+  ) => PodProviderLaunch;
 }>("t3/provider/PodProviderSessions/ProviderPodProcess", {
   defaultValue: () => ({
     resolve: () => Effect.succeed(undefined),

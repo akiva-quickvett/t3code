@@ -1,7 +1,11 @@
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
-import type { PodExecLaunch } from "../../pod/ContainerDriver.ts";
-import { podEnvironmentValues, ProviderPodProcess } from "../../provider/PodProviderSessions.ts";
+import {
+  isPodMcpEndpoint,
+  type PodProviderLaunch,
+  podEnvironmentValues,
+  ProviderPodProcess,
+} from "../../provider/PodProviderSessions.ts";
 import {
   dynamicToolTitle,
   formatReadToolLabel,
@@ -311,8 +315,9 @@ const spawnClaudeInPod =
       readonly command: ReadonlyArray<string>;
       readonly cwd?: string;
       readonly env: Readonly<Record<string, string>>;
-    }) => PodExecLaunch;
+    }) => PodProviderLaunch;
     readonly cliEnvironment: NodeJS.ProcessEnv;
+    readonly runStop: (stop: PodProviderLaunch["stop"]) => void;
   }) =>
   (options: ClaudeSpawnOptions): ClaudeSpawnedProcess => {
     const command = [options.command, ...options.args].map((arg) =>
@@ -325,12 +330,16 @@ const spawnClaudeInPod =
     });
     // The docker CLI itself runs with the host's environment; the container
     // receives only the variables the launch names.
-    return spawnClaudeProcessGroup({
+    const child = spawnClaudeProcessGroup({
       ...options,
       command: launch.command,
       args: [...launch.args],
       env: { ...input.cliEnvironment, ...launch.env },
     });
+    // Like the host's process group kill: whatever the CLI left running in
+    // the container goes with it.
+    child.once("exit", () => input.runStop(launch.stop));
+    return child;
   };
 
 export const ClaudeProviderCapabilitiesV2 = {
@@ -796,6 +805,7 @@ export const layerQueryRunner: Layer.Layer<
     const platform = yield* HostProcess.Platform;
     const podProcess = yield* ProviderPodProcess;
     const hostEnvironment = yield* HostProcess.Environment;
+    const runFork = Effect.runForkWith(yield* Effect.context<never>());
 
     return ClaudeAgentSdkQueryRunner.of({
       allocateSessionId: crypto
@@ -855,6 +865,7 @@ export const layerQueryRunner: Layer.Layer<
                   podExecutable: yield* podProcess.command(hostExecutable),
                   launch: (spec) => podProcess.launch(podTarget, spec),
                   cliEnvironment: hostEnvironment,
+                  runStop: (stop) => void runFork(stop),
                 }),
               }
             : launch === undefined || launch.args.length === 0
@@ -903,9 +914,18 @@ export const layerQueryRunner: Layer.Layer<
                       }),
                     );
                     if (failed.length > 0) {
+                      const t3Code = mcpServers["t3-code"];
                       yield* Effect.logWarning("orchestration-v2.claude-mcp-servers-unavailable", {
                         threadId: input.threadId,
                         servers: failed,
+                        ...(failed.includes("t3-code") &&
+                        t3Code !== undefined &&
+                        "url" in t3Code &&
+                        isPodMcpEndpoint(t3Code.url)
+                          ? {
+                              hint: "The pod could not reach T3's pod MCP listener; a host firewall that drops traffic from pod networks blocks it.",
+                            }
+                          : {}),
                       });
                     }
                   }

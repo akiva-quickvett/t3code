@@ -87,6 +87,10 @@ describe("pod container plan", () => {
     expect(network).toEqual({ mode: "container", container: "t3-env1-pod-abc123-dind" });
   });
 
+  it("records on the daemon the network the pod was made on", () => {
+    expect(planPod(input).dind.labels).toMatchObject({ "t3.network": "t3-pods" });
+  });
+
   it("labels everything with the pod and the environment that owns it", () => {
     const plan = planPod(input);
     for (const labels of [plan.dind.labels, plan.agent.labels, plan.volume.labels]) {

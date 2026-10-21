@@ -60,6 +60,18 @@ Antigravity is bound to the host) run on the host only when the thread's role pr
 `runsIn: host`, and are refused otherwise: a session on the host would reach the host's Docker
 while the worktree's stack lives in the pod. `orchestrator_capabilities` lists each refusal.
 
+A provider that serves many threads from one process (Codex, OpenCode) gets one shared session
+per place: the orchestrator scopes the shared session id by where the thread's session must run,
+its pod or the host, by the same rules as above, and the session manager never attaches a thread to
+a shared session placed elsewhere. One process cannot run in two places. The session manager reads
+`runsIn` from the thread's preset itself, so every path that opens a session places it alike.
+
+The host's `docker exec` client forwards no signal to the process it started, so closing it
+leaves the agent and its children running in the container. Each launch therefore marks its
+environment with `T3_POD_SESSION`, which every child inherits, and its end signals every container
+process carrying the mark (TERM, then KILL): the host's process-group kill, extended to children
+that left the group.
+
 A session in a pod never inherits the server's environment. `docker exec` names only the
 instance's own variables, its config-dir variable and the role's context window; inherited
 `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are stripped even from those. The MCP token is
@@ -70,7 +82,9 @@ config dir still overrides the role's context window, as it does on the host.
 The agent container mounts the config dirs (and a Claude shared config dir) of the project's
 enabled Claude and Codex instances when it is made. A session whose instance's dirs are missing
 recreates the agent container from current settings; the daemon, its volume and the stack stay,
-and the pod's other sessions are released so their next turn resumes in the new container.
+and the pod's other sessions are released so their next turn resumes in the new container. It is
+refused instead when the new container would still lack the dirs (the instance is not enabled for
+the project) or when another session in the pod is mid-turn, which the recreate would end.
 
 ## Pod-facing MCP listener
 
@@ -79,7 +93,9 @@ and the pod's other sessions are released so their next turn resumes in the new 
 server exposes:
 
 - It binds the pod network's gateway address, only while a pod uses that network, and admits only
-  peers in the network's subnet.
+  peers in the network's subnet. The port is fixed (47773) so one host firewall rule admits pods
+  across restarts; a default-deny INPUT policy drops them otherwise. While another program holds
+  it, the listener takes a free port and logs that the rule no longer covers it.
 - It admits exactly `/mcp` and the signed attachment upload URL, matched on the raw path, and hands
   them to the main server's own routes, so the same bearer check and upload signature apply.
   Pairing, the API, OAuth, webhooks, the preview stream, the relay and the WebSocket answer 404.
@@ -89,6 +105,11 @@ Containers reach it as `host.docker.internal`, which the daemon container maps t
 gateway address and the agent container shares through its network namespace. Docker's
 `host-gateway` is the default bridge's address, where the listener does not bind. Docker Desktop
 for macOS gives containers no route to such an address; a unix-socket listener for it is not built.
+
+The listener keys on the network the pod's daemon joined when it was made, recorded in its
+`t3.network` label, since the host alias points at that network's gateway whatever settings now
+name. Pods made before these sessions existed lack the alias, the label and the provider-binary
+layout, and need a full recreate.
 
 Still open: the default image `docker:27-cli` is Alpine, so glibc-linked provider binaries do not
 run in it. Claude's `~/.claude.json` lives outside its config dir and is not mounted.

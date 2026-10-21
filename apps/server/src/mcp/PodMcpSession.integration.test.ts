@@ -24,6 +24,10 @@ import * as ContainerDriver from "../pod/ContainerDriver.ts";
 import * as PodRuntimeStore from "../pod/PodRuntimeStore.ts";
 import { makeFakeContainerDriver } from "../pod/testkit/FakeContainerDriver.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import type { OrchestrationV2ServerCommand } from "@t3tools/contracts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
+import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as McpToolAccessTestkit from "./McpToolAccess.testkit.ts";
@@ -43,8 +47,24 @@ docker.setNetwork({ subnet: "127.0.0.0/8", gateway: "127.0.0.1" });
 const layerRoutes = Layer.mergeAll(
   McpHttpServer.layerPreviewToolkit,
   McpHttpServer.layerAttachmentToolkit,
+  McpHttpServer.layerThreadToolkit,
   ServerHttp.layerAttachmentUploadRoute,
 ).pipe(Layer.provideMerge(McpHttpServer.layerMcpTransport));
+
+/** What the thread toolkit's writes asked the orchestrator to do. */
+const dispatched: Array<OrchestrationV2ServerCommand> = [];
+const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
+  getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+  getProjectThreadRecords: ({ threadId: id }) =>
+    Effect.succeed(
+      McpToolAccessTestkit.idleThreadProjection(McpToolAccessTestkit.liveThreadShell(id)),
+    ),
+  dispatch: (command) =>
+    Effect.sync(() => {
+      dispatched.push(command);
+      return { sequence: dispatched.length, storedEvents: [] };
+    }),
+});
 
 const layerServerEnvironment = Layer.mock(ServerEnvironment.ServerEnvironment)({
   getEnvironmentId: Effect.succeed(environmentId),
@@ -52,7 +72,7 @@ const layerServerEnvironment = Layer.mock(ServerEnvironment.ServerEnvironment)({
 
 const layer = Layer.mergeAll(
   HttpRouter.serve(layerRoutes, { disableListenLog: true, disableLogger: true }),
-  PodMcpListener.layer.pipe(
+  PodMcpListener.layerWithPort(0).pipe(
     Layer.provideMerge(PodRuntimeStore.layer),
     Layer.provide(Layer.succeed(ContainerDriver.ContainerDriver, docker.driver)),
     Layer.provide(
@@ -71,7 +91,9 @@ const layer = Layer.mergeAll(
 ).pipe(
   Layer.provideMerge(McpSessionRegistry.layer),
   Layer.provide(layerServerEnvironment),
-  Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
+  Layer.provide(layerThreads),
+  Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+  Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-pod-session-test-" })),
@@ -205,6 +227,13 @@ it.effect(
 
       const read = jsonRpcResult((yield* client.callTool("preview_status", {})).body);
       expect(read.error).toBeUndefined();
+      expect(read.result).toBeDefined();
+
+      const pinned = jsonRpcResult(
+        (yield* client.callTool("t3_thread_organize", { action: "pin" })).body,
+      );
+      expect(pinned.result?.isError, JSON.stringify(pinned)).not.toBe(true);
+      expect(dispatched).toMatchObject([{ type: "thread.pin", threadId }]);
 
       const bytes = new TextEncoder().encode("hello from the pod");
       const prepared = jsonRpcResult(

@@ -2,7 +2,7 @@
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 
-import type { PodRuntimeId } from "@t3tools/contracts";
+import type { PodRuntimeId, ProjectId } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -14,10 +14,16 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import { ATTACHMENT_UPLOAD_ROUTE_PREFIX } from "../assets/AttachmentUpload.ts";
 import * as ContainerDriver from "../pod/ContainerDriver.ts";
-import { POD_HOST_ALIAS } from "../pod/PodContainerPlan.ts";
+import {
+  POD_HOST_ALIAS,
+  POD_LABEL,
+  POD_NETWORK_LABEL,
+  POD_ROLE_LABEL,
+} from "../pod/PodContainerPlan.ts";
 import * as PodRuntimeStore from "../pod/PodRuntimeStore.ts";
 import type { PodExecutionTarget } from "../pod/WorkspaceExecutionTarget.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { looksLikeProviderSessionToken } from "./McpSessionRegistry.ts";
 
 /** Hands a request to the main HTTP server, so the pod listener serves exactly its routes. */
 export class McpRequestDispatch extends Context.Service<
@@ -61,10 +67,6 @@ export class PodMcpListener extends Context.Service<
   }
 >()("t3/mcp/PodMcpListener") {}
 
-/** Whether an MCP URL is a pod listener's rather than the server's own. */
-export const isPodMcpEndpoint = (endpoint: string) =>
-  URL.canParse(endpoint) && new URL(endpoint).hostname === POD_HOST_ALIAS;
-
 const UPLOAD_PATH = new RegExp(
   `^${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$`,
 );
@@ -82,12 +84,13 @@ export const isPodMcpRoute = (method: string | undefined, url: string | undefine
   return method === "POST" && UPLOAD_PATH.test(pathname);
 };
 
-/**
- * Provider-session tokens are bare base64url; a dotted bearer is an OAuth
- * client's, which belongs to a paired device and is not taken from a pod.
- */
-const presentsClientToken = (authorization: string | undefined) =>
-  authorization !== undefined && authorization.slice("Bearer ".length).includes(".");
+/** A paired device's OAuth token, which the pod listener never takes. */
+const presentsClientToken = (authorization: string | undefined) => {
+  const token = authorization?.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length).trim()
+    : "";
+  return token.length > 0 && !looksLikeProviderSessionToken(token);
+};
 
 export const makePodSubnetCheck = (subnet: string) => {
   const [network, prefix] = subnet.split("/");
@@ -131,11 +134,17 @@ interface OpenListener extends Listener {
 
 const listenerKey = (dockerHost: string, network: string) => `${dockerHost}\u0000${network}`;
 
-const listen = (gateway: string, handler: NodeHttp.RequestListener) =>
-  Effect.callback<Listener, Error>((resume) => {
+/**
+ * The same port on every pod network, so one host firewall rule admits pods
+ * across restarts; a default-deny INPUT policy drops them otherwise.
+ */
+export const DEFAULT_POD_MCP_PORT = 47773;
+
+const listenOn = (gateway: string, port: number, handler: NodeHttp.RequestListener) =>
+  Effect.callback<Listener, NodeJS.ErrnoException>((resume) => {
     const server = NodeHttp.createServer(handler);
     server.once("error", (error) => resume(Effect.fail(error)));
-    server.listen(0, gateway, () => {
+    server.listen(port, gateway, () => {
       const address = server.address();
       resume(
         Effect.succeed({
@@ -153,133 +162,186 @@ const close = (listener: Listener) =>
     listener.server.close(() => resume(Effect.void));
   });
 
-const make = Effect.gen(function* () {
-  const store = yield* PodRuntimeStore.PodRuntimeStore;
-  const driver = yield* ContainerDriver.ContainerDriver;
-  const serverSettings = yield* ServerSettings.ServerSettingsService;
-  const { dispatch } = yield* McpRequestDispatch;
-  const listeners = new Map<string, OpenListener>();
-  const lock = yield* Semaphore.make(1);
-  const listening = yield* SubscriptionRef.make<ReadonlyArray<PodMcpListenerAddress>>([]);
-  const publish = Effect.suspend(() =>
-    SubscriptionRef.set(
-      listening,
-      [...listeners.values()].map(({ network, address, port }) => ({ network, address, port })),
+/** The stable port, or any free one while something else holds it. */
+const listen = (gateway: string, port: number, handler: NodeHttp.RequestListener) =>
+  listenOn(gateway, port, handler).pipe(
+    Effect.catchIf(
+      (error) => error.code === "EADDRINUSE" && port !== 0,
+      () =>
+        Effect.logWarning(
+          "the pod MCP port is taken; listening on another, which a host firewall rule for the usual port does not cover",
+          { address: gateway, port },
+        ).pipe(Effect.andThen(listenOn(gateway, 0, handler))),
     ),
   );
 
-  const keyOf = (podId: PodRuntimeId) =>
-    Effect.gen(function* () {
-      const record = yield* store.get(podId);
-      if (record === undefined || record.snapshot.state === "removed") return undefined;
-      const settings = yield* serverSettings.getSettings;
-      const { network } = resolveProjectSettings(settings, record.snapshot.projectId).settings
-        .podRuntime;
-      return {
-        key: listenerKey(record.dockerHost, network),
-        dockerHost: record.dockerHost,
-        network,
-      };
-    });
+const make = (port: number) =>
+  Effect.gen(function* () {
+    const store = yield* PodRuntimeStore.PodRuntimeStore;
+    const driver = yield* ContainerDriver.ContainerDriver;
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
+    const { dispatch } = yield* McpRequestDispatch;
+    const listeners = new Map<string, OpenListener>();
+    const lock = yield* Semaphore.make(1);
+    const listening = yield* SubscriptionRef.make<ReadonlyArray<PodMcpListenerAddress>>([]);
+    const publish = Effect.suspend(() =>
+      SubscriptionRef.set(
+        listening,
+        [...listeners.values()].map(({ network, address, port }) => ({ network, address, port })),
+      ),
+    );
 
-  const ensure = (podId: PodRuntimeId) =>
-    lock.withPermit(
+    const createdOn = new Map<PodRuntimeId, string>();
+
+    /**
+     * The network the pod's daemon joined when it was made, which is where its
+     * host alias points. Pods made before the label existed follow settings.
+     */
+    const networkOf = (podId: PodRuntimeId, dockerHost: string, projectId: ProjectId) =>
       Effect.gen(function* () {
-        const owner = yield* keyOf(podId).pipe(
-          Effect.mapError(
-            (cause) =>
-              new PodMcpListenerError({ detail: "Pod settings could not be read.", cause }),
-          ),
-        );
-        if (owner === undefined)
-          return yield* new PodMcpListenerError({ detail: "The pod no longer exists." });
-        const existing = listeners.get(owner.key);
-        if (existing !== undefined) return existing;
-        const network = yield* driver
-          .forHost(owner.dockerHost)
-          .inspectNetwork(owner.network)
+        const known = createdOn.get(podId);
+        if (known !== undefined) return known;
+        const labelled = yield* driver
+          .forHost(dockerHost)
+          .list(POD_LABEL)
           .pipe(
-            Effect.mapError((cause) => new PodMcpListenerError({ detail: cause.message, cause })),
+            Effect.map(
+              ({ containers }) =>
+                containers.find(
+                  (container) =>
+                    container.labels[POD_LABEL] === podId &&
+                    container.labels[POD_ROLE_LABEL] === "dind",
+                )?.labels[POD_NETWORK_LABEL],
+            ),
+            Effect.orElseSucceed(() => undefined),
           );
-        // Only the pod network's gateway: the address is local to this host,
-        // and nothing outside the network routes to it.
-        const listener = yield* listen(
-          network.gateway,
-          makePodRequestHandler({ fromPodNetwork: makePodSubnetCheck(network.subnet), dispatch }),
-        ).pipe(
-          Effect.mapError(
-            (cause) =>
-              new PodMcpListenerError({
-                detail: `Could not listen on ${network.gateway}: ${cause.message}`,
-                cause,
-              }),
-          ),
-        );
-        listeners.set(owner.key, {
-          ...listener,
-          network: owner.network,
-          address: network.gateway,
-        });
-        yield* publish;
-        yield* Effect.logInfo("pod MCP listener started", {
-          network: owner.network,
-          address: network.gateway,
-          port: listener.port,
-        });
-        return listener;
+        if (labelled !== undefined) {
+          createdOn.set(podId, labelled);
+          return labelled;
+        }
+        const settings = yield* serverSettings.getSettings;
+        return resolveProjectSettings(settings, projectId).settings.podRuntime.network;
+      });
+
+    const keyOf = (podId: PodRuntimeId) =>
+      Effect.gen(function* () {
+        const record = yield* store.get(podId);
+        if (record === undefined || record.snapshot.state === "removed") {
+          createdOn.delete(podId);
+          return undefined;
+        }
+        const network = yield* networkOf(podId, record.dockerHost, record.snapshot.projectId);
+        return {
+          key: listenerKey(record.dockerHost, network),
+          dockerHost: record.dockerHost,
+          network,
+        };
+      });
+
+    const ensure = (podId: PodRuntimeId) =>
+      lock.withPermit(
+        Effect.gen(function* () {
+          const owner = yield* keyOf(podId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new PodMcpListenerError({ detail: "Pod settings could not be read.", cause }),
+            ),
+          );
+          if (owner === undefined)
+            return yield* new PodMcpListenerError({ detail: "The pod no longer exists." });
+          const existing = listeners.get(owner.key);
+          if (existing !== undefined) return existing;
+          const network = yield* driver
+            .forHost(owner.dockerHost)
+            .inspectNetwork(owner.network)
+            .pipe(
+              Effect.mapError((cause) => new PodMcpListenerError({ detail: cause.message, cause })),
+            );
+          // Only the pod network's gateway: the address is local to this host,
+          // and nothing outside the network routes to it.
+          const listener = yield* listen(
+            network.gateway,
+            port,
+            makePodRequestHandler({ fromPodNetwork: makePodSubnetCheck(network.subnet), dispatch }),
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new PodMcpListenerError({
+                  detail: `Could not listen on ${network.gateway}: ${cause.message}`,
+                  cause,
+                }),
+            ),
+          );
+          listeners.set(owner.key, {
+            ...listener,
+            network: owner.network,
+            address: network.gateway,
+          });
+          yield* publish;
+          yield* Effect.logInfo("pod MCP listener started", {
+            network: owner.network,
+            address: network.gateway,
+            port: listener.port,
+          });
+          return listener;
+        }),
+      );
+
+    /** Stops each listener whose network no pod uses any more. */
+    const stopUnused = lock.withPermit(
+      Effect.gen(function* () {
+        if (listeners.size === 0) return;
+        const used = new Set<string>();
+        for (const record of yield* store.list) {
+          if (record.snapshot.state === "removed") continue;
+          const owner = yield* keyOf(record.snapshot.id);
+          if (owner !== undefined) used.add(owner.key);
+        }
+        for (const [key, listener] of listeners) {
+          if (used.has(key)) continue;
+          listeners.delete(key);
+          yield* close(listener);
+          yield* publish;
+          yield* Effect.logInfo("pod MCP listener stopped", { port: listener.port });
+        }
       }),
     );
 
-  /** Stops each listener whose network no pod uses any more. */
-  const stopUnused = lock.withPermit(
-    Effect.gen(function* () {
-      if (listeners.size === 0) return;
-      const used = new Set<string>();
-      for (const record of yield* store.list) {
-        if (record.snapshot.state === "removed") continue;
-        const owner = yield* keyOf(record.snapshot.id);
-        if (owner !== undefined) used.add(owner.key);
-      }
-      for (const [key, listener] of listeners) {
-        if (used.has(key)) continue;
-        listeners.delete(key);
-        yield* close(listener);
-        yield* publish;
-        yield* Effect.logInfo("pod MCP listener stopped", { port: listener.port });
-      }
-    }),
-  );
-
-  // A running pod's network exists, so its listener starts then rather than
-  // at its first session; the last removal stops it.
-  const subscription = yield* store.subscribe;
-  yield* Stream.fromSubscription(subscription).pipe(
-    Stream.runForEach((record) =>
-      (record.snapshot.state === "running"
-        ? ensure(record.snapshot.id).pipe(
-            Effect.catch((error) =>
-              Effect.logWarning("pod MCP listener could not start", { detail: error.detail }),
-            ),
-            Effect.asVoid,
-          )
-        : stopUnused
-      ).pipe(
-        Effect.catchCause((cause) => Effect.logWarning("pod MCP listener reconcile failed", cause)),
+    // A running pod's network exists, so its listener starts then rather than
+    // at its first session; the last removal stops it.
+    const subscription = yield* store.subscribe;
+    yield* Stream.fromSubscription(subscription).pipe(
+      Stream.runForEach((record) =>
+        (record.snapshot.state === "running"
+          ? ensure(record.snapshot.id).pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("pod MCP listener could not start", { detail: error.detail }),
+              ),
+              Effect.asVoid,
+            )
+          : stopUnused
+        ).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("pod MCP listener reconcile failed", cause),
+          ),
+        ),
       ),
-    ),
-    Effect.forkScoped,
-  );
-  yield* Effect.addFinalizer(() =>
-    lock.withPermit(Effect.forEach([...listeners.values()], close, { discard: true })),
-  );
+      Effect.forkScoped,
+    );
+    yield* Effect.addFinalizer(() =>
+      lock.withPermit(Effect.forEach([...listeners.values()], close, { discard: true })),
+    );
 
-  return PodMcpListener.of({
-    endpointFor: (target) =>
-      ensure(target.podId).pipe(
-        Effect.map((listener) => `http://${POD_HOST_ALIAS}:${listener.port}/mcp`),
-      ),
-    listening: SubscriptionRef.changes(listening),
+    return PodMcpListener.of({
+      endpointFor: (target) =>
+        ensure(target.podId).pipe(
+          Effect.map((listener) => `http://${POD_HOST_ALIAS}:${listener.port}/mcp`),
+        ),
+      listening: SubscriptionRef.changes(listening),
+    });
   });
-});
 
-export const layer = Layer.effect(PodMcpListener, make);
+export const layer = Layer.effect(PodMcpListener, make(DEFAULT_POD_MCP_PORT));
+
+/** On another port; tests pass 0 so parallel runs never meet. */
+export const layerWithPort = (port: number) => Layer.effect(PodMcpListener, make(port));

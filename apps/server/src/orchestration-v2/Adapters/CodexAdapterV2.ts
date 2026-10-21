@@ -1418,7 +1418,10 @@ const makeCodexPodSpawnCommand = Effect.fn("CodexAdapterV2.makeCodexPodSpawnComm
   });
   // The docker CLI runs with the host's environment; the container receives
   // only the variables the launch names.
-  return ChildProcess.make(launch.command, launch.args, { env: launch.env, extendEnv: true });
+  return {
+    command: ChildProcess.make(launch.command, launch.args, { env: launch.env, extendEnv: true }),
+    stop: launch.stop,
+  };
 });
 
 const layerCodexAppServerClientFactoryCommand = (
@@ -1580,7 +1583,13 @@ export const layerAppServerClientFactory: Layer.Layer<
                   environment: input.environment,
                   podEnvironment,
                   cwd: input.runtimePolicy.cwd,
-                }).pipe(Effect.provideService(ProviderPodProcess, podProcess));
+                }).pipe(
+                  Effect.provideService(ProviderPodProcess, podProcess),
+                  // Closing the docker CLI leaves the app-server running in the
+                  // container; the session's end stops it and its children there.
+                  Effect.tap(({ stop }) => Scope.addFinalizer(scope, stop)),
+                  Effect.map(({ command }) => command),
+                );
           const handle = yield* spawner.spawn(command).pipe(
             Effect.provideService(Scope.Scope, scope),
             Effect.mapError(

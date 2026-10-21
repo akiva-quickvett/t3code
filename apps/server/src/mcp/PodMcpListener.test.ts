@@ -15,14 +15,14 @@ import * as ContainerDriver from "../pod/ContainerDriver.ts";
 import * as PodRuntimeStore from "../pod/PodRuntimeStore.ts";
 import { makeFakeContainerDriver } from "../pod/testkit/FakeContainerDriver.ts";
 import type { PodExecutionTarget } from "../pod/WorkspaceExecutionTarget.ts";
+import { isPodMcpEndpoint } from "../provider/PodProviderSessions.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
-  isPodMcpEndpoint,
   isPodMcpRoute,
   makePodSubnetCheck,
   McpRequestDispatch,
   PodMcpListener,
-  layer as podMcpListenerLayer,
+  layerWithPort,
 } from "./PodMcpListener.ts";
 
 const podId = PodRuntimeId.make("pod-listener1");
@@ -34,10 +34,15 @@ const target: PodExecutionTarget = {
   dockerHost: "",
 };
 
-const makeLayer = (network: { readonly subnet: string; readonly gateway: string }) => {
+const makeLayer = (
+  network: { readonly subnet: string; readonly gateway: string },
+  seed?: (docker: ReturnType<typeof makeFakeContainerDriver>) => void,
+  port = 0,
+) => {
   const docker = makeFakeContainerDriver();
   docker.setNetwork(network);
-  return podMcpListenerLayer.pipe(
+  seed?.(docker);
+  return layerWithPort(port).pipe(
     Layer.provideMerge(PodRuntimeStore.layer),
     Layer.provide(Layer.succeed(ContainerDriver.ContainerDriver, docker.driver)),
     // The main server's routes: everything the listener admits answers here.
@@ -229,4 +234,72 @@ describe("pod MCP listener", () => {
       expect(error.message).toContain("no longer exists");
     }).pipe(Effect.provide(makeLayer({ subnet: "127.0.0.0/8", gateway: "127.0.0.1" }))),
   );
+
+  it.effect("listens on the network the pod was made on, not today's setting", () =>
+    Effect.gen(function* () {
+      yield* recordPod;
+      const listener = yield* PodMcpListener;
+      yield* listener.endpointFor(target);
+      const open = Option.getOrThrow(
+        yield* listener.listening.pipe(
+          Stream.filter((listeners) => listeners.length === 1),
+          Stream.runHead,
+        ),
+      );
+      expect(open[0]?.network).toBe("pods-before");
+    }).pipe(
+      Effect.provide(
+        makeLayer({ subnet: "127.0.0.0/8", gateway: "127.0.0.1" }, (docker) =>
+          docker.seedContainer({
+            id: "dind-1",
+            name: "t3-env-pod-listener1-dind",
+            labels: { "t3.pod": podId, "t3.role": "dind", "t3.network": "pods-before" },
+          }),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("keeps its port across restarts, and takes another while that one is held", () =>
+    Effect.gen(function* () {
+      const free = yield* occupy(0);
+      const stablePort = free.port;
+      yield* free.release;
+      const loopback = { subnet: "127.0.0.0/8", gateway: "127.0.0.1" };
+      const endpointOn = Effect.gen(function* () {
+        yield* recordPod;
+        return portOf(yield* (yield* PodMcpListener).endpointFor(target));
+      });
+      expect(
+        yield* endpointOn.pipe(Effect.provide(makeLayer(loopback, undefined, stablePort))),
+      ).toBe(stablePort);
+      const held = yield* occupy(stablePort);
+      const fallback = yield* endpointOn.pipe(
+        Effect.provide(makeLayer(loopback, undefined, stablePort)),
+      );
+      expect(fallback).not.toBe(stablePort);
+      expect(fallback).toBeGreaterThan(0);
+      yield* held.release;
+    }),
+  );
 });
+
+/** Holds a loopback port the way another program would. */
+const occupy = (port: number) =>
+  Effect.callback<{ readonly port: number; readonly release: Effect.Effect<void> }, Error>(
+    (resume) => {
+      const server = NodeHttp.createServer();
+      server.once("error", (error) => resume(Effect.fail(error)));
+      server.listen(port, "127.0.0.1", () => {
+        const address = server.address();
+        resume(
+          Effect.succeed({
+            port: typeof address === "object" && address !== null ? address.port : 0,
+            release: Effect.callback<void>((done) => {
+              server.close(() => done(Effect.void));
+            }),
+          }),
+        );
+      });
+    },
+  );

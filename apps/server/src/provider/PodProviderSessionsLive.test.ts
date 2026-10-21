@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - the stop script runs against real local processes.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -16,8 +20,8 @@ import * as PodMcpListener from "../mcp/PodMcpListener.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { PodProviderPlacement } from "./PodProviderSessions.ts";
-import { layerPlacement } from "./PodProviderSessionsLive.ts";
+import { PodProviderPlacement, ProviderPodProcess } from "./PodProviderSessions.ts";
+import { layerPlacement, layerProcess, POD_SESSION_ENV } from "./PodProviderSessionsLive.ts";
 
 const podId = PodRuntimeId.make("pod-placement1");
 const POD_WORKTREE = "/work/trees/pod";
@@ -49,6 +53,7 @@ const makeLayer = (input: {
   readonly podState?: PodRuntimeSnapshot["state"];
   readonly mountedAtStart: boolean;
   readonly recreateMounts?: boolean;
+  readonly instanceEnabled?: boolean;
 }) => {
   const mounted = new Set(input.mountedAtStart ? [input.configDir] : []);
   const recreated: Array<PodRuntimeId> = [];
@@ -80,6 +85,7 @@ const makeLayer = (input: {
             return snapshot("starting");
           }),
         awaitSettled: () => Effect.succeed(snapshot("running")),
+        forPath: () => Effect.succeed(snapshot("running")),
       }),
     ),
     Layer.provide(
@@ -91,7 +97,11 @@ const makeLayer = (input: {
     Layer.provide(
       ServerSettings.layerTest({
         providerInstances: {
-          [instanceId]: { driver: claude, config: { homePath: input.configDir } },
+          [instanceId]: {
+            driver: claude,
+            enabled: input.instanceEnabled ?? true,
+            config: { homePath: input.configDir },
+          },
         },
       }),
     ),
@@ -110,10 +120,17 @@ const place = (input: {
   readonly cwd: string;
   readonly driver: ProviderDriverKind;
   readonly runsIn?: "host" | "pod";
+  readonly podBusy?: boolean;
 }) =>
   Effect.gen(function* () {
     const placement = yield* PodProviderPlacement;
-    return yield* placement.place({ instanceId, runsIn: undefined, ...input });
+    const { podBusy, ...rest } = input;
+    return yield* placement.place({
+      instanceId,
+      runsIn: undefined,
+      podBusy: () => Effect.succeed(podBusy === true),
+      ...rest,
+    });
   });
 
 describe("pod provider placement", () => {
@@ -189,16 +206,168 @@ describe("pod provider placement", () => {
     }),
   );
 
+  it.effect("does not recreate for an account the project has not enabled", () =>
+    withConfigDir((configDir) => {
+      const { layer, recreated } = makeLayer({
+        configDir,
+        mountedAtStart: false,
+        instanceEnabled: false,
+      });
+      return Effect.gen(function* () {
+        const refused = yield* place({ cwd: POD_WORKTREE, driver: claude }).pipe(Effect.flip);
+        expect(refused.message).toContain("enable the instance for this project");
+        expect(recreated).toEqual([]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("does not recreate while another agent in the pod is mid-turn", () =>
+    withConfigDir((configDir) => {
+      const { layer, recreated } = makeLayer({ configDir, mountedAtStart: false });
+      return Effect.gen(function* () {
+        const refused = yield* place({ cwd: POD_WORKTREE, driver: claude, podBusy: true }).pipe(
+          Effect.flip,
+        );
+        expect(refused.message).toContain("Another agent in this pod is mid-turn");
+        expect(recreated).toEqual([]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("tells where a session must run without preparing anything", () =>
+    withConfigDir((configDir) => {
+      const { layer, recreated } = makeLayer({ configDir, mountedAtStart: false });
+      return Effect.gen(function* () {
+        const placement = yield* PodProviderPlacement;
+        expect(
+          yield* placement.podFor({ cwd: POD_WORKTREE, driver: claude, runsIn: undefined }),
+        ).toBe(podId);
+        expect(
+          yield* placement.podFor({ cwd: POD_WORKTREE, driver: cursor, runsIn: "host" }),
+        ).toBeUndefined();
+        expect(
+          (yield* placement
+            .podFor({ cwd: POD_WORKTREE, driver: cursor, runsIn: undefined })
+            .pipe(Effect.flip))._tag,
+        ).toBe("ProviderPodRefusedError");
+        expect(recreated).toEqual([]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
   it.effect("refuses when a new agent container still lacks the account", () =>
     withConfigDir((configDir) =>
       Effect.gen(function* () {
         const refused = yield* place({ cwd: POD_WORKTREE, driver: claude }).pipe(Effect.flip);
-        expect(refused.message).toContain("enable the instance for this project");
+        expect(refused.message).toContain("still not mounted in the new agent container");
       }).pipe(
         Effect.provide(
           makeLayer({ configDir, mountedAtStart: false, recreateMounts: false }).layer,
         ),
       ),
     ),
+  );
+});
+
+/** Live processes on this machine whose environment carries exactly this session mark. */
+const markedProcesses = (mark: string) =>
+  NodeFS.readdirSync("/proc").filter((entry) => {
+    if (!/^\d+$/.test(entry)) return false;
+    try {
+      return NodeFS.readFileSync(`/proc/${entry}/environ`, "utf8")
+        .split("\0")
+        .includes(`${POD_SESSION_ENV}=${mark}`);
+    } catch {
+      return false;
+    }
+  });
+
+describe.skipIf(process.platform !== "linux")("pod provider process", () => {
+  it.effect("marks each launch and stops every process carrying its mark", () =>
+    Effect.gen(function* () {
+      const launched: Array<Readonly<Record<string, string>>> = [];
+      const stops: Array<{ readonly user: string | undefined; readonly exitCode: number | null }> =
+        [];
+      // Runs the stop command here, against this machine's /proc, as the container would.
+      const targets = WorkspaceExecutionTarget.WorkspaceExecutionTarget.of({
+        resolve: () => Effect.succeed({ type: "host" }),
+        launch: (_target, spec) => {
+          launched.push(spec.env ?? {});
+          return { command: "docker", args: [], env: {} };
+        },
+        exec: (_target, spec) =>
+          Effect.callback((resume) => {
+            const child = NodeChildProcess.spawn(spec.command[0]!, spec.command.slice(1), {
+              stdio: "ignore",
+            });
+            child.once("exit", (code) => {
+              stops.push({ user: spec.user, exitCode: code });
+              resume(Effect.succeed({ exitCode: code, timedOut: false }));
+            });
+          }),
+      });
+      const process_ = yield* ProviderPodProcess.pipe(
+        Effect.provide(
+          layerProcess.pipe(
+            Layer.provide(
+              Layer.succeed(WorkspaceExecutionTarget.WorkspaceExecutionTarget, targets),
+            ),
+            Layer.provide(NodeServices.layer),
+          ),
+        ),
+      );
+      const target = {
+        type: "pod",
+        podId,
+        state: "running",
+        worktreePath: POD_WORKTREE,
+        dockerHost: "",
+      } as const;
+      const first = process_.launch(target, { command: ["claude"], env: { KEEP: "1" } });
+      process_.launch(target, { command: ["codex"] });
+      const [firstEnv, secondEnv] = launched;
+      expect(firstEnv).toMatchObject({ KEEP: "1" });
+      expect(firstEnv?.[POD_SESSION_ENV]).toBeDefined();
+      expect(firstEnv?.[POD_SESSION_ENV]).not.toBe(secondEnv?.[POD_SESSION_ENV]);
+
+      const spawnMarked = (mark: string, script: string) =>
+        NodeChildProcess.spawn("sh", ["-c", script], {
+          env: { ...process.env, [POD_SESSION_ENV]: mark },
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+      const ready = (child: NodeChildProcess.ChildProcess) =>
+        Effect.promise(() => new Promise((resolve) => child.stdout!.once("data", resolve)));
+      // The session's process ignores TERM, so only the KILL pass ends it; its
+      // child left the process group and still carries the mark.
+      const mark = firstEnv![POD_SESSION_ENV]!;
+      const session = spawnMarked(
+        mark,
+        "setsid sleep 60 & trap '' TERM; echo ready; exec sleep 60 >/dev/null",
+      );
+      const other = spawnMarked(`${mark}-other`, "echo ready; exec sleep 60 >/dev/null");
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          session.kill("SIGKILL");
+          other.kill("SIGKILL");
+        }),
+      );
+      const sessionExited = new Promise<NodeJS.Signals | null>((resolve) =>
+        session.once("exit", (_code, signal) => resolve(signal)),
+      );
+
+      yield* ready(session);
+      yield* ready(other);
+      yield* first.stop;
+      expect(yield* Effect.promise(() => sessionExited)).toBe("SIGKILL");
+      expect(markedProcesses(mark)).toEqual([]);
+      expect(other.exitCode).toBeNull();
+      expect(other.signalCode).toBeNull();
+      // Nothing carries the mark any more: the second stop says so.
+      yield* first.stop;
+      expect(stops).toEqual([
+        { user: "0", exitCode: 0 },
+        { user: "0", exitCode: 3 },
+      ]);
+    }).pipe(Effect.scoped),
   );
 });

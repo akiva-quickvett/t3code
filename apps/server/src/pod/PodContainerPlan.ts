@@ -4,7 +4,9 @@ import type { PodContainerMount, PodContainerSpec } from "./ContainerDriver.ts";
 
 export const POD_LABEL = "t3.pod";
 export const POD_ENVIRONMENT_LABEL = "t3.environment";
-const POD_ROLE_LABEL = "t3.role";
+export const POD_ROLE_LABEL = "t3.role";
+/** On the daemon container: the network the pod was made on, which settings may since name differently. */
+export const POD_NETWORK_LABEL = "t3.network";
 
 export const DIND_IMAGE = "docker:27-dind";
 /** Inside the shared network namespace only; nothing outside the pod reaches it. */
@@ -116,7 +118,7 @@ export const planPod = (input: PodPlanInput): PodPlan => {
   const dind: PodContainerSpec = {
     name: names.dind,
     image: DIND_IMAGE,
-    labels: labels("dind"),
+    labels: { ...labels("dind"), [POD_NETWORK_LABEL]: input.network },
     init: true,
     // Docker-in-Docker cannot run its daemon otherwise.
     privileged: true,

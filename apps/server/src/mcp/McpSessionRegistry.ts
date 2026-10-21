@@ -73,6 +73,13 @@ const bytesToHex = (bytes: Uint8Array): string =>
 
 const tokenFromBytes = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64url");
 
+/**
+ * Provider-session tokens are a bare base64url secret; OAuth client session
+ * tokens are `<payload>.<signature>`, so a dot tells them apart.
+ */
+export const looksLikeProviderSessionToken = (token: string) =>
+  token.length > 0 && !token.includes(".");
+
 const getHttpMcpEndpointHost = (address: NetAddress.IpAddress): string =>
   NetAddress.isUnspecified(address)
     ? "127.0.0.1"
