@@ -231,6 +231,61 @@ describe("PodHostnameRouter", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("never writes, renames or removes a file it does not own, whatever happens", () =>
+    Effect.gen(function* () {
+      const { router, proxy, driver, files, read, routesDir } = yield* setup();
+      const foreign: Record<string, string> = {
+        [ORCH_ROUTE]: ORCH_TEXT,
+        "pod-chat-akiva-ste476.caddy": "pod-chat-akiva-ste476-web.pods.internal {\n}\n",
+        "pod-old.caddy.tmp": "orch's own temp file",
+        "t3-otherenv-pod-def456.caddy": "another T3 server's route",
+        "notes.txt": "someone's notes",
+      };
+      for (const [name, text] of Object.entries(foreign))
+        NodeFs.writeFileSync(`${routesDir}/${name}`, text);
+      // Whatever the proxy would import mid-operation is only ever orch's files or a whole route.
+      const imported: Array<ReadonlyArray<string>> = [];
+      let validateExit = 0;
+      let reloadExit = 0;
+      driver.execExitCode((call) => {
+        imported.push(files().filter((name) => name.endsWith(".caddy")));
+        return call.command?.[1] === "validate" ? validateExit : reloadExit;
+      });
+      const install = (routes = ROUTES) =>
+        router.install({ dockerHost: "", proxy, stem: STEM, routes });
+
+      yield* install();
+      validateExit = 1;
+      yield* install(ROUTES.slice(0, 1));
+      validateExit = 0;
+      reloadExit = 1;
+      yield* install(ROUTES.slice(0, 1));
+      reloadExit = 0;
+      yield* router.uninstall({ dockerHost: "", proxy, stem: STEM });
+      yield* install();
+      yield* router.prune({ dockerHost: "", proxy, prefix: "t3-envtest-", keep: new Set() });
+
+      expect(files()).toEqual(Object.keys(foreign).toSorted());
+      for (const [name, text] of Object.entries(foreign)) expect(read(name)).toBe(text);
+      const allowed = new Set([...Object.keys(foreign), `${STEM}.caddy`]);
+      expect(imported.flat().every((name) => allowed.has(name))).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("puts back the route the proxy ran when reloading a changed one fails", () =>
+    Effect.gen(function* () {
+      const { router, proxy, driver, files, read } = yield* setup();
+      yield* router.install({ dockerHost: "", proxy, stem: STEM, routes: ROUTES.slice(0, 1) });
+      const previous = read(`${STEM}.caddy`);
+      driver.execExitCode((call) => (call.command?.[1] === "reload" ? 1 : 0));
+      expect(yield* router.install({ dockerHost: "", proxy, stem: STEM, routes: ROUTES })).toMatch(
+        /^reloading the proxy failed/,
+      );
+      expect(read(`${STEM}.caddy`)).toBe(previous);
+      expect(files()).toEqual([ORCH_ROUTE, `${STEM}.caddy`]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("prepares a pod with the DNS server's address, or says what is missing", () =>
     Effect.gen(function* () {
       const { router, proxy, driver } = yield* setup();

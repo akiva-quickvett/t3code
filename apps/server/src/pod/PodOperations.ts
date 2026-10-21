@@ -273,11 +273,19 @@ const bringUp = (context: PodOperationContext, fresh: boolean) =>
       context.plan.dind,
       "Creating the pod's Docker daemon",
     );
-    // Before it starts, so its stack's DNS reaches the proxy's resolver from the outset.
+    // Before it starts, so its stack's DNS reaches the proxy's resolver from the
+    // outset. Only ever joins the network: a missing one leaves the pod on ports,
+    // since its route then cannot go in and says why.
     if (context.proxyNetwork !== null)
-      yield* context.host
-        .connectNetwork(context.proxyNetwork, dindId)
-        .pipe(step("Joining the hostname proxy's network"));
+      yield* context.host.connectNetwork(context.proxyNetwork, dindId).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("the pod could not join the hostname proxy's network", {
+            podId: context.podId,
+            network: context.proxyNetwork,
+            reason: error.message,
+          }),
+        ),
+      );
     yield* startIfStopped(context, dindId, found.dind?.status, "Starting the pod's Docker daemon");
     yield* awaitDaemon(context, dindId);
     const agentId = yield* ensureContainer(

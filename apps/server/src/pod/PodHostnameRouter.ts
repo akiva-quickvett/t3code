@@ -27,6 +27,7 @@ export const podServiceHostname = (stem: string, service: string, domain: string
 export const podRouteText = (routes: ReadonlyArray<PodRoute>) =>
   routes.map((route) => `${route.hostname} {\n\treverse_proxy ${route.upstream}\n}\n`).join("\n");
 
+// The proxy imports `*.caddy`; the candidate and check names never end so.
 const ROUTE_SUFFIX = ".caddy";
 const CANDIDATE_SUFFIX = ".caddy.next";
 const CHECK_SUFFIX = ".validate";
@@ -254,7 +255,11 @@ const make = Effect.gen(function* () {
         // Leaves the directory as the proxy still runs it, for everyone's next reload.
         yield* Option.match(previous, {
           onNone: () => remove(file),
-          onSome: (content) => fileSystem.writeFileString(file, content).pipe(Effect.ignore),
+          onSome: (content) =>
+            fileSystem.writeFileString(candidate, content).pipe(
+              Effect.andThen(fileSystem.rename(candidate, file)),
+              Effect.catch(() => remove(candidate)),
+            ),
         });
         return failed;
       }),

@@ -1063,6 +1063,32 @@ describe("PodRuntimeService hostnames", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
   });
 
+  it.effect("still starts a pod whose daemon cannot join the proxy's network", () => {
+    const driver = makeFakeContainerDriver();
+    driver.failWhen((call) => call.operation === "connect");
+    const router = makeFakePodHostnameRouter();
+    router.failInstall("pods-proxy is not on the pods network");
+    return withPods(
+      driver,
+      (pods) =>
+        Effect.gen(function* () {
+          const { id } = yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          const running = yield* pods.awaitSettled(id);
+          expect(running).toMatchObject({ state: "running", lastError: null });
+          expect(running.hostnameProblem).toContain("pods-proxy is not on the pods network");
+          expect(running.services[0]?.url).toBe("http://127.0.0.1:20000");
+          // Joining is all it ever asks of that network.
+          expect(
+            driver.calls
+              .filter((call) => call.command?.includes("pods"))
+              .map((call) => call.operation),
+          ).toEqual(["connect"]);
+        }),
+      { router, projectFile: hostnameProject() },
+    );
+  });
+
   it.effect("keeps links on ports while the proxy refuses the route, and says why", () => {
     const driver = makeFakeContainerDriver();
     const router = makeFakePodHostnameRouter();
