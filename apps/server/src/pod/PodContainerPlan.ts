@@ -4,7 +4,9 @@ import type { PodContainerMount, PodContainerSpec } from "./ContainerDriver.ts";
 
 export const POD_LABEL = "t3.pod";
 export const POD_ENVIRONMENT_LABEL = "t3.environment";
-const POD_ROLE_LABEL = "t3.role";
+export const POD_ROLE_LABEL = "t3.role";
+/** On the daemon container: the network the pod was made on, which settings may since name differently. */
+export const POD_NETWORK_LABEL = "t3.network";
 
 export const DIND_IMAGE = "docker:27-dind";
 /** Inside the shared network namespace only; nothing outside the pod reaches it. */
@@ -12,6 +14,14 @@ export const POD_DOCKER_HOST = "tcp://127.0.0.1:2375";
 const DIND_DATA_DIR = "/var/lib/docker";
 const SEEDS_ROOT = "/seeds";
 const PROVIDER_BIN_ROOT = "/opt/t3/provider-bin";
+/** Docker Desktop's own name for the host, so a URL that names it means the same everywhere. */
+export const POD_HOST_ALIAS = "host.docker.internal";
+
+/**
+ * Where a host provider directory is mounted in the agent container: under a
+ * pod-private root, at its own host path, so a host binary maps to one pod path.
+ */
+export const podProviderBinPath = (hostPath: string) => `${PROVIDER_BIN_ROOT}${hostPath}`;
 
 /**
  * Credentials the host may hold for itself. A pod's agents use the login in the
@@ -108,7 +118,7 @@ export const planPod = (input: PodPlanInput): PodPlan => {
   const dind: PodContainerSpec = {
     name: names.dind,
     image: DIND_IMAGE,
-    labels: labels("dind"),
+    labels: { ...labels("dind"), [POD_NETWORK_LABEL]: input.network },
     init: true,
     // Docker-in-Docker cannot run its daemon otherwise.
     privileged: true,
@@ -121,13 +131,16 @@ export const planPod = (input: PodPlanInput): PodPlan => {
     ],
     env: { DOCKER_TLS_CERTDIR: "" },
     command: ["--host=unix:///var/run/docker.sock", `--host=${POD_DOCKER_HOST}`],
+    // The agent container shares this network namespace and its hosts file;
+    // the alias is how its agents reach T3's pod-facing MCP listener.
+    hostAlias: POD_HOST_ALIAS,
   };
 
   // Pod-private targets after the image's own directories, so a host binary
   // never shadows or hides one the image ships.
-  const providerBins = input.providerMounts.binDirs.map((dir, index) => ({
+  const providerBins = input.providerMounts.binDirs.map((dir) => ({
     dir,
-    target: `${PROVIDER_BIN_ROOT}/${index}`,
+    target: podProviderBinPath(dir),
   }));
   const binPath = ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]
     .concat(providerBins.map((bin) => bin.target))

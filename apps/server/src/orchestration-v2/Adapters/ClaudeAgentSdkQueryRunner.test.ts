@@ -5,8 +5,8 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, describe, it } from "@effect/vitest";
-import { ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import { assert, describe, expect, it } from "@effect/vitest";
+import { PodRuntimeId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -14,6 +14,8 @@ import { vi } from "vite-plus/test";
 
 import { ProviderEventLoggers } from "@t3tools/provider-core/server/ProviderEventLoggers";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import type { PodExecSpec } from "../../pod/ContainerDriver.ts";
+import { ProviderPodProcess } from "../../provider/PodProviderSessions.ts";
 import {
   CLAUDE_AGENT_SDK_QUERY_PROTOCOL,
   ClaudeAgentSdkQueryRunner,
@@ -152,5 +154,84 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI pro
       yield* session.close;
       yield* Effect.promise(() => leftoverStopped);
     }).pipe(Effect.provide(realQueryRunner)),
+  );
+});
+
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI in a pod", () => {
+  it.effect("runs through the pod's launch with only the session's own environment", () =>
+    Effect.gen(function* () {
+      // Stands in for the docker CLI the launch names.
+      const docker = fakeClaudeCli("cat > /dev/null");
+      const worktree = NodePath.dirname(docker);
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(worktree, { recursive: true, force: true })),
+      );
+      let launched: (spec: Omit<PodExecSpec, "user">) => void = () => {};
+      const launch = new Promise<Omit<PodExecSpec, "user">>((resolve) => (launched = resolve));
+      let stops = 0;
+      const podProcess: typeof ProviderPodProcess.Service = {
+        resolve: (cwd) =>
+          Effect.succeed(
+            cwd === worktree
+              ? {
+                  type: "pod",
+                  podId: PodRuntimeId.make("pod-claude1"),
+                  state: "running",
+                  worktreePath: worktree,
+                  dockerHost: "",
+                }
+              : undefined,
+          ),
+        command: (hostCommand) => Effect.succeed(`/opt/t3/provider-bin${hostCommand}`),
+        launch: (_target, spec) => {
+          launched(spec);
+          return { command: docker, args: [], env: {}, stop: Effect.sync(() => stops++) };
+        },
+      };
+      const session = yield* Effect.gen(function* () {
+        const runner = yield* ClaudeAgentSdkQueryRunner;
+        return yield* runner.open({
+          threadId: ThreadId.make("thread-pod-cli"),
+          providerSessionId: ProviderSessionId.make("session-pod-cli"),
+          options: {
+            sessionId: "native-session-pod-cli",
+            model: "claude-sonnet-4-6",
+            tools: [],
+            permissionMode: "default",
+            cwd: worktree,
+            pathToClaudeCodeExecutable: "/home/dev/.local/bin/claude",
+            env: { ANTHROPIC_API_KEY: "sk-host", PATH: "/host/bin", HOST_ONLY: "1" },
+          },
+          podEnvironment: {
+            CLAUDE_CONFIG_DIR: "/home/dev/.claude-work",
+            CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
+          },
+        });
+      }).pipe(
+        Effect.provide(
+          layerQueryRunner.pipe(
+            Layer.provide(Layer.succeed(ProviderPodProcess, podProcess)),
+            Layer.provide(
+              Layer.succeed(ProviderEventLoggers, { native: undefined, canonical: undefined }),
+            ),
+            Layer.provide(NodeServices.layer),
+          ),
+        ),
+      );
+      const spec = yield* Effect.promise(() => launch);
+      yield* session.close;
+      // Closing waits for the stop of what the CLI left in the container, once.
+      expect(stops).toBe(1);
+
+      expect(spec.command[0]).toBe("/opt/t3/provider-bin/home/dev/.local/bin/claude");
+      expect(spec.cwd).toBe(worktree);
+      expect(spec.env).toMatchObject({
+        CLAUDE_CONFIG_DIR: "/home/dev/.claude-work",
+        CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
+      });
+      for (const name of ["ANTHROPIC_API_KEY", "PATH", "HOST_ONLY", "HOME"]) {
+        expect(spec.env, name).not.toHaveProperty(name);
+      }
+    }),
   );
 });

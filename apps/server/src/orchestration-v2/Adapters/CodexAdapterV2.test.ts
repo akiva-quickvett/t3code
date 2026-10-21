@@ -14,6 +14,7 @@ import {
   MessageId,
   type ModelSelection,
   NodeId,
+  PodRuntimeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
@@ -63,6 +64,8 @@ import * as Orchestrator from "../Orchestrator.ts";
 import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import type { PodExecSpec } from "../../pod/ContainerDriver.ts";
+import { ProviderPodProcess } from "../../provider/PodProviderSessions.ts";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 import { makeReplayServerConfig, withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
@@ -799,6 +802,98 @@ describe("CodexAdapterV2 process spawning", () => {
         ["app-server", "--enable", "env-feature"],
       ]);
     }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+  );
+
+  it.effect(
+    "spawns a pod's app-server through its launch with only the instance's environment",
+    () =>
+      Effect.gen(function* () {
+        const spawned: Array<{ command: string; args: ReadonlyArray<string> }> = [];
+        const launches: Array<Omit<PodExecSpec, "user">> = [];
+        let stops = 0;
+        const spawner = ChildProcessSpawner.make((command) => {
+          if (ChildProcess.isStandardCommand(command))
+            spawned.push({ command: command.command, args: command.args });
+          return Effect.fail(
+            PlatformError.systemError({
+              _tag: "NotFound",
+              module: "ChildProcess",
+              method: "spawn",
+            }),
+          );
+        });
+        const podProcess: typeof ProviderPodProcess.Service = {
+          resolve: (cwd) =>
+            Effect.succeed(
+              cwd === "/work/trees/pod"
+                ? {
+                    type: "pod",
+                    podId: PodRuntimeId.make("pod-codex1"),
+                    state: "running",
+                    worktreePath: "/work/trees/pod",
+                    dockerHost: "",
+                  }
+                : undefined,
+            ),
+          command: (hostCommand) => Effect.succeed(`/opt/t3/provider-bin${hostCommand}`),
+          launch: (_target, spec) => {
+            launches.push(spec);
+            return {
+              command: "docker",
+              args: ["exec", "agent", ...spec.command],
+              env: {},
+              stop: Effect.sync(() => stops++),
+            };
+          },
+        };
+        const factory = yield* CodexAdapterV2.CodexAppServerClientFactory.pipe(
+          Effect.provide(
+            CodexAdapterV2.layerAppServerClientFactory.pipe(
+              Layer.provide(Layer.succeed(ProviderPodProcess, podProcess)),
+            ),
+          ),
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        );
+        yield* factory
+          .open({
+            instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            threadId: ThreadId.make("thread-pod-codex"),
+            providerSessionId: ProviderSessionId.make("provider-session-pod-codex"),
+            runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/work/trees/pod",
+            }),
+            settings: {
+              ...DEFAULT_CODEX_SETTINGS,
+              binaryPath: "/home/dev/.local/bin/codex",
+              homePath: "/home/dev/.codex-work",
+            },
+            environment: { OPENAI_API_KEY: "sk-host", PATH: "/host/bin", CUSTOM: "1" },
+            podEnvironment: { CUSTOM: "1" },
+          })
+          .pipe(Effect.scoped, Effect.exit);
+
+        assert.deepEqual(spawned, [
+          {
+            command: "docker",
+            args: ["exec", "agent", "/opt/t3/provider-bin/home/dev/.local/bin/codex", "app-server"],
+          },
+        ]);
+        const [launch] = launches;
+        assert.equal(launch?.cwd, "/work/trees/pod");
+        assert.deepEqual(launch?.env, {
+          CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "T3 Code",
+          CUSTOM: "1",
+          CODEX_HOME: "/home/dev/.codex-work",
+        });
+        // The session's scope closing stops what the launch started in the container.
+        assert.equal(stops, 1);
+      }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect("expands ~ in the configured binary path before spawning", () =>

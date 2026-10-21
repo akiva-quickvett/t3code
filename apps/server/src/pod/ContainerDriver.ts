@@ -29,6 +29,18 @@ export interface PodContainerSpec {
   readonly user?: string;
   readonly workdir?: string;
   readonly command: ReadonlyArray<string>;
+  /**
+   * A name that resolves, inside the container, to the host's address on its
+   * bridge network. Containers that join this one's network share its hosts file.
+   */
+  readonly hostAlias?: string;
+}
+
+export interface PodNetworkInfo {
+  /** IPv4 CIDR, such as `172.18.0.0/16`. */
+  readonly subnet: string;
+  /** The host's address on the network. */
+  readonly gateway: string;
 }
 
 export type PodContainerStatus =
@@ -115,6 +127,8 @@ export interface ContainerHost {
     ContainerDriverError
   >;
   readonly ensureNetwork: (name: string) => Effect.Effect<void, ContainerDriverError>;
+  /** The network's IPv4 subnet and gateway; fails when it has none. */
+  readonly inspectNetwork: (name: string) => Effect.Effect<PodNetworkInfo, ContainerDriverError>;
   readonly createVolume: (input: {
     readonly name: string;
     readonly labels: Readonly<Record<string, string>>;
@@ -198,6 +212,22 @@ const DockerInspectVolume = Schema.Struct({
   Name: Schema.String,
   Labels: Schema.NullOr(Schema.Record(Schema.String, Schema.String)),
 });
+const DockerInspectNetwork = Schema.Struct({
+  IPAM: Schema.Struct({
+    Config: Schema.NullOr(
+      Schema.Array(
+        Schema.Struct({
+          Subnet: Schema.optional(Schema.String),
+          Gateway: Schema.optional(Schema.String),
+        }),
+      ),
+    ),
+  }),
+});
+const decodeNetworks = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(DockerInspectNetwork)),
+);
+const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
 const decodeContainers = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Array(DockerInspectContainer)),
 );
@@ -376,6 +406,31 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
       );
     });
 
+  const inspectNetwork: ContainerHost["inspectNetwork"] = (name) =>
+    run("network", ["network", "inspect", name]).pipe(
+      Effect.flatMap((json) =>
+        decodeNetworks(json).pipe(Effect.mapError(decodeFailure("network"))),
+      ),
+      Effect.flatMap((networks) => {
+        const config = networks[0]?.IPAM.Config?.find(
+          (entry) =>
+            entry.Gateway !== undefined &&
+            IPV4.test(entry.Gateway) &&
+            entry.Subnet !== undefined &&
+            IPV4.test(entry.Subnet.split("/")[0] ?? ""),
+        );
+        return config?.Gateway === undefined || config.Subnet === undefined
+          ? Effect.fail(
+              new ContainerDriverError({
+                operation: "network",
+                exitCode: null,
+                daemonMessage: `The Docker network ${name} has no IPv4 gateway.`,
+              }),
+            )
+          : Effect.succeed({ subnet: config.Subnet, gateway: config.Gateway });
+      }),
+    );
+
   const labelArguments = (labels: Readonly<Record<string, string>>) =>
     Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]);
 
@@ -386,6 +441,19 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
         yield* assertMountPath(mount.target);
       }
       const env = containerEnv(spec.env);
+      const hostAlias =
+        spec.hostAlias === undefined || spec.network.mode !== "bridge"
+          ? []
+          : [
+              "--add-host",
+              `${spec.hostAlias}:${
+                (yield* inspectNetwork(spec.network.name).pipe(
+                  Effect.mapError(
+                    (error) => new ContainerDriverError({ ...error, operation: "createContainer" }),
+                  ),
+                )).gateway
+              }`,
+            ];
       const args = [
         "create",
         "--name",
@@ -396,6 +464,7 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
         "--network",
         spec.network.mode === "bridge" ? spec.network.name : `container:${spec.network.container}`,
         ...spec.mounts.flatMap((mount) => ["--mount", mountArgument(mount)]),
+        ...hostAlias,
         ...env.args,
         ...(spec.user === undefined ? [] : ["--user", spec.user]),
         ...(spec.workdir === undefined ? [] : ["--workdir", spec.workdir]),
@@ -429,6 +498,7 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
   return {
     list,
     ensureNetwork,
+    inspectNetwork,
     createVolume: ({ name, labels }) =>
       run("createVolume", ["volume", "create", ...labelArguments(labels), name]).pipe(
         Effect.asVoid,

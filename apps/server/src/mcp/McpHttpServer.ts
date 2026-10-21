@@ -152,9 +152,6 @@ export const normalizeMcpHttpResponse = (
     : response;
 };
 
-// Session tokens are `<payload>.<signature>`; registry tokens are a bare base64url secret.
-const looksLikeProviderToken = (token: string) => token.length > 0 && !token.includes(".");
-
 const makeMcpAuthMiddleware = Effect.gen(function* () {
   const registry = yield* McpSessionRegistry.McpSessionRegistry;
   const clients = yield* Effect.serviceOption(McpClientAuthenticator);
@@ -177,7 +174,8 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
       return unauthorized({
         request,
         presentedToken: token.length > 0,
-        offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
+        offerOAuth:
+          Option.isSome(clients) && !McpSessionRegistry.looksLikeProviderSessionToken(token),
       });
     }
     return yield* httpEffect.pipe(
