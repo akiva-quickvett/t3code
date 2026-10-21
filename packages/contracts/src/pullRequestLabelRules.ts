@@ -1,5 +1,7 @@
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
@@ -69,3 +71,23 @@ export const DEFAULT_PULL_REQUEST_LABEL_RULES: PullRequestLabelRules = {
   enabled: false,
   labels: DEFAULT_PULL_REQUEST_AGENT_LABELS,
 };
+
+const decodeRules = Schema.decodeUnknownOption(PullRequestLabelRules);
+
+/**
+ * The rules as settings.json stores them. A file that fails to decode is replaced by defaults
+ * wholesale, so a hand edit the rules cannot apply turns just them off; saves through the
+ * settings API still refuse it.
+ */
+export const StoredPullRequestLabelRules = Schema.Unknown.pipe(
+  Schema.decodeTo(
+    PullRequestLabelRules,
+    SchemaTransformation.transform<typeof PullRequestLabelRules.Encoded, unknown>({
+      decode: (raw) =>
+        Option.isSome(decodeRules(raw))
+          ? (raw as typeof PullRequestLabelRules.Encoded)
+          : DEFAULT_PULL_REQUEST_LABEL_RULES,
+      encode: (rules) => rules,
+    }),
+  ),
+);

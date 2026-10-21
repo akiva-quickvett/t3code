@@ -49,6 +49,13 @@ export const LatestReviewsPullRequestReviewConnection = Schema.Struct({
 })
 export interface LatestReviewsPullRequestReviewConnection extends Schema.Struct.Type<typeof LatestReviewsPullRequestReviewConnection.fields> {}
 
+/** Information about pagination in a connection. */
+export const PageInfo = Schema.Struct({
+  /** When paginating forwards, are there more items? */
+  hasNextPage: Schema.Boolean
+})
+export interface PageInfo extends Schema.Struct.Type<typeof PageInfo.fields> {}
+
 /** A label for categorizing Issues, Pull Requests, Milestones, or Discussions with a given Repository. */
 export const Label = Schema.Struct({
   /** Identifies the label name. */
@@ -60,6 +67,8 @@ export interface Label extends Schema.Struct.Type<typeof Label.fields> {}
 
 /** The connection type for Label. */
 export const LabelConnection = Schema.Struct({
+  /** Information to aid in pagination. */
+  pageInfo: PageInfo,
   /** A list of nodes. */
   nodes: Schema.NullOr(Schema.Array(Schema.NullOr(Label)))
 })
@@ -178,7 +187,7 @@ export const PullRequestSummary = GraphQL.query("PullRequestSummary", {
       { name: "stacks", body: "Boolean!" }
     ],
     selections: [
-      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){pullRequest(number:$", "number", "){number title url state isDraft mergeable reviewDecision additions deletions changedFiles updatedAt mergedAt closedAt headRefName baseRefName author{__typename login avatarUrl...on User{name}}latestReviews(first:20){nodes{state author{__typename login}}}labels(first:100){nodes{name color}}commits(last:1){nodes{commit{statusCheckRollup{state}}}}stack@include(if:$", "stacks", "){number size baseRefName}stackEntry@include(if:$", "stacks", "){position}}}"] }
+      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){pullRequest(number:$", "number", "){number title url state isDraft mergeable reviewDecision additions deletions changedFiles updatedAt mergedAt closedAt headRefName baseRefName author{__typename login avatarUrl...on User{name}}latestReviews(first:20){nodes{state author{__typename login}}}labels(first:100){pageInfo{hasNextPage}nodes{name color}}commits(last:1){nodes{commit{statusCheckRollup{state}}}}stack@include(if:$", "stacks", "){number size baseRefName}stackEntry@include(if:$", "stacks", "){position}}}"] }
     ],
     fragments: []
   },

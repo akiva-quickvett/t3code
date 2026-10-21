@@ -28,12 +28,16 @@ const idleWork = { latestRunRequestedAtMs: AFTER, latestRunCompletedAtMs: AFTER 
 const runningWork = { running: true, latestRunRequestedAtMs: AFTER };
 
 describe("deriveAgentState", () => {
+  const DONE_AT = AFTER + 60_000;
+  const reviewer = (overrides: Partial<WorkTreeNode>) =>
+    node("review", { rolePresetId: "review-t3", ...overrides });
   const cases: ReadonlyArray<{
     readonly name: string;
     readonly tree: ReadonlyArray<WorkTreeNode>;
-    readonly doneBefore?: boolean;
+    readonly doneAtMs?: number;
     readonly nowMs?: number;
     readonly expected: PullRequestAgentState | null;
+    readonly firstDone?: boolean;
   }> = [
     { name: "linked, nothing run since", tree: [slice()], expected: "investigating" },
     {
@@ -42,22 +46,30 @@ describe("deriveAgentState", () => {
       expected: "investigating",
     },
     {
+      name: "built and opened in one turn that has ended",
+      tree: [slice({ latestRunRequestedAtMs: BEFORE, latestRunCompletedAtMs: AFTER })],
+      expected: "done",
+      firstDone: false,
+    },
+    {
+      name: "the linking turn ended a moment ago",
+      tree: [slice({ latestRunRequestedAtMs: BEFORE, latestRunCompletedAtMs: AFTER })],
+      nowMs: AFTER + AGENT_DONE_SETTLE_MS - 1,
+      expected: null,
+    },
+    {
       name: "a child started after the link",
       tree: [slice(), node("impl", runningWork)],
       expected: "building",
     },
     {
       name: "a reviewer is running",
-      tree: [slice(), node("review", { ...runningWork, rolePresetId: "review-t3" })],
+      tree: [slice(), reviewer(runningWork)],
       expected: "reviewing",
     },
     {
-      name: "a reviewer and an implementor are running",
-      tree: [
-        slice(runningWork),
-        node("impl", runningWork),
-        node("review", { ...runningWork, rolePresetId: "review-t3-grok" }),
-      ],
+      name: "fixes between review rounds stay reviewing",
+      tree: [slice(), node("impl", runningWork), reviewer(idleWork)],
       expected: "reviewing",
     },
     {
@@ -70,24 +82,41 @@ describe("deriveAgentState", () => {
       name: "the tree has been quiet since its work",
       tree: [slice(idleWork), node("impl", idleWork)],
       expected: "done",
+      firstDone: true,
+    },
+    {
+      name: "a run that ended without a completion time counts from its request",
+      tree: [slice({ latestRunRequestedAtMs: AFTER })],
+      expected: "done",
+      firstDone: true,
     },
     {
       name: "work after the first done",
-      tree: [slice(idleWork), node("impl", runningWork)],
-      doneBefore: true,
+      tree: [slice(idleWork), node("impl", { running: true, latestRunRequestedAtMs: DONE_AT + 1 })],
+      doneAtMs: DONE_AT,
+      expected: "revising",
+    },
+    {
+      name: "a review from before the first done does not make revising a review",
+      tree: [
+        reviewer(idleWork),
+        node("impl", { running: true, latestRunRequestedAtMs: DONE_AT + 1 }),
+      ],
+      doneAtMs: DONE_AT,
       expected: "revising",
     },
     {
       name: "review after the first done",
-      tree: [slice(), node("review", { ...runningWork, rolePresetId: "review-t1" })],
-      doneBefore: true,
+      tree: [slice(), reviewer({ running: true, latestRunRequestedAtMs: DONE_AT + 1 })],
+      doneAtMs: DONE_AT,
       expected: "reviewing",
     },
     {
       name: "quiet again after revising",
-      tree: [slice(idleWork)],
-      doneBefore: true,
+      tree: [slice({ latestRunRequestedAtMs: DONE_AT + 1, latestRunCompletedAtMs: DONE_AT + 2 })],
+      doneAtMs: DONE_AT,
       expected: "done",
+      firstDone: false,
     },
     {
       name: "a role that only starts with review is not a reviewer",
@@ -98,14 +127,14 @@ describe("deriveAgentState", () => {
 
   for (const testCase of cases) {
     it(testCase.name, () => {
-      expect(
-        deriveAgentState({
-          tree: testCase.tree,
-          linkedAtMs: LINKED,
-          doneBefore: testCase.doneBefore ?? false,
-          nowMs: testCase.nowMs ?? NOW,
-        }),
-      ).toBe(testCase.expected);
+      const result = deriveAgentState({
+        tree: testCase.tree,
+        linkedAtMs: LINKED,
+        doneAtMs: testCase.doneAtMs ?? null,
+        nowMs: testCase.nowMs ?? NOW,
+      });
+      expect(result?.state ?? null).toBe(testCase.expected);
+      if (testCase.firstDone !== undefined) expect(result?.firstDone).toBe(testCase.firstDone);
     });
   }
 });

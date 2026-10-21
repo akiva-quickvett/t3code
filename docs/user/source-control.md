@@ -299,17 +299,23 @@ out from the matching organization and repository.
 
 Turn on **Agent labels on pull requests** in Settings → Source Control, for every project or one
 project, to keep one label on each open pull request a thread links, showing where its work is:
-**Agent Investigating** once it is linked and no work has started since, **Agent Building** while the
-thread or a thread it started works, **Agent Reviewing** while a reviewer thread works, and **Agent
-Done** once they have all gone quiet. Work after the first done shows **Agent Revising**, then
-Reviewing and Done again; it never goes back to Building. Reviewer threads are those started with a
-reviewer role (see [Agent roles](agent-roles.md)).
 
-You can rename each label. Only these five labels are added or removed: other labels, including
+- **Agent Investigating** once it is linked, while no work has started since.
+- **Agent Building** while the thread or a thread it started works.
+- **Agent Reviewing** from the moment a reviewer thread works, including the fixes between review
+  rounds. Reviewer threads are those started with a reviewer role (see [Agent roles](agent-roles.md)).
+- **Agent Done** once they have all gone quiet. A pull request built and opened in a single turn
+  reaches Done when that turn ends.
+- **Agent Revising** for work after the first done, then Reviewing and Done again; it never goes
+  back to Building.
+
+The labels follow the thread that links the pull request and the threads it started, not that
+thread's own parent or siblings, so link the pull request from the thread that owns the work. You
+can rename each label. Only these five labels are added or removed: other labels, including
 **Ready For Human Review**, stay as they are, and merged or closed pull requests keep the label they
-ended with. Labels follow the linked pull request refresh, so a change can take a minute to show, and
-a rate limit only delays them. Labels need triage access to the repository and are available on
-GitHub.
+ended with. Labels follow the linked pull request refresh, so a change can take a minute or two to
+show, and a rate limit only delays them. Labels need triage access to the repository and are
+available on GitHub.
 
 ## GitHub stacks
 

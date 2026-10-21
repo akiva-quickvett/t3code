@@ -41,6 +41,7 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Statement from "effect/sql/Statement";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
@@ -6390,6 +6391,7 @@ it.layer(Layer.fresh(layerSharedApplicationDataPlaneTest))("PR label rule facts"
   it.effect("keeps the first agent done on a link and reads the supervised tree with roles", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sql = yield* SqlClient.SqlClient;
       const projectId = ProjectId.make("label-rules-project");
       const create = (id: string, extra: object = {}) =>
         orchestrator.dispatch({
@@ -6457,9 +6459,29 @@ it.layer(Layer.fresh(layerSharedApplicationDataPlaneTest))("PR label rule facts"
       assert.equal(link?.agentDoneAt, "2026-10-13T12:00:00.000Z");
       assert.equal(link?.snapshot?.title, "Open PR");
 
+      const treeReads: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+      const recordTreeRead: Statement.Transformer = (statement) => {
+        const compiled = statement.compile();
+        if (compiled[0].includes("WITH RECURSIVE tree")) treeReads.push(compiled);
+        return Effect.succeed(statement);
+      };
       const nodes = yield* ProjectionStore.ProjectionStoreV2.use((projections) =>
         projections.getWorkTreeNodes([sliceId]),
-      ).pipe(Effect.provide(ProjectionStore.layer));
+      ).pipe(
+        Effect.provide(ProjectionStore.layer),
+        Effect.provideService(Statement.CurrentTransformer, recordTreeRead),
+      );
+      // Each step of the walk down must look children up in the tree-parent index.
+      const [treeQuery, treeParams] = treeReads[0]!;
+      const plan = yield* sql.unsafe<{ detail: string }>(
+        `EXPLAIN QUERY PLAN ${treeQuery}`,
+        treeParams,
+      );
+      assert.isTrue(
+        plan.some((row) =>
+          row.detail.includes("orchestration_v2_projection_threads_tree_parent_idx"),
+        ),
+      );
       assert.deepEqual(
         nodes
           .map((node) => [node.threadId, node.parentThreadId, node.rolePresetId, node.running])

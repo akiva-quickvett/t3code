@@ -56,27 +56,58 @@ export function workTreeOf(
 export interface AgentStateInput {
   readonly tree: ReadonlyArray<WorkTreeNode>;
   readonly linkedAtMs: number;
-  /** The tree was seen done for this pull request before. */
-  readonly doneBefore: boolean;
+  /** When the tree was first seen done for this pull request; null until then. */
+  readonly doneAtMs: number | null;
   readonly nowMs: number;
 }
 
+export interface AgentStateResult {
+  readonly state: PullRequestAgentState;
+  /** Done after work since the link: the fact that turns all later work into Revising. */
+  readonly firstDone: boolean;
+}
+
+const requestedSince = (node: WorkTreeNode, sinceMs: number) =>
+  node.latestRunRequestedAtMs !== null && node.latestRunRequestedAtMs >= sinceMs;
+
 /**
- * Work is a run requested after the pull request was linked: the turn that opened and linked it
- * is still investigating. Null while the tree is quiet but may only be between turns; the caller
- * leaves the labels as they are.
+ * Work is a run requested after the pull request was linked; the turn that opened and linked it
+ * is still investigating while it runs. Null while the tree is quiet but may only be between
+ * turns; the caller leaves the labels as they are.
  */
-export function deriveAgentState(input: AgentStateInput): PullRequestAgentState | null {
-  const work = input.tree.filter(
+export function deriveAgentState(input: AgentStateInput): AgentStateResult | null {
+  const doneBefore = input.doneAtMs !== null;
+  const work = input.tree.filter((node) => requestedSince(node, input.linkedAtMs));
+  if (work.some((node) => node.running)) {
+    // Fixes between review rounds stay Reviewing: once a reviewer has worked in this phase, the
+    // label stays there until the tree is done, rather than flipping every round.
+    const phaseStartMs = input.doneAtMs ?? input.linkedAtMs;
+    const reviewed = input.tree.some(
+      (node) => isReviewerRole(node.rolePresetId) && requestedSince(node, phaseStartMs),
+    );
+    const state = reviewed ? "reviewing" : doneBefore ? "revising" : "building";
+    return { state, firstDone: false };
+  }
+  // Only a run from before the link is going: the turn that is opening the pull request.
+  if (input.tree.some((node) => node.running)) {
+    return doneBefore ? null : { state: "investigating", firstDone: false };
+  }
+  // The turn that linked it counts once it ends, so a pull request built and opened in one turn
+  // reaches Done; it does not record the first done, since no work followed the link.
+  const finished = input.tree.filter(
     (node) =>
-      node.latestRunRequestedAtMs !== null && node.latestRunRequestedAtMs >= input.linkedAtMs,
+      requestedSince(node, input.linkedAtMs) ||
+      (node.latestRunCompletedAtMs !== null && node.latestRunCompletedAtMs >= input.linkedAtMs),
   );
-  const working = work.filter((node) => node.running);
-  if (working.some((node) => isReviewerRole(node.rolePresetId))) return "reviewing";
-  if (working.length > 0) return input.doneBefore ? "revising" : "building";
-  if (work.length === 0) return input.doneBefore ? "done" : "investigating";
-  // A run that started before the link may still be going; the tree is not done while it is.
-  if (input.tree.some((node) => node.running)) return null;
-  const quietSinceMs = Math.max(...work.map((node) => node.latestRunCompletedAtMs ?? input.nowMs));
-  return input.nowMs - quietSinceMs >= AGENT_DONE_SETTLE_MS ? "done" : null;
+  if (finished.length === 0) {
+    return { state: doneBefore ? "done" : "investigating", firstDone: false };
+  }
+  // A run that ended without a completion time counts from its request.
+  const quietSinceMs = Math.max(
+    ...finished.map((node) =>
+      Math.max(node.latestRunCompletedAtMs ?? 0, node.latestRunRequestedAtMs ?? 0),
+    ),
+  );
+  if (input.nowMs - quietSinceMs < AGENT_DONE_SETTLE_MS) return null;
+  return { state: "done", firstDone: !doneBefore && work.length > 0 };
 }

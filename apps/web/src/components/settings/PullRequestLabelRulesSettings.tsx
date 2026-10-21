@@ -31,8 +31,8 @@ const STATE_LABELS = {
 const STATE_DESCRIPTIONS = {
   investigating: "The pull request is linked and no work has started since.",
   building: "The thread or a thread it started is working.",
-  reviewing: "A reviewer thread is working.",
-  done: "Every thread has gone quiet after work.",
+  reviewing: "A reviewer thread has started working, through the fixes between rounds.",
+  done: "Every thread has gone quiet, including after a single turn that opened the pull request.",
   revising: "Work started after the first done. Review and done follow; building does not return.",
 } satisfies Record<PullRequestAgentState, string>;
 

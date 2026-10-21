@@ -63,32 +63,35 @@ export function agentLabelChange(
   };
 }
 
+type LinkEntry = PullRequestLabelObservation["entries"][number];
+
+const earliest = (values: ReadonlyArray<string | undefined>) => {
+  const times = values.flatMap((value) => (value === undefined ? [] : [Date.parse(value)]));
+  return times.length === 0 ? null : Math.min(...times);
+};
+
 /**
- * The link whose tree decides the labels, so threads sharing a pull request never take turns
- * setting it: the topmost of the threads that link it, then the earliest link.
+ * Every thread that links a pull request decides it together, so a link added later (a
+ * supervisor linking the same pull request) cannot move the state back: the tree is all their
+ * trees, the phase starts at the earliest link, and one done on any of them counts.
  */
-function owningEntry(
-  entries: PullRequestLabelObservation["entries"],
+export function pullRequestWork(
+  entries: ReadonlyArray<LinkEntry>,
   nodes: ReadonlyArray<WorkTreeNode>,
-): PullRequestLabelObservation["entries"][number] {
-  const parentOf = new Map(nodes.map((node) => [node.threadId, node.parentThreadId]));
-  const linked = new Set(entries.map((entry) => entry.thread.id));
-  const underAnother = (threadId: (typeof entries)[number]["thread"]["id"]) => {
-    const seen = new Set([threadId]);
-    let parent = parentOf.get(threadId) ?? null;
-    while (parent !== null && !seen.has(parent)) {
-      if (linked.has(parent)) return true;
-      seen.add(parent);
-      parent = parentOf.get(parent) ?? null;
-    }
-    return false;
+): {
+  readonly tree: ReadonlyArray<WorkTreeNode>;
+  readonly linkedAtMs: number;
+  readonly doneAtMs: number | null;
+} {
+  const tree = new Map<WorkTreeNode["threadId"], WorkTreeNode>();
+  for (const entry of entries) {
+    for (const node of workTreeOf(entry.thread.id, nodes)) tree.set(node.threadId, node);
+  }
+  return {
+    tree: [...tree.values()],
+    linkedAtMs: earliest(entries.map((entry) => entry.link.linkedAt))!,
+    doneAtMs: earliest(entries.map((entry) => entry.link.agentDoneAt)),
   };
-  const tops = entries.filter((entry) => !underAnother(entry.thread.id));
-  return (tops.length > 0 ? tops : entries).toSorted(
-    (left, right) =>
-      left.link.linkedAt.localeCompare(right.link.linkedAt) ||
-      left.thread.id.localeCompare(right.thread.id),
-  )[0]!;
 }
 
 export class PullRequestLabelReactor extends Context.Service<
@@ -115,7 +118,7 @@ export const make = Effect.gen(function* () {
   const failedUntil = new Map<string, number>();
 
   const recordDone = Effect.fn("PullRequestLabelReactor.recordDone")(function* (
-    entry: PullRequestLabelObservation["entries"][number],
+    entry: LinkEntry,
     nowIso: string,
   ) {
     const uuid = yield* crypto.randomUUIDv4();
@@ -137,19 +140,20 @@ export const make = Effect.gen(function* () {
     nowMs: number,
   ) {
     const { summary } = observation;
-    const owner = owningEntry(observation.entries, nodes);
-    const key = threadPullRequestKeyOf(owner.link);
+    const work = pullRequestWork(observation.entries, nodes);
+    const key = threadPullRequestKeyOf(observation.entries[0]!.link);
     if ((failedUntil.get(key) ?? 0) > nowMs) return;
-    const state = deriveAgentState({
-      tree: workTreeOf(owner.thread.id, nodes),
-      linkedAtMs: Date.parse(owner.link.linkedAt),
-      doneBefore: owner.link.agentDoneAt !== undefined,
-      nowMs,
-    });
-    if (state === null) return;
-    // Recorded before the labels change, so a failed write cannot lose the first done.
-    if (state === "done" && owner.link.agentDoneAt === undefined) {
-      yield* recordDone(owner, DateTime.formatIso(DateTime.makeUnsafe(nowMs)));
+    const result = deriveAgentState({ ...work, nowMs });
+    if (result === null) return;
+    const { state } = result;
+    // Every link carries the done, so unlinking the one that saw it first keeps Revising. It is
+    // recorded before the labels change, so a failed write cannot lose it.
+    const doneAtMs = result.firstDone ? nowMs : work.doneAtMs;
+    if (doneAtMs !== null) {
+      const doneAt = DateTime.formatIso(DateTime.makeUnsafe(doneAtMs));
+      for (const entry of observation.entries) {
+        if (entry.link.agentDoneAt === undefined) yield* recordDone(entry, doneAt);
+      }
     }
     const change = agentLabelChange(
       labels,

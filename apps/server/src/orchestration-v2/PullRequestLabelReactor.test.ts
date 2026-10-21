@@ -246,6 +246,78 @@ describe("PullRequestLabelReactor", () => {
   );
 });
 
+describe("PullRequestLabelReactor shared links", () => {
+  const PARENT = ThreadId.make("parent");
+  const entry = (threadId: ThreadId, threadLink: ThreadPullRequestLink) => ({
+    thread: {
+      id: threadId,
+      projectId: PROJECT_ID,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+      settledOverride: null,
+      settledAt: null,
+      pullRequests: [threadLink],
+    },
+    link: threadLink,
+  });
+  const childDone = entry(SLICE, link({ agentDoneAt: LINKED_AT }));
+  const parentLater = entry(PARENT, link({ linkedAt: "2026-10-01T00:30:00.000Z" }));
+  const tree = (sliceOverrides: Partial<WorkTreeNode>) => [
+    sliceNode({ threadId: PARENT }),
+    sliceNode({ parentThreadId: PARENT, ...sliceOverrides }),
+  ];
+
+  it.effect("keeps done and revising when a parent links the pull request later", () =>
+    Effect.gen(function* () {
+      const quiet = yield* makeHarness({
+        nodes: tree({
+          latestRunRequestedAtMs: LINKED_MS + 1,
+          latestRunCompletedAtMs: LINKED_MS + 2,
+        }),
+      });
+      yield* applyWith(quiet, [
+        { summary: summary(["Agent Done"]), entries: [parentLater, childDone] },
+      ]);
+      assert.deepEqual(yield* Ref.get(quiet.writes), []);
+      // The new link takes the done too, so unlinking the first one keeps it.
+      assert.deepEqual(yield* Ref.get(quiet.commands), ["thread.pull-request-link.agent-done"]);
+
+      const working = yield* makeHarness({
+        nodes: tree({ running: true, latestRunRequestedAtMs: NOW_MS - 1 }),
+      });
+      yield* applyWith(working, [
+        { summary: summary(["Agent Done"]), entries: [parentLater, childDone] },
+      ]);
+      assert.deepEqual(
+        (yield* Ref.get(working.writes)).map((write) => [write.labels, write.applied]),
+        [
+          [["Agent Revising"], true],
+          [["Agent Done"], false],
+        ],
+      );
+    }),
+  );
+
+  it.effect("follows the linking thread's own subtree, not its siblings", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        nodes: [
+          sliceNode({ threadId: PARENT }),
+          sliceNode({ parentThreadId: PARENT, latestRunRequestedAtMs: LINKED_MS + 1 }),
+          sliceNode({
+            threadId: ThreadId.make("sibling-reviewer"),
+            parentThreadId: PARENT,
+            rolePresetId: "review-t1",
+            running: true,
+            latestRunRequestedAtMs: LINKED_MS + 1,
+          }),
+        ],
+      });
+      yield* applyWith(harness, [observation(summary(["Agent Done"]))]);
+      assert.deepEqual(yield* Ref.get(harness.writes), []);
+    }),
+  );
+});
+
 describe("agentLabelChange", () => {
   it("matches names without regard to case and never lists a foreign label", () => {
     assert.deepEqual(

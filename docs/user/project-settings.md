@@ -84,8 +84,10 @@ the action's error output. A run that takes longer than 30 minutes is stopped.
 
 Pausing, **Run now** and every schedule work as for agent tasks. On webhook, the request
 only starts the action: nothing from it reaches the command. If the action is later removed
-from the project, the next run fails and says so. Agents can schedule an action too, but only
-from a thread with full access. Mobile lists these tasks; edit them on desktop or web.
+from the project, the next run fails and says so; you can still pause, rename or delete the task.
+Agents can schedule an action too, but only from a thread with full access. Mobile lists these
+tasks and keeps the action when you save one there, but its prompt and model fields do nothing for
+a project action; choose the action on desktop or web.
 
 ## Webhook automations
 

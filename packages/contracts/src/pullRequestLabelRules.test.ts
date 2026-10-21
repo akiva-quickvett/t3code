@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
+import { ProjectId } from "./baseSchemas.ts";
 import {
   DEFAULT_PULL_REQUEST_LABEL_RULES,
   PullRequestLabelRules,
@@ -20,6 +21,25 @@ describe("PullRequestLabelRules", () => {
       investigating: "Agent Investigating",
       done: "Shipped",
     });
+  });
+
+  it("turns off a hand-edited file's rules it cannot apply, keeping the rest of the file", () => {
+    const settings = Schema.decodeUnknownSync(ServerSettings)({
+      removeAgentCreditsOnMerge: true,
+      pullRequestLabelRules: { enabled: true, labels: { building: "Agent Done" } },
+      projectSettingsOverrides: {
+        p1: {
+          defaultAutoPull: true,
+          pullRequestLabelRules: { enabled: true, labels: { done: "x".repeat(51) } },
+        },
+      },
+    });
+    expect(settings.removeAgentCreditsOnMerge).toBe(true);
+    expect(settings.pullRequestLabelRules).toEqual(DEFAULT_PULL_REQUEST_LABEL_RULES);
+    expect(settings.projectSettingsOverrides[ProjectId.make("p1")]?.defaultAutoPull).toBe(true);
+    expect(
+      settings.projectSettingsOverrides[ProjectId.make("p1")]?.pullRequestLabelRules,
+    ).toBeUndefined();
   });
 
   it("refuses names it could not own alone", () => {

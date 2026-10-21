@@ -49,6 +49,7 @@ import { PullRequestMergeMethod } from "./pullRequest.ts";
 import {
   DEFAULT_PULL_REQUEST_LABEL_RULES,
   PullRequestLabelRules,
+  StoredPullRequestLabelRules,
 } from "./pullRequestLabelRules.ts";
 import { HeadroomPercent, UsageHeadroomSetting } from "./providerUsageLimits.ts";
 
@@ -986,7 +987,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   branchNamePrefix: Schema.optionalKey(TrimmedString),
   branchNameInstructions: Schema.optionalKey(TrimmedString),
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
-  pullRequestLabelRules: Schema.optionalKey(PullRequestLabelRules),
+  pullRequestLabelRules: ForwardCompatibleOptional(PullRequestLabelRules),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
@@ -1258,7 +1259,7 @@ export const ServerSettings = Schema.Struct({
   pullRequestMergeMethod: Schema.NullOr(PullRequestMergeMethod).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
-  pullRequestLabelRules: PullRequestLabelRules.pipe(
+  pullRequestLabelRules: StoredPullRequestLabelRules.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PULL_REQUEST_LABEL_RULES)),
   ),
 

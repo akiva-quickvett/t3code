@@ -225,6 +225,38 @@ it.effect("keeps a script action across a save that does not name one", () =>
   ),
 );
 
+it.effect("stores a script task as full-access whatever mode the save carried", () =>
+  withRealRunner(({ service, setScripts }) =>
+    Effect.gen(function* () {
+      setScripts([script("true")]);
+      const agentTask = yield* service.upsert(
+        yield* scriptTaskInput({ runtimeMode: "auto-accept-edits", action: { type: "agentTurn" } }),
+      );
+      assert.equal(agentTask.task.runtimeMode, "auto-accept-edits");
+      const switched = yield* service.upsert(
+        yield* scriptTaskInput({ runtimeMode: "auto-accept-edits" }),
+      );
+      assert.equal(switched.task.runtimeMode, "full-access");
+    }),
+  ),
+);
+
+it.effect("lets a task whose script was removed be paused and renamed, not turned back on", () =>
+  withRealRunner(({ service, setScripts }) =>
+    Effect.gen(function* () {
+      setScripts([script("true")]);
+      yield* service.upsert(yield* scriptTaskInput());
+      setScripts([]);
+      const paused = yield* service.upsert(
+        yield* scriptTaskInput({ enabled: false, title: "Board sync (paused)" }),
+      );
+      assert.isFalse(paused.task.enabled);
+      const resumed = yield* Effect.flip(service.upsert(yield* scriptTaskInput()));
+      assert.include(resumed.message, `Project script "board-sync" is not configured`);
+    }),
+  ),
+);
+
 it.effect("refuses a script task bound to a thread or a workspace other than the root", () =>
   withRealRunner(({ service, setScripts }) =>
     Effect.gen(function* () {

@@ -1009,7 +1009,8 @@ export interface GitHubPullRequestSummary {
   readonly reviewDecision: PullRequestReviewDecision | null;
   readonly checksState: PullRequestChecksState | null;
   readonly mergeability: PullRequestMergeability;
-  readonly labels: ReadonlyArray<PullRequestLabel>;
+  /** Absent when the pull request has more labels than one read returns. */
+  readonly labels?: ReadonlyArray<PullRequestLabel>;
   /** Null when GitHub says the pull request is in no stack; absent when the read did not ask. */
   readonly stack?: PullRequestStackMembership | null;
 }
@@ -1035,7 +1036,8 @@ export function toPullRequestSummary(pr: SummarizedPullRequest): GitHubPullReque
     // One enum for the head commit, dressed as a single check like the search row's.
     checksState: rollupChecksState(rollupStates(pr.commits)),
     mergeability: toMergeability(pr.mergeable),
-    labels: toLabels(nodesOf(pr.labels)),
+    // A partial list would read as labels missing, which label rules would add again.
+    ...(pr.labels?.pageInfo.hasNextPage === true ? {} : { labels: toLabels(nodesOf(pr.labels)) }),
     ...(pr.stack === undefined ? {} : { stack: toStackMembership(pr) ?? null }),
   };
 }

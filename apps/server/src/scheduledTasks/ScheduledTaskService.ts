@@ -990,6 +990,7 @@ export const layer = Layer.effect(
       id: ScheduledTaskId,
       input: ScheduledTaskUpsertInput,
       scriptId: string,
+      checkScript: boolean,
     ) {
       if (input.threadId != null) {
         return yield* taskError("A script task runs on its own and cannot be bound to a thread.", {
@@ -1002,6 +1003,7 @@ export const layer = Layer.effect(
           { taskId: id },
         );
       }
+      if (!checkScript) return;
       const script = yield* scriptRunner.findScript({ projectId: input.projectId, scriptId });
       if (script === null) {
         return yield* taskError(
@@ -1040,7 +1042,14 @@ export const layer = Layer.effect(
         const requestedAction = input.action ?? existingTask?.action;
         const action = requestedAction?.type === "script" ? requestedAction : undefined;
         if (action !== undefined) {
-          yield* validateScriptAction(id, input, action.scriptId);
+          // A task whose script was removed can still be paused, renamed or deleted; its runs
+          // already fail saying why. Choosing the script, or turning the task on, checks it.
+          const stored = existingTask?.action;
+          const checkScript =
+            stored?.type !== "script" ||
+            stored.scriptId !== action.scriptId ||
+            (!existingTask!.enabled && input.enabled);
+          yield* validateScriptAction(id, input, action.scriptId, checkScript);
         }
         // Keep the existing next_run_at when the schedule itself is untouched:
         // editing a title or prompt must not postpone (or resurrect) a due
@@ -1111,7 +1120,9 @@ export const layer = Layer.effect(
           threadId: input.threadId ?? null,
           workspaceStrategy: input.workspaceStrategy,
           modelSelection: input.modelSelection,
-          runtimeMode: input.runtimeMode,
+          // A script runs unsupervised, so its task is full-access whoever saved it: callers
+          // with less are not shown its webhook URL or allowed to edit it.
+          runtimeMode: action === undefined ? input.runtimeMode : "full-access",
           interactionMode: input.interactionMode,
           createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
           creationSource: input.creationSource ?? "web",
