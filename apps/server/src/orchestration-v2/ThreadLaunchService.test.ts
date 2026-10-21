@@ -11,6 +11,10 @@ import { assert, it, vi } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+  PodRuntimeError,
+  PodRuntimeId,
+  type PodRuntimeSnapshot,
+  type PodRuntimeState,
   ChatAttachmentId,
   ComposerContextId,
   type ChatAttachment,
@@ -135,6 +139,7 @@ interface HarnessOptions {
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly git?: Partial<GitWorkflow.GitWorkflowService["Service"]>;
   readonly workspaceRoot?: string;
+  readonly pods?: Partial<PodRuntimeService.PodRuntimeService["Service"]>;
 }
 
 function makeHarness(options: HarnessOptions = {}) {
@@ -181,7 +186,7 @@ function makeHarness(options: HarnessOptions = {}) {
     WorktreeSetupTracker.layer,
     Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
     Layer.mock(TerminalManager.TerminalManager)({ close: closeTerminal }),
-    Layer.mock(PodRuntimeService.PodRuntimeService)({}),
+    Layer.mock(PodRuntimeService.PodRuntimeService)(options.pods ?? {}),
     Layer.succeed(ProjectService.ProjectService, {
       create: () => Effect.die("unused"),
       bootstrap: () => Effect.die("unused"),
@@ -1681,6 +1686,84 @@ it.effect("retries a failed workspace preparation on the same run", () => {
       .retryPreparation({ ...retry, commandId: CommandId.make("command:launch:retry:2") })
       .pipe(Effect.flip);
     assert.equal(rejected._tag, "OrchestratorDispatchError");
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("shows a pod's failure in the run, and Retry starts the pod again before setup", () => {
+  const podId = PodRuntimeId.make("pod-launch1");
+  const podSnapshot = (state: PodRuntimeState): PodRuntimeSnapshot => ({
+    id: podId,
+    projectId: project.id,
+    worktreePath: "/repo-worktrees/feature",
+    state,
+    services: [],
+    image: "image",
+    startedAt: null,
+    lastError: null,
+    containerIds: [],
+    volumeIds: [],
+    updatedAt: "2026-10-21T00:00:00.000Z",
+  });
+  let startFailures = 1;
+  const ensured = vi.fn();
+  const harness = makeHarness({
+    pods: {
+      create: () => Effect.succeed(podSnapshot("creating")),
+      ensureRunning: () =>
+        Effect.suspend(() => {
+          ensured();
+          return startFailures-- > 0
+            ? Effect.fail(
+                new PodRuntimeError({
+                  reason: "invalid-state",
+                  podId,
+                  state: "start_failed",
+                  lastError: {
+                    operation: "create",
+                    message: "Creating the agent container failed: image not found",
+                    at: "2026-10-21T00:00:00.000Z",
+                  },
+                }),
+              )
+            : Effect.succeed(podSnapshot("running"));
+        }),
+    },
+  });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:launch:pod",
+        thread: "thread:launch:pod",
+        message: "Run in a pod",
+        workspace: { type: "worktree", baseRef: "main", runtime: "container" },
+      }),
+    );
+    yield* waitUntil(() =>
+      threads
+        .getThreadProjection(launched.threadId)
+        .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
+    );
+    const failed = yield* threads.getThreadProjection(launched.threadId);
+    const error = failed.turnItems.find((item) => item.type === "error");
+    assert.equal(error?.failure.code, ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE);
+    assert.include(error?.failure.message ?? "", "image not found");
+    // Setup waits for the pod; it never ran on the host.
+    assert.equal(harness.runSetup.mock.calls.length, 0);
+
+    yield* launches.retryPreparation({
+      commandId: CommandId.make("command:launch:pod:retry"),
+      threadId: launched.threadId,
+      runId: failed.runs[0]!.id,
+    });
+    yield* waitUntil(() =>
+      threads
+        .getThreadProjection(launched.threadId)
+        .pipe(Effect.map((projection) => projection.runs[0]?.status === "starting")),
+    );
+    assert.equal(ensured.mock.calls.length, 2);
+    assert.equal(harness.runSetup.mock.calls.length, 1);
   }).pipe(Effect.provide(harness.layer));
 });
 

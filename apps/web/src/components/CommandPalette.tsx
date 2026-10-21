@@ -81,7 +81,6 @@ import {
   TextSearchIcon,
   TicketIcon,
 } from "lucide-react";
-import { podRuntimeActions } from "@t3tools/client-runtime/state/pod-runtime";
 import { useWorktreePod } from "../state/podRuntime";
 import { usePodActions } from "./pods/usePodActions";
 import { requestThreadFindOpen } from "./chat/threadFindActionBus";
@@ -203,6 +202,7 @@ import {
   getCommandPaletteInputPlaceholder,
   getCommandPaletteMode,
   ITEM_ICON_CLASS,
+  buildPodActionItems,
   RECENT_THREAD_LIMIT,
   reduceCommandPaletteUiState,
   type SearchOverlayMode,
@@ -261,9 +261,6 @@ import { readPullRequestListPreferences } from "~/components/pullRequest/pullReq
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
-
-// Removal belongs with the worktree or Diagnostics, not a quick command.
-const PALETTE_POD_REQUESTS = new Set(["start", "stop", "recreate"]);
 
 function getEnvironmentBrowsePlatform(os: string | null | undefined): string {
   if (os === "windows") {
@@ -1864,18 +1861,14 @@ function OpenCommandPaletteDialog(props: {
 
   if (activeThread !== null && activePod !== undefined) {
     const threadId = activeThread.id;
-    for (const action of podRuntimeActions(activePod)) {
-      if (action.kind === "request" && !PALETTE_POD_REQUESTS.has(action.request)) continue;
-      actionItems.push({
-        kind: "action",
-        value: `action:pod:${action.label}`,
-        searchTerms: ["pod", "container", "docker", "compose", "stack", "shell"],
-        title: action.label === "Retry" ? "Retry pod" : action.label,
-        disabled: !podActions.allowed(action),
+    actionItems.push(
+      ...buildPodActionItems({
+        pod: activePod,
         icon: <BoxIcon className={ITEM_ICON_CLASS} />,
-        run: () => podActions.run(activePod.id, action, threadId),
-      });
-    }
+        allowed: podActions.allowed,
+        run: (action) => podActions.run(activePod.id, action, threadId),
+      }),
+    );
   }
 
   actionItems.push({

@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  PodRuntimeId,
+  type PodRuntimeSnapshot,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import type { Project, Thread } from "../types";
 import { makeThreadFixture } from "../test-fixtures";
 import {
@@ -11,6 +18,7 @@ import {
   buildLinkedThreadActionItems,
   enumerateCommandPaletteItems,
   filterPinnedBrowseEntries,
+  buildPodActionItems,
   filterCommandPaletteGroups,
   findHighlightedCommandPaletteItem,
   reduceCommandPaletteUiState,
@@ -892,5 +900,52 @@ describe("virtualized command palette rows", () => {
     expect(findHighlightedCommandPaletteItem(groups, "thread-b")?.value).toBe("thread-b");
     expect(findHighlightedCommandPaletteItem(groups, "offline")).toBeNull();
     expect(findHighlightedCommandPaletteItem(groups, null)).toBeNull();
+  });
+});
+
+describe("buildPodActionItems", () => {
+  const pod = (state: PodRuntimeSnapshot["state"]): PodRuntimeSnapshot => ({
+    id: PodRuntimeId.make("pod-one"),
+    projectId: PROJECT_ID,
+    worktreePath: "/work/trees/feature",
+    state,
+    services: [],
+    image: "image",
+    startedAt: null,
+    lastError: state === "start_failed" ? { operation: "start", message: "boom", at: "t" } : null,
+    containerIds: [],
+    volumeIds: [],
+    updatedAt: "t",
+  });
+  const titlesFor = (state: PodRuntimeSnapshot["state"], query: string) =>
+    filterCommandPaletteGroups({
+      activeGroups: [
+        {
+          value: "actions",
+          label: "Actions",
+          items: buildPodActionItems({
+            pod: pod(state),
+            icon: null,
+            allowed: () => true,
+            run: async () => undefined,
+          }),
+        },
+      ],
+      query,
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [],
+    }).flatMap((group) => group.items.map((item) => item.title));
+
+  it("finds each pod action by the words of its own title", () => {
+    expect(titlesFor("running", "stop")).toEqual(["Stop pod"]);
+    expect(titlesFor("running", "recreate pod")).toEqual(["Recreate pod"]);
+    expect(titlesFor("running", "open pod")).toEqual(["Open pod shell"]);
+    expect(titlesFor("stopped", "start")).toEqual(["Start pod"]);
+    expect(titlesFor("start_failed", "retry")).toEqual(["Retry pod"]);
+  });
+
+  it("leaves removal to the chip and Diagnostics", () => {
+    expect(titlesFor("running", "remove")).toEqual([]);
   });
 });

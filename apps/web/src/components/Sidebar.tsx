@@ -2674,6 +2674,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               )}
               {treeDisclosure}
               <ThreadRoleBadge thread={thread} />
+              <PodChip
+                environmentId={thread.environmentId}
+                worktreePath={thread.worktreePath}
+                slim
+              />
               {terminalStatusIcon}
               {prBadge}
               {diff ? (

@@ -110,7 +110,11 @@ type PreparationInput = Pick<
   ThreadLaunchInput,
   "commandId" | "projectId" | "workspaceStrategy" | "initialMessage"
 > & {
-  readonly reusedWorktree?: { readonly baseRef: string };
+  readonly reusedWorktree?: {
+    readonly baseRef: string;
+    /** A retried container launch starts the worktree's pod again before setup. */
+    readonly runtime?: ThreadWorktreeRuntime | undefined;
+  };
 };
 
 export interface ThreadLaunchPreparationInput {
@@ -588,11 +592,11 @@ const make = Effect.gen(function* () {
           })
           .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
       }
-      if (
-        worktreePath !== null &&
-        input.workspaceStrategy.type === "worktree" &&
-        input.workspaceStrategy.runtime === "container"
-      ) {
+      const runtime =
+        input.workspaceStrategy.type === "worktree"
+          ? input.workspaceStrategy.runtime
+          : input.reusedWorktree?.runtime;
+      if (worktreePath !== null && runtime === "container") {
         // Before setup, which then runs inside the pod. A retried launch finds
         // the pod recorded for this worktree and starts it again.
         const podWorktreePath = worktreePath;
@@ -1127,7 +1131,10 @@ const make = Effect.gen(function* () {
               worktreePath: projection.thread.worktreePath,
               branch: projection.thread.branch,
             },
-            reusedWorktree: { baseRef: workspacePreparation.baseRef },
+            reusedWorktree: {
+              baseRef: workspacePreparation.baseRef,
+              runtime: workspacePreparation.runtime,
+            },
           }
         : null;
     return schedulePreparation(
