@@ -12,10 +12,12 @@ import type { EnvironmentThreadShell } from "./models.ts";
 import {
   EMPTY_POD_RUNTIME_STATE,
   podBrowsingThread,
+  podFailureActions,
   podForWorktree,
   podMcpListenerProblem,
   podServiceLinks,
   podRuntimeActions,
+  podRuntimeTitle,
   reducePodRuntimeEvent,
 } from "./podRuntime.ts";
 
@@ -98,6 +100,31 @@ describe("pod runtime actions", () => {
     expect(labels(pod("start_failed", "start"))).not.toContain("Start pod");
   });
 
+  it("opens the shell of a failed pod, whose agent container may still run", () => {
+    expect(labels(pod("start_failed", "start"))).toContain("Open pod shell");
+    expect(labels(pod("stop_failed", "stop"))).toContain("Open pod shell");
+    expect(labels(pod("stopped"))).not.toContain("Open pod shell");
+  });
+
+  it("gives a failed pod's banner Retry, its shell and Recreate, and nothing to a healthy pod", () => {
+    expect(podFailureActions(pod("start_failed", "start"))).toEqual([
+      { kind: "request", request: "start", label: "Retry", destructive: false },
+      { kind: "openShell", label: "Open pod shell" },
+      { kind: "request", request: "recreate", label: "Recreate pod", destructive: true },
+    ]);
+    expect(podFailureActions(pod("stop_failed", "stop"))?.[0]).toMatchObject({ request: "stop" });
+    expect(podFailureActions(pod("running"))).toBeNull();
+    expect(podFailureActions(pod("stopped"))).toBeNull();
+  });
+
+  it("says why a pod is stopped when its threads parked it", () => {
+    expect(podRuntimeTitle({ ...pod("stopped"), parked: true })).toBe(
+      "Pod stopped while its threads are snoozed or settled; it starts when one wakes",
+    );
+    expect(podRuntimeTitle(pod("stopped"))).toBe("Pod stopped");
+    expect(podRuntimeTitle(pod("start_failed", "start"))).toBe("Pod failed to start: boom");
+  });
+
   it("offers Remove anyway once a removal was refused", () => {
     expect(podRuntimeActions(pod("stop_failed", "remove"))).toEqual(
       expect.arrayContaining([
@@ -170,5 +197,8 @@ describe("pod MCP listener problem", () => {
     // A server that does not probe sends no status, and a stopped pod's is stale.
     expect(podMcpListenerProblem(pod("running"))).toBeUndefined();
     expect(podMcpListenerProblem({ ...pod("stopped"), mcpListener: "blocked" })).toBeUndefined();
+    expect(podRuntimeTitle({ ...pod("running"), mcpListener: "blocked" })).toContain(
+      "cannot reach",
+    );
   });
 });

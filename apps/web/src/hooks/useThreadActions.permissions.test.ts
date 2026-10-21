@@ -100,6 +100,7 @@ vi.mock("../state/entities", () => ({
   readEnvironmentSupportsPinReorder: () => true,
   readEnvironmentSupportsSettlement: () => true,
   readEnvironmentSupportsSnooze: () => true,
+  readEnvironmentSupportsSnoozeTree: () => false,
   readThreadShell: (ref: ScopedThreadRef) =>
     state.threads.find(
       (thread) => thread.environmentId === ref.environmentId && thread.id === ref.threadId,

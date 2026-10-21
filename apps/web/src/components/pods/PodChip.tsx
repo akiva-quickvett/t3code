@@ -2,6 +2,7 @@ import {
   podMcpListenerProblem,
   podRuntimeActions,
   podRuntimeStatePresentation,
+  podRuntimeTitle,
   podServiceLinks,
   type PodRuntimeTone,
 } from "@t3tools/client-runtime/state/pod-runtime";
@@ -32,12 +33,6 @@ function podChipLook(pod: PodRuntimeSnapshot) {
     : { variant: "warning" as const, Icon: TriangleAlertIcon };
 }
 
-function podTitle(pod: PodRuntimeSnapshot) {
-  const { label } = podRuntimeStatePresentation(pod.state);
-  const detail = pod.lastError?.message ?? podMcpListenerProblem(pod);
-  return detail === undefined ? `Pod ${label}` : `Pod ${label}: ${detail}`;
-}
-
 function PodChipMenu(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId | null;
@@ -60,8 +55,8 @@ function PodChipMenu(props: {
             render={<button type="button" />}
             variant={look.variant}
             size="sm"
-            title={podTitle(props.pod)}
-            aria-label={podTitle(props.pod)}
+            title={podRuntimeTitle(props.pod)}
+            aria-label={podRuntimeTitle(props.pod)}
           />
         }
       >
@@ -144,12 +139,12 @@ export function PodChip(props: {
     <Tooltip>
       <TooltipTrigger
         render={
-          <Badge variant={look.variant} size="sm" aria-label={podTitle(pod)}>
+          <Badge variant={look.variant} size="sm" aria-label={podRuntimeTitle(pod)}>
             <look.Icon />
           </Badge>
         }
       />
-      <TooltipPopup side="top">{podTitle(pod)}</TooltipPopup>
+      <TooltipPopup side="top">{podRuntimeTitle(pod)}</TooltipPopup>
     </Tooltip>
   );
 }

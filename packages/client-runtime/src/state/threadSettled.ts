@@ -1,7 +1,13 @@
 // @effect-diagnostics globalDate:off -- UI snooze presets use local calendar boundaries and Intl labels.
 import * as DateTime from "effect/DateTime";
 
+import {
+  backgroundWorkHoldsSnooze,
+  type PendingBackgroundWorkTask,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+
 import type { PendingSubagentRequest } from "./models.ts";
+import { agentTreeDescendants, type AgentTreeThread } from "./threadRelationships.ts";
 
 interface SettlementRunLike {
   readonly turnId?: unknown;
@@ -119,6 +125,56 @@ export function canSnooze(
   if (shell.pendingSubagentRequest != null) return false;
   if (hasQueuedTurnStart(shell, options)) return false;
   return true;
+}
+
+const ACTIVE_RUN_STATUSES = new Set(["preparing", "queued", "starting", "running", "waiting"]);
+
+type SnoozeGateShell = Parameters<typeof canSnooze>[0] & {
+  readonly pendingBackgroundTasks?: ReadonlyArray<
+    Pick<PendingBackgroundWorkTask, "kind" | "taskId">
+  >;
+};
+
+/**
+ * Work a snooze would cut across: a run, queued work, a request waiting on
+ * someone, or background work whose result the agent waits for. A tree snooze
+ * over such work is refused unless it waits until idle; the server counts the
+ * same work.
+ */
+export function threadHasActiveWork(
+  shell: SnoozeGateShell,
+  options: { readonly now: string },
+): boolean {
+  if (!canSnooze(shell, options)) return true;
+  if (backgroundWorkHoldsSnooze(shell.pendingBackgroundTasks ?? [])) return true;
+  const status = (shell.runtime ?? shell.session)?.status;
+  return status !== undefined && ACTIVE_RUN_STATUSES.has(status);
+}
+
+/**
+ * Whether the thread or anything under it in the agent tree has active work,
+ * skipping archived, settled and limit-parked threads as the server does.
+ */
+export function threadTreeHasActiveWork<
+  T extends AgentTreeThread &
+    SnoozeGateShell & {
+      readonly archivedAt: string | null;
+      readonly settledOverride: "settled" | "active" | null;
+      readonly snoozedUntil?: string | null | undefined;
+      readonly limitRecovery?: { readonly snooze?: boolean | undefined } | null | undefined;
+    },
+>(root: T, threads: ReadonlyArray<T>, options: { readonly now: string }): boolean {
+  return [root, ...agentTreeDescendants(root, threads)].some(
+    (thread) =>
+      thread.archivedAt === null &&
+      thread.settledOverride !== "settled" &&
+      !(
+        thread.id !== root.id &&
+        thread.limitRecovery?.snooze === true &&
+        thread.snoozedUntil != null
+      ) &&
+      threadHasActiveWork(thread, options),
+  );
 }
 
 export function effectiveSnoozed(

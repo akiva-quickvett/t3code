@@ -2,6 +2,7 @@ import { remapComposerContextAttachments } from "@t3tools/shared/composerContext
 import {
   type ThreadLinkedPullRequest,
   type ThreadRolePreset,
+  type ThreadSnoozeScope,
   type ThreadWorktreeRuntime,
   CommandId,
   CheckpointId,
@@ -109,10 +110,14 @@ export interface ReorderActiveThreadInput extends ThreadCommandInput {
 
 export interface SnoozeThreadInput extends ThreadCommandInput {
   readonly snoozedUntil: string;
+  /** Only for servers advertising `threadSnoozeTree`; others ignore it. */
+  readonly scope?: ThreadSnoozeScope;
+  readonly whenIdle?: boolean;
 }
 
 export interface UnsnoozeThreadInput extends ThreadCommandInput {
   readonly reason: "user";
+  readonly scope?: ThreadSnoozeScope;
 }
 
 export interface VisitThreadInput extends ThreadCommandInput {
@@ -523,6 +528,8 @@ export const snoozeThread = Effect.fn("EnvironmentCommands.snoozeThread")(functi
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     snoozedUntil: input.snoozedUntil,
+    ...(input.scope === undefined ? {} : { scope: input.scope }),
+    ...(input.whenIdle === undefined ? {} : { whenIdle: input.whenIdle }),
   });
 });
 
@@ -534,6 +541,7 @@ export const unsnoozeThread = Effect.fn("EnvironmentCommands.unsnoozeThread")(fu
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     reason: input.reason,
+    ...(input.scope === undefined ? {} : { scope: input.scope }),
   });
 });
 

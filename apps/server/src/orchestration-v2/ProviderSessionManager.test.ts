@@ -21,6 +21,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -4933,6 +4934,8 @@ const podPlacement = (
 ): typeof PodProviderPlacement.Service => ({
   place: (input) => place(input.runsIn),
   podFor: () => Effect.succeed(POD_ID),
+  podOf: () => Effect.succeed(undefined),
+  startPod: () => Effect.void,
 });
 
 /** Every thread lands in the pod while `inPod` holds, on the host otherwise. */
@@ -4946,6 +4949,8 @@ const switchablePlacement = (inPod: Ref.Ref<boolean>): typeof PodProviderPlaceme
       ),
     ),
   podFor: () => Ref.get(inPod).pipe(Effect.map((pod) => (pod ? POD_ID : undefined))),
+  podOf: () => Effect.succeed(undefined),
+  startPod: () => Effect.void,
 });
 
 /** `rolePresetId` names a seeded preset; `review-t3-grok` runs on the host. */
@@ -5007,6 +5012,43 @@ it.effect("ProviderSessionManagerV2 gives a pod session the pod listener's endpo
           state,
           idleTimeoutMs: 60_000,
           mcpConfigs,
+          podPlacement: podPlacement(() =>
+            Effect.succeed({
+              type: "pod",
+              podId: POD_ID,
+              mcpEndpoint: POD_ENDPOINT,
+              agentRecreated: false,
+            }),
+          ),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 closes only the pod sessions its latest start outlived", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const { opened, providerSessionId } = yield* openThread("thread-pod-restarted");
+      assert.isTrue(Exit.isSuccess(opened));
+      const openedAt = yield* Clock.currentTimeMillis;
+      // A sibling turn opened this after the pod's start: it is kept.
+      yield* manager.releasePod({ podId: POD_ID, detail: "restarted", openedBefore: openedAt });
+      assert.isTrue(yield* manager.isLive(providerSessionId));
+      // Opened before the pod's latest start, it died with the stop before it.
+      yield* manager.releasePod({
+        podId: POD_ID,
+        detail: "restarted",
+        openedBefore: openedAt + 1,
+      });
+      assert.isFalse(yield* manager.isLive(providerSessionId));
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
           podPlacement: podPlacement(() =>
             Effect.succeed({
               type: "pod",

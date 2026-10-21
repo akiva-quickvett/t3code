@@ -69,6 +69,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
+import { layerWithoutPods } from "../pod/testkit/layerWithoutPods.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -3356,6 +3357,7 @@ it.effect.each(
               ),
       });
       const layerService = OrchestratorMcpService.layer.pipe(
+        Layer.provide(layerWithoutPods),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(harness.layer),
         Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({ resolveCommit })),
@@ -3578,6 +3580,7 @@ const withDelegatedWorktreeRepo = <A, E>(
       ...options,
     });
     const layerService = OrchestratorMcpService.layer.pipe(
+      Layer.provide(layerWithoutPods),
       Layer.provide(NodeCrypto.layer),
       Layer.provide(harness.layer),
       Layer.provide(Layer.succeed(GitVcsDriver.GitVcsDriver, gitDriver)),
