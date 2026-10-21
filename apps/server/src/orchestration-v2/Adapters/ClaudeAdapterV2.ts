@@ -1,6 +1,12 @@
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 import {
+  isPodMcpEndpoint,
+  type PodProviderLaunch,
+  podEnvironmentValues,
+  ProviderPodProcess,
+} from "../../provider/PodProviderSessions.ts";
+import {
   dynamicToolTitle,
   formatReadToolLabel,
   formatSearchToolLabel,
@@ -296,6 +302,46 @@ function spawnClaudeProcessGroup(options: ClaudeSpawnOptions): ClaudeSpawnedProc
   return child;
 }
 
+/**
+ * The SDK's spawn, through `docker exec` into the pod's agent container. The
+ * host binary's path becomes its pod path, and the container gets only the
+ * variables the SDK was given, never the server's own environment.
+ */
+const spawnClaudeInPod =
+  (input: {
+    readonly hostExecutable: string;
+    readonly podExecutable: string;
+    readonly launch: (spec: {
+      readonly command: ReadonlyArray<string>;
+      readonly cwd?: string;
+      readonly env: Readonly<Record<string, string>>;
+    }) => PodProviderLaunch;
+    readonly cliEnvironment: NodeJS.ProcessEnv;
+    readonly onExit: () => void;
+  }) =>
+  (options: ClaudeSpawnOptions): ClaudeSpawnedProcess => {
+    const command = [options.command, ...options.args].map((arg) =>
+      arg === input.hostExecutable ? input.podExecutable : arg,
+    );
+    const launch = input.launch({
+      command,
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      env: podEnvironmentValues(options.env),
+    });
+    // The docker CLI itself runs with the host's environment; the container
+    // receives only the variables the launch names.
+    const child = spawnClaudeProcessGroup({
+      ...options,
+      command: launch.command,
+      args: [...launch.args],
+      env: { ...input.cliEnvironment, ...launch.env },
+    });
+    // Like the host's process group kill: whatever the CLI left running in
+    // the container goes with it.
+    child.once("exit", input.onExit);
+    return child;
+  };
+
 export const ClaudeProviderCapabilitiesV2 = {
   sessions: {
     supportsMultipleProviderThreadsPerSession: false,
@@ -443,6 +489,11 @@ export interface ClaudeAgentSdkQueryOpenInput {
   readonly options: ClaudeAgentSdkQueryOptions;
   readonly threadId: ThreadId;
   readonly providerSessionId: OrchestrationV2ProviderSession["id"];
+  /**
+   * The whole environment of a session in a pod: the instance's own
+   * variables, its config dir and the role's context window.
+   */
+  readonly podEnvironment?: NodeJS.ProcessEnv;
 }
 
 export interface ClaudeAgentSdkQuerySession {
@@ -752,6 +803,9 @@ export const layerQueryRunner: Layer.Layer<
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
     const platform = yield* HostProcess.Platform;
+    const podProcess = yield* ProviderPodProcess;
+    const hostEnvironment = yield* HostProcess.Environment;
+    const runFork = Effect.runForkWith(yield* Effect.context<never>());
 
     return ClaudeAgentSdkQueryRunner.of({
       allocateSessionId: crypto
@@ -779,11 +833,14 @@ export const layerQueryRunner: Layer.Layer<
         // channel instead, so header credentials stay out of its argv and out
         // of the environment every command the agent runs inherits.
         const { mcpServers, ...queryOptions } = input.options;
+        const podTarget = yield* podProcess.resolve(queryOptions.cwd);
         // The SDK spawns a native binary as `path ...executableArgs ...sdkArgs`,
         // which lets the agent scope wrapper go in front of the CLI. The SDK
         // runs a script entry through node instead, so those launch unwrapped.
+        // A pod session is stopped in its container instead.
         const binaryPath = queryOptions.pathToClaudeCodeExecutable;
         const launch =
+          podTarget !== undefined ||
           binaryPath === undefined ||
           CLAUDE_SCRIPT_EXTENSIONS.some((ext) => binaryPath.endsWith(ext))
             ? undefined
@@ -794,14 +851,36 @@ export const layerQueryRunner: Layer.Layer<
                 threadId: input.threadId,
                 env: queryOptions.env,
               });
+        const hostExecutable = binaryPath ?? "claude";
+        // One stop per launch, shared by the CLI's exit and the session's
+        // close, which waits for it so server shutdown leaves nothing behind.
+        let podLaunch: PodProviderLaunch | undefined;
+        let podStop: Fiber.Fiber<void> | undefined;
+        const stopInPod = () =>
+          podLaunch === undefined ? undefined : (podStop ??= runFork(podLaunch.stop));
         const options =
-          launch === undefined || launch.args.length === 0
-            ? queryOptions
-            : {
+          podTarget !== undefined
+            ? {
                 ...queryOptions,
-                pathToClaudeCodeExecutable: launch.command,
-                executableArgs: [...launch.args, ...(queryOptions.executableArgs ?? [])],
-              };
+                // The SDK's bundled binary is not in the pod; the image's or the
+                // instance's mounted one is.
+                pathToClaudeCodeExecutable: hostExecutable,
+                env: input.podEnvironment ?? {},
+                spawnClaudeCodeProcess: spawnClaudeInPod({
+                  hostExecutable,
+                  podExecutable: yield* podProcess.command(hostExecutable),
+                  launch: (spec) => (podLaunch = podProcess.launch(podTarget, spec)),
+                  cliEnvironment: hostEnvironment,
+                  onExit: () => void stopInPod(),
+                }),
+              }
+            : launch === undefined || launch.args.length === 0
+              ? queryOptions
+              : {
+                  ...queryOptions,
+                  pathToClaudeCodeExecutable: launch.command,
+                  executableArgs: [...launch.args, ...(queryOptions.executableArgs ?? [])],
+                };
         // Windows has no process groups, so there the SDK spawns the CLI itself.
         const spawnClaudeCodeProcess =
           options.spawnClaudeCodeProcess ??
@@ -841,9 +920,18 @@ export const layerQueryRunner: Layer.Layer<
                       }),
                     );
                     if (failed.length > 0) {
+                      const t3Code = mcpServers["t3-code"];
                       yield* Effect.logWarning("orchestration-v2.claude-mcp-servers-unavailable", {
                         threadId: input.threadId,
                         servers: failed,
+                        ...(failed.includes("t3-code") &&
+                        t3Code !== undefined &&
+                        "url" in t3Code &&
+                        isPodMcpEndpoint(t3Code.url)
+                          ? {
+                              hint: "The pod could not reach T3's pod MCP listener; a host firewall that drops traffic from pod networks blocks it.",
+                            }
+                          : {}),
                       });
                     }
                   }
@@ -984,6 +1072,12 @@ export const layerQueryRunner: Layer.Layer<
           ),
           close: Queue.shutdown(promptQueue).pipe(
             Effect.andThen(closeClaudeQuery(queryRuntime)),
+            Effect.ensuring(
+              Effect.suspend(() => {
+                const stopping = stopInPod();
+                return stopping === undefined ? Effect.void : Fiber.join(stopping);
+              }),
+            ),
             Effect.tap(() =>
               logProtocolEvent({
                 direction: "outgoing",
@@ -3446,6 +3540,8 @@ export interface ClaudeAdapterV2Options {
   readonly crypto: Crypto.Crypto;
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly queryRunner: ClaudeAgentSdkQueryRunnerShape;
+  /** What a session in a pod gets instead of `environment`; see `ClaudeAgentSdkQueryOpenInput`. */
+  readonly podEnvironment?: NodeJS.ProcessEnv;
   readonly scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>;
   readonly onUsageLimits?: ManagedServerProvider["applyUsageLimits"];
   readonly continuationRequests?: {
@@ -8575,6 +8671,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               threadId: turnInput.threadId,
               providerSessionId: input.providerSessionId,
               options: queryOptions,
+              podEnvironment:
+                claudeRoleEnvironment(
+                  adapterOptions.podEnvironment ?? {},
+                  turnInput.role?.contextWindow,
+                ) ?? {},
             })
             .pipe(
               Effect.onError(() =>
@@ -9639,6 +9740,13 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
     const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
     const baseEnvironment = yield* mergeProviderInstanceEnvironment(environment, hostEnvironment);
     const claudeEnvironment = yield* makeClaudeEnvironment(config, baseEnvironment);
+    // A pod session never inherits the server's environment: it gets the
+    // instance's own variables and the config dir the host session uses.
+    const instanceVariables = yield* mergeProviderInstanceEnvironment(environment, {});
+    const podEnvironment =
+      claudeEnvironment.CLAUDE_CONFIG_DIR === undefined
+        ? instanceVariables
+        : { ...instanceVariables, CLAUDE_CONFIG_DIR: claudeEnvironment.CLAUDE_CONFIG_DIR };
     const path = yield* Path.Path;
     const crypto = yield* Crypto.Crypto;
     const binaryPath = yield* resolveClaudeSdkExecutablePath(
@@ -9649,6 +9757,7 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
       instanceId,
       settings: { ...config, enabled, binaryPath },
       environment: claudeEnvironment,
+      podEnvironment,
       attachmentsDir: serverConfig.attachmentsDir,
       fileSystem,
       path,

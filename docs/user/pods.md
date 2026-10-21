@@ -6,8 +6,10 @@ on that worktree runs inside the pod; Git, diffs and checkpoints stay on your ma
 
 Pods need Docker on the machine running T3 Code. They are off until you turn them on.
 
-For now only terminals and project scripts run in the pod; the agent itself still runs on your
-machine, so a `docker compose` it runs reaches your own Docker, not the pod's.
+Claude and Codex agents on a pod's worktree run in the pod too, with the same login as on your
+machine, and keep the T3 Code tools. Other providers cannot run in a pod: a thread using one is
+refused unless its role preset sets **Runs in → Host**, which runs it on your machine against the
+same worktree (useful for read-only reviewers).
 
 ## Set up a project
 
@@ -37,7 +39,10 @@ The agent container's image must have the Docker CLI with its compose plugin; cr
 for it and says so if the image lacks it. The default, `docker:27-cli`, is minimal: it has no
 `git`, no `bash` and no project toolchain, so terminals use `sh` and setup and teardown scripts that
 need more fail. Set `podRuntime.defaultImage` in the server settings to an image with `git` and
-whatever your scripts run.
+whatever your scripts run. To run agents in the pod, the image also needs to run the Claude and
+Codex CLIs: a glibc-based image (such as a Debian one) with them installed, or with the host's
+binaries, which T3 Code mounts when the provider's binary path is absolute. Include `curl` too: the
+default image has none, and its busybox `wget` cannot reach `*.pods.internal` hostnames.
 
 `env` is set for every command in the pod and written to the worktree's `.env`, replacing those
 variables and keeping the rest of the file; keep `.env` out of Git. A `.env` that is a symlink, as
@@ -45,6 +50,24 @@ some worktree setups make to share the main checkout's, becomes the worktree's o
 shared one never gets this pod's addresses. In its values, `{web.url}` and
 `{web.port}` become the `web` service's address and port on the machine running T3 Code. A
 placeholder that names no service fails the pod and names the variable.
+
+### Host firewall
+
+Agents in a pod reach T3 Code on port 17773 of the pod network's gateway. A firewall that drops
+incoming traffic by default (ufw, firewalld) drops this too, and the agents then run without the
+T3 Code tools. Allow it from the pod network's subnet to its gateway, which
+`docker network inspect t3-pods --format '{{(index .IPAM.Config 0).Subnet}} {{(index .IPAM.Config 0).Gateway}}'`
+prints (`t3-pods` is the default of `podRuntime.network` in the server settings):
+
+```sh
+# ufw
+sudo ufw allow from 172.18.0.0/16 to 172.18.0.1 port 17773 proto tcp
+# firewalld
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="172.18.0.0/16" destination address="172.18.0.1" port port="17773" protocol="tcp" accept'
+sudo firewall-cmd --reload
+```
+
+Replace `172.18.0.0/16` and `172.18.0.1` with your subnet and gateway.
 
 ## Start a thread in a pod
 
@@ -58,6 +81,10 @@ Docker's DNS on the pods network fails on some machines. If its image pulls stil
 from containers (for example `["192.168.1.1"]`) and recreate the pod.
 
 ## Manage a pod
+
+Switching a pod thread to another account of the same provider works mid-thread. If the pod was
+made before that account was enabled, T3 Code recreates the pod's agent container to add its
+login; the stack keeps running, and other agents in the pod resume on their next turn.
 
 The pod chip next to the thread title shows its state. Click it to stop or start the pod, open a
 shell in it, recreate it, or remove it. Stopping keeps everything, and starting resumes the stack

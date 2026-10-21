@@ -43,7 +43,11 @@ export type AgentRolePresetTarget = typeof AgentRolePresetTarget.Type;
 export const AgentRolePresetIsolation = Schema.Literals(["shared", "worktree"]);
 export type AgentRolePresetIsolation = typeof AgentRolePresetIsolation.Type;
 
-/** Stored and listed only until pods exist. */
+/**
+ * For a provider that cannot run in a pod, on a pod's worktree: `host` runs it
+ * on the host against the worktree, anything else refuses the turn. Providers
+ * that run in pods always run there.
+ */
 export const AgentRolePresetRunsIn = Schema.Literals(["host", "pod"]);
 export type AgentRolePresetRunsIn = typeof AgentRolePresetRunsIn.Type;
 

@@ -129,6 +129,8 @@ export interface IdAllocatorV2Allocate {
 export interface IdAllocatorV2Derive {
   readonly providerSession: (input: {
     readonly providerInstanceId: ProviderInstanceId;
+    /** Splits the shared session, such as one per pod, whose process cannot serve the rest. */
+    readonly scope?: string;
   }) => ProviderSessionId;
   readonly delegatedTaskNode: (input: { readonly commandId: CommandId }) => NodeId;
   readonly delegatedTaskThread: (input: { readonly commandId: CommandId }) => ThreadId;
@@ -254,7 +256,15 @@ const randomId =
 export const derive: IdAllocatorV2Derive = {
   providerSession: (input) =>
     ProviderSessionId.make(
-      joinId("provider-session", "provider-instance", input.providerInstanceId, "shared"),
+      input.scope === undefined
+        ? joinId("provider-session", "provider-instance", input.providerInstanceId, "shared")
+        : joinId(
+            "provider-session",
+            "provider-instance",
+            input.providerInstanceId,
+            "shared",
+            input.scope,
+          ),
     ),
   delegatedTaskNode: (input) => NodeId.make(joinId("node", "delegated-task", input.commandId)),
   delegatedTaskThread: (input) =>

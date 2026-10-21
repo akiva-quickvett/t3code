@@ -1,6 +1,7 @@
 import {
   type AgentRolePreset,
   AgentRolePresetError,
+  type AgentRolePresetRunsIn,
   AgentRolePresetList,
   type AgentRolePresetRemoveInput,
   type AgentRolePresetResetInput,
@@ -168,6 +169,20 @@ export function findAgentRolePreset(input: {
     projectId: input.projectId,
   }).presets.map((entry) => entry.preset);
   return findAgentRolePresetIn(presets, input.id);
+}
+
+/** Where the thread's role preset runs a provider that cannot run in a pod. */
+export function threadRolePresetRunsIn(
+  settings: ServerSettings,
+  thread: {
+    readonly projectId: ProjectId;
+    readonly rolePreset?: { readonly id: string } | null | undefined;
+  },
+): AgentRolePresetRunsIn | undefined {
+  return thread.rolePreset == null
+    ? undefined
+    : findAgentRolePreset({ settings, projectId: thread.projectId, id: thread.rolePreset.id })
+        ?.runsIn;
 }
 
 const listsEqual = Schema.toEquivalence(AgentRolePresetList);

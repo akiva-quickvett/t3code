@@ -8,6 +8,7 @@ import {
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
+  type PodRuntimeId,
   ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
@@ -42,9 +43,15 @@ import {
 } from "../observability/Metrics.ts";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import { threadRolePresetRunsIn } from "../agentRoles/AgentRolePresetService.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import {
+  isPodMcpEndpoint,
+  PodProviderPlacement,
+  ProviderPodRefusedError,
+} from "../provider/PodProviderSessions.ts";
 import * as EventSink from "./EventSink.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -197,6 +204,8 @@ interface LiveSessionEntry {
    * the outbox executes the old session's detach).
    */
   readonly mcpCredentialIdByThread: ReadonlyMap<ThreadId, string>;
+  /** Set when the session runs in a pod: its threads reach MCP through the pod listener. */
+  readonly pod: { readonly podId: PodRuntimeId; readonly mcpEndpoint: string } | undefined;
   readonly supportsMultipleProviderThreads: boolean;
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
@@ -329,6 +338,24 @@ export const layerWithOptions = (
       const providerEventIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
       const agentScope = yield* AgentScope;
+      const podPlacement = yield* PodProviderPlacement;
+      // Read here rather than passed in, so every path that opens a session
+      // (turn start, checkpoint rollback) places it by the same rule.
+      const threadRunsIn = (threadId: ThreadId) =>
+        Option.isNone(serverSettings)
+          ? Effect.succeed(undefined)
+          : Effect.all([
+              serverSettings.value.getSettings,
+              projectionStore.getThread(threadId),
+            ]).pipe(
+              Effect.map(([settings, thread]) => threadRolePresetRunsIn(settings, thread)),
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not read the thread's role preset.", {
+                  threadId,
+                  cause,
+                }).pipe(Effect.as(undefined)),
+              ),
+            );
       const agentAccessSettings = Effect.fn("ProviderSessionManagerV2.agentAccessSettings")(
         function* (threadId: ThreadId) {
           if (Option.isNone(serverSettings)) return { browser: true, device: false };
@@ -435,6 +462,7 @@ export const layerWithOptions = (
       const prepareMcpSession = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
+        endpoint: string | undefined,
       ): Effect.Effect<PreparedMcpCredential> =>
         options.configureMcp === false
           ? mcpSessions
@@ -473,7 +501,13 @@ export const layerWithOptions = (
                         ),
                       ),
                     );
+                  // A pod's sessions reach the server through its pod-facing listener.
+                  const endpointFits =
+                    endpoint === undefined
+                      ? !isPodMcpEndpoint(existing.endpoint)
+                      : existing.endpoint === endpoint;
                   if (
+                    endpointFits &&
                     resolved !== undefined &&
                     resolved.thread.threadId === threadId &&
                     resolved.thread.providerInstanceId === providerInstanceId &&
@@ -490,6 +524,7 @@ export const layerWithOptions = (
                   providerInstanceId,
                   browserToolsAvailable,
                   capabilities,
+                  ...(endpoint === undefined ? {} : { endpoint }),
                 });
                 yield* mcpSessions.set(credential.config);
                 reserveMcpCredential(threadId, credential.config.providerSessionId);
@@ -1096,6 +1131,31 @@ export const layerWithOptions = (
           ),
         );
 
+      /**
+       * A replaced agent container took its pod's provider processes with it.
+       * Releasing their sessions lets each thread's next turn resume in the new one.
+       */
+      const releasePodSessions = (podId: PodRuntimeId) =>
+        Effect.gen(function* () {
+          for (const entry of (yield* Ref.get(sessions)).values()) {
+            if (entry.pod?.podId !== podId) continue;
+            yield* releaseEntry({
+              providerSessionId: entry.runtime.providerSessionId,
+              reason: "runtime_error",
+              detail: "The pod's agent container was recreated for another provider account.",
+            }).pipe(logReleaseFailure(entry.runtime.providerSessionId));
+          }
+        });
+
+      const podBusy = (podId: PodRuntimeId) =>
+        Ref.get(sessions).pipe(
+          Effect.map((current) =>
+            [...current.values()].some(
+              (entry) => entry.pod?.podId === podId && entry.busyTurns.size > 0,
+            ),
+          ),
+        );
+
       const releaseIfStillIdle = (input: {
         readonly providerSessionId: ProviderSessionId;
         readonly generation: number;
@@ -1362,7 +1422,12 @@ export const layerWithOptions = (
               Effect.uninterruptible,
             );
             if (attached !== undefined) {
-              const prepared = yield* prepareMcpSession(input.threadId, input.providerInstanceId);
+              const prepared = yield* prepareMcpSession(
+                input.threadId,
+                input.providerInstanceId,
+                (yield* Ref.get(sessions)).get(sessionKey(input.providerSessionId))?.pod
+                  ?.mcpEndpoint,
+              );
               preparedForCleanup = prepared;
               if (prepared.mcpCredentialId !== undefined) {
                 const mcpCredentialId = prepared.mcpCredentialId;
@@ -2092,6 +2157,38 @@ export const layerWithOptions = (
                     cause: `Provider ${existing.runtime.driver} does not support attaching multiple app threads to one session.`,
                   });
                 }
+                // A shared process runs in one place; a thread that belongs
+                // elsewhere never joins it.
+                if (!attached) {
+                  const podId = yield* podPlacement
+                    .podFor({
+                      cwd,
+                      driver: existing.runtime.driver,
+                      runsIn: yield* threadRunsIn(input.threadId),
+                    })
+                    .pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderSessionOpenError({
+                            instanceId: input.modelSelection.instanceId,
+                            providerSessionId: input.providerSessionId,
+                            cause,
+                          }),
+                      ),
+                    );
+                  if (podId !== existing.pod?.podId) {
+                    return yield* new ProviderSessionOpenError({
+                      instanceId: input.modelSelection.instanceId,
+                      providerSessionId: input.providerSessionId,
+                      cause: new ProviderPodRefusedError({
+                        reason:
+                          existing.pod === undefined
+                            ? "This provider session runs on the host; a thread in a pod cannot join it."
+                            : "This provider session runs in a pod this thread's workspace is not in.",
+                      }),
+                    });
+                  }
+                }
                 if (!attached) yield* agentScope.clear(input.threadId);
                 yield* ensureThreadAttached({
                   providerSessionId: input.providerSessionId,
@@ -2112,9 +2209,31 @@ export const layerWithOptions = (
                     }),
                 ),
               );
+              const placement = yield* podPlacement
+                .place({
+                  cwd,
+                  driver: adapter.driver,
+                  instanceId: input.modelSelection.instanceId,
+                  runsIn: yield* threadRunsIn(input.threadId),
+                  podBusy,
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderSessionOpenError({
+                        instanceId: input.modelSelection.instanceId,
+                        providerSessionId: input.providerSessionId,
+                        cause,
+                      }),
+                  ),
+                );
+              if (placement.type === "pod" && placement.agentRecreated) {
+                yield* releasePodSessions(placement.podId);
+              }
               const prepared = yield* prepareMcpSession(
                 input.threadId,
                 input.modelSelection.instanceId,
+                placement.type === "pod" ? placement.mcpEndpoint : undefined,
               );
               const mcpCredentialId = prepared.mcpCredentialId;
               let reservationDropped = mcpCredentialId === undefined;
@@ -2191,6 +2310,10 @@ export const layerWithOptions = (
                   mcpCredentialId === undefined
                     ? new Map()
                     : new Map([[input.threadId, mcpCredentialId]]),
+                pod:
+                  placement.type === "pod"
+                    ? { podId: placement.podId, mcpEndpoint: placement.mcpEndpoint }
+                    : undefined,
                 supportsMultipleProviderThreads:
                   runtime.providerSession.capabilities.sessions
                     .supportsMultipleProviderThreadsPerSession,

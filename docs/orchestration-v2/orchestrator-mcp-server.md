@@ -55,21 +55,24 @@ The MCP HTTP server resolves the bearer token and supplies the resulting
 `McpInvocationScope` to tool handlers. Orchestration handlers additionally
 check the `orchestration` capability before reading or mutating state.
 
+A session that runs in a pod gets the same credential with the endpoint
+`http://host.docker.internal:<pod-listener-port>/mcp`, the pod-facing listener
+that serves only `/mcp` and attachment uploads
+([pod runtime](../internals/pod-runtime.md#pod-facing-mcp-listener)).
+
 ## Provider Injection
 
 ### Codex V2
 
-Codex app-server receives the remote MCP server through command-line config
-overrides:
+Codex app-server receives the remote MCP server in each thread's config:
 
 ```text
--c mcp_servers.t3-code.url=http://127.0.0.1:<port>/mcp
--c mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"
+mcp_servers.t3-code.url = "http://127.0.0.1:<port>/mcp"
+mcp_servers.t3-code.http_headers.Authorization = "Bearer <provider-session-token>"
 ```
 
-The provider-session token is placed in `T3_MCP_BEARER_TOKEN`. Both the
-production Codex launcher and the injectable test launcher use the same
-projection helper.
+The token stays out of the app-server's environment, so the commands Codex
+runs never inherit it.
 
 ### Claude Agent SDK V2
 
