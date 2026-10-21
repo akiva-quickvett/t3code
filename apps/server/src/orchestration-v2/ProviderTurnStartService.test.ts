@@ -6,6 +6,7 @@ import {
   MessageId,
   NodeId,
   PodRuntimeId,
+  type PodRuntimeSnapshot,
   ProviderSessionId,
   ProviderThreadId,
   ProviderDriverKind,
@@ -579,6 +580,9 @@ function makeLocalCommandHarness(input: {
   const detach = vi.fn<ProviderSessionManager.ProviderSessionManagerV2Shape["detach"]>(
     () => Effect.void,
   );
+  const releasePod = vi.fn<ProviderSessionManager.ProviderSessionManagerV2Shape["releasePod"]>(
+    () => Effect.void,
+  );
   const tryHandlePromptCommand = vi.fn(() =>
     input.logoutFailure === undefined
       ? Effect.succeed(true)
@@ -673,7 +677,7 @@ function makeLocalCommandHarness(input: {
               }),
             ),
         }),
-        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open, detach }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open, detach, releasePod }),
         ...(input.podPlacement === undefined
           ? []
           : [Layer.succeed(PodProviderPlacement, input.podPlacement)]),
@@ -695,6 +699,7 @@ function makeLocalCommandHarness(input: {
     createWorktree,
     open,
     detach,
+    releasePod,
     writeIfRunCurrent,
     startRootRun,
     tryHandlePromptCommand,
@@ -703,6 +708,9 @@ function makeLocalCommandHarness(input: {
     newInstanceId,
     attemptId,
     projection: () => projection,
+    /** What a Stop records on a run that has no provider turn yet. */
+    interruptRun,
+    layer,
     start: Effect.gen(function* () {
       yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({ threadId, runId });
     }).pipe(Effect.provide(layer)),
@@ -829,6 +837,8 @@ effectIt.effect.each([
       podPlacement: {
         place: () => Effect.die("unused"),
         podFor: ({ cwd }) => Effect.succeed(cwd === worktreePath ? podId : undefined),
+        podOf: () => Effect.succeed(undefined),
+        startPod: () => Effect.void,
       },
     });
     const hostShared = IdAllocator.derive.providerSession({
@@ -861,6 +871,211 @@ effectIt.effect.each([
   }),
 );
 
+const parkedPod = (state: PodRuntimeSnapshot["state"]): PodRuntimeSnapshot => ({
+  id: PodRuntimeId.make("pod-wakehold1"),
+  projectId: ProjectId.make("project-native-account-command"),
+  worktreePath: "/tmp/provider-start-wake-hold",
+  state,
+  services: [],
+  image: "docker:27-cli",
+  startedAt: state === "running" ? "2026-09-04T12:05:00.000Z" : null,
+  lastError:
+    state === "start_failed"
+      ? {
+          operation: "start",
+          message: "Starting the stack failed (exit 1).",
+          at: "2026-09-04T12:01:00.000Z",
+        }
+      : null,
+  containerIds: [],
+  volumeIds: [],
+  updatedAt: "2026-09-04T12:05:00.000Z",
+});
+
+effectIt.effect(
+  "holds a turn outside the effect worker until its stopped pod runs, then opens a session",
+  () =>
+    Effect.gen(function* () {
+      let pod = parkedPod("stopped");
+      const startRequested = yield* Deferred.make<void>();
+      const podRunning = yield* Deferred.make<void>();
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        worktreePath: "/tmp/provider-start-wake-hold",
+        failReadsAfterRunning: true,
+        podPlacement: {
+          place: () => Effect.die("unused"),
+          podFor: () => Effect.succeed(pod.id),
+          podOf: () => Effect.sync(() => pod),
+          startPod: () =>
+            Deferred.succeed(startRequested, undefined).pipe(
+              Effect.andThen(Deferred.await(podRunning)),
+              Effect.andThen(
+                Effect.sync(() => {
+                  pod = parkedPod("running");
+                }),
+              ),
+            ),
+        },
+      });
+      yield* Effect.gen(function* () {
+        const turns = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+        // The effect returns while the pod starts; the run stays starting.
+        yield* turns.start({
+          threadId: harness.projection().thread.id,
+          runId: harness.projection().runs.at(-1)!.id,
+        });
+        yield* Deferred.await(startRequested);
+        expect(harness.open).not.toHaveBeenCalled();
+        expect(harness.projection().runs.at(-1)?.status).toBe("starting");
+
+        yield* Deferred.succeed(podRunning, undefined);
+        yield* turns.drainPodHolds;
+        expect(harness.open).toHaveBeenCalledOnce();
+        // Only sessions the stop outlived are closed, never one a sibling turn just opened.
+        expect(harness.releasePod).toHaveBeenCalledWith(
+          expect.objectContaining({
+            podId: pod.id,
+            openedBefore: Date.parse("2026-09-04T12:05:00.000Z"),
+          }),
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);
+
+/** A turn whose pod is stopped, with the pod's start held until `release`. */
+const heldPodHarness = Effect.gen(function* () {
+  let pod = parkedPod("stopped");
+  const startRequested = yield* Deferred.make<void>();
+  const release = yield* Deferred.make<void>();
+  const harness = makeLocalCommandHarness({
+    text: "Continue",
+    worktreePath: "/tmp/provider-start-wake-hold",
+    failReadsAfterRunning: true,
+    podPlacement: {
+      place: () => Effect.die("unused"),
+      podFor: () => Effect.succeed(pod.id),
+      podOf: () => Effect.sync(() => pod),
+      startPod: () =>
+        Deferred.succeed(startRequested, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(
+            Effect.sync(() => {
+              pod = parkedPod("running");
+            }),
+          ),
+        ),
+    },
+  });
+  const runId = harness.projection().runs.at(-1)!.id;
+  const threadId = harness.projection().thread.id;
+  return { harness, startRequested, release, runId, threadId };
+});
+
+effectIt.effect(
+  "fails a held turn that cannot start once its pod runs, never leaving it starting",
+  () =>
+    Effect.gen(function* () {
+      const { harness, startRequested, release, runId, threadId } = yield* heldPodHarness;
+      yield* Effect.gen(function* () {
+        const turns = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+        yield* turns.start({ threadId, runId });
+        yield* Deferred.await(startRequested);
+        // The turn's own reads fail once the pod runs, outside any of its settle points.
+        harness.getTurnStartContext.mockImplementationOnce(
+          () =>
+            Effect.fail(
+              new ProjectionStore.ProjectionStoreReadError({ threadId, cause: "busy" }),
+            ) as never,
+        );
+        yield* Deferred.succeed(release, undefined);
+        yield* turns.drainPodHolds;
+      }).pipe(Effect.provide(harness.layer));
+      expect(harness.open).not.toHaveBeenCalled();
+      expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+      const error = harness.events.find(
+        (event) => event.type === "turn-item.updated" && event.payload.type === "error",
+      );
+      expect(error?.type === "turn-item.updated" ? error.payload.title : undefined).toBe(
+        "The turn could not start",
+      );
+    }),
+);
+
+effectIt.effect("ends a held turn that was stopped while its pod started, without a session", () =>
+  Effect.gen(function* () {
+    const { harness, startRequested, release, runId, threadId } = yield* heldPodHarness;
+    yield* Effect.gen(function* () {
+      const turns = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+      yield* turns.start({ threadId, runId });
+      yield* Deferred.await(startRequested);
+      harness.interruptRun();
+      yield* Deferred.succeed(release, undefined);
+      yield* turns.drainPodHolds;
+    }).pipe(Effect.provide(harness.layer));
+    expect(harness.open).not.toHaveBeenCalled();
+    expect(harness.projection().runs.at(-1)?.status).toBe("interrupted");
+  }),
+);
+
+effectIt.effect("fails a turn on a failed pod at once, leaving Retry to its banner", () =>
+  Effect.gen(function* () {
+    let startRequests = 0;
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      worktreePath: "/tmp/provider-start-wake-hold",
+      failReadsAfterRunning: true,
+      podPlacement: {
+        place: () => Effect.die("unused"),
+        podFor: () => Effect.succeed(parkedPod("start_failed").id),
+        podOf: () => Effect.succeed(parkedPod("start_failed")),
+        startPod: () => Effect.sync(() => void startRequests++),
+      },
+    });
+    yield* harness.start;
+    expect(startRequests).toBe(0);
+    expect(harness.open).not.toHaveBeenCalled();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    const error = harness.events.find(
+      (event) => event.type === "turn-item.updated" && event.payload.type === "error",
+    );
+    expect(error?.type === "turn-item.updated" ? error.payload.title : undefined).toBe(
+      "The pod did not start",
+    );
+  }),
+);
+
+effectIt.effect("fails a held turn with the pod's reason when its start fails", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      worktreePath: "/tmp/provider-start-wake-hold",
+      failReadsAfterRunning: true,
+      podPlacement: {
+        place: () => Effect.die("unused"),
+        podFor: () => Effect.succeed(parkedPod("stopped").id),
+        podOf: () => Effect.succeed(parkedPod("stopped")),
+        startPod: () =>
+          Effect.fail(
+            new ProviderPodRefusedError({
+              reason: "The pod did not start: Checking the pod's containers failed.",
+            }),
+          ),
+      },
+    });
+    yield* Effect.gen(function* () {
+      const turns = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+      yield* turns.start({
+        threadId: harness.projection().thread.id,
+        runId: harness.projection().runs.at(-1)!.id,
+      });
+      yield* turns.drainPodHolds;
+    }).pipe(Effect.provide(harness.layer));
+    expect(harness.open).not.toHaveBeenCalled();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+  }),
+);
+
 effectIt.effect("keeps the host's shared session for a thread its pod refuses", () =>
   Effect.gen(function* () {
     const harness = makeLocalCommandHarness({
@@ -872,6 +1087,8 @@ effectIt.effect("keeps the host's shared session for a thread its pod refuses", 
         place: () => Effect.die("unused"),
         podFor: () =>
           Effect.fail(new ProviderPodRefusedError({ reason: "OpenCode cannot run in a pod." })),
+        podOf: () => Effect.succeed(undefined),
+        startPod: () => Effect.void,
       },
     });
     yield* harness.start;

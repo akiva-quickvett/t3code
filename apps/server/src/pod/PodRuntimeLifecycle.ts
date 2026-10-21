@@ -32,6 +32,17 @@ export interface PodRuntimeRecord {
   readonly routed?: boolean;
 }
 
+/**
+ * What the server runs: every client request, plus `freeze`, which only a pod
+ * following its threads asks for. It never reaches the wire: a failed freeze
+ * is recorded as a failed stop, whose Retry frees the memory a freeze holds.
+ */
+export const PodInternalOperation = Schema.Literals([...PodRuntimeOperation.literals, "freeze"]);
+export type PodInternalOperation = typeof PodInternalOperation.Type;
+
+const wireOperation = (operation: PodInternalOperation): PodRuntimeOperation =>
+  operation === "freeze" ? "stop" : operation;
+
 const PodServicePort = Schema.Struct({ name: TrimmedNonEmptyString, port: Schema.Int });
 const PodServiceHostPort = Schema.Struct({
   name: TrimmedNonEmptyString,
@@ -55,13 +66,15 @@ export const PodRuntimeEvent = Schema.Union([
     type: Schema.Literal("pod.operation-requested"),
     podId: PodRuntimeId,
     occurredAt: IsoDateTime,
-    operation: PodRuntimeOperation,
+    operation: PodInternalOperation,
+    /** Asked for because every thread on the worktree was parked; a wake starts it again. */
+    parked: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("pod.operation-succeeded"),
     podId: PodRuntimeId,
     occurredAt: IsoDateTime,
-    operation: PodRuntimeOperation,
+    operation: PodInternalOperation,
     containerIds: Schema.Array(Schema.String),
     volumeIds: Schema.Array(Schema.String),
     /** "Remove anyway" recorded the removal although Docker refused it. */
@@ -71,7 +84,7 @@ export const PodRuntimeEvent = Schema.Union([
     type: Schema.Literal("pod.operation-failed"),
     podId: PodRuntimeId,
     occurredAt: IsoDateTime,
-    operation: PodRuntimeOperation,
+    operation: PodInternalOperation,
     message: Schema.String,
   }),
   /**
@@ -140,7 +153,7 @@ interface OperationRule {
  * `create` is never asked for directly; pod creation records it, and Start
  * retries it after it failed.
  */
-export const POD_OPERATION_RULES: Readonly<Record<PodRuntimeOperation, OperationRule>> = {
+export const POD_OPERATION_RULES: Readonly<Record<PodInternalOperation, OperationRule>> = {
   create: {
     from: [],
     settled: [],
@@ -158,6 +171,13 @@ export const POD_OPERATION_RULES: Readonly<Record<PodRuntimeOperation, Operation
     ...POD_RUNTIME_REQUESTS.stop,
     pending: "stopping",
     success: "stopped",
+    failure: "stop_failed",
+  },
+  freeze: {
+    from: ["running"],
+    settled: ["frozen", "stopping"],
+    pending: "stopping",
+    success: "frozen",
     failure: "stop_failed",
   },
   recreate: {
@@ -206,8 +226,8 @@ export const boundedPodMessage = (message: string) =>
  */
 const effectiveOperation = (
   record: PodRuntimeRecord,
-  operation: PodRuntimeOperation,
-): PodRuntimeOperation => {
+  operation: PodInternalOperation,
+): PodInternalOperation => {
   const failed = record.snapshot.lastError?.operation;
   return operation === "start" &&
     record.snapshot.state === "start_failed" &&
@@ -222,8 +242,9 @@ const effectiveOperation = (
  */
 export const planPodRequest = (
   record: PodRuntimeRecord,
-  operation: PodRuntimeRequest,
+  operation: PodRuntimeRequest | "freeze",
   occurredAt: string,
+  options: { readonly parked?: boolean } = {},
 ): Result.Result<
   { readonly type: "none" } | { readonly type: "request"; readonly event: PodRuntimeEvent },
   PodRuntimeError
@@ -242,6 +263,7 @@ export const planPodRequest = (
       podId: record.snapshot.id,
       occurredAt,
       operation: effectiveOperation(record, operation),
+      ...(options.parked === true ? { parked: true } : {}),
     },
   });
 };
@@ -252,7 +274,7 @@ export const planPodRequest = (
  */
 export const planPodCompletion = (
   record: PodRuntimeRecord,
-  operation: PodRuntimeOperation,
+  operation: PodInternalOperation,
   outcome:
     | {
         readonly type: "succeeded";
@@ -454,11 +476,19 @@ const reducePodEvent = (
         },
       };
     }
-    case "pod.operation-requested":
+    case "pod.operation-requested": {
+      // Any other request is someone's own decision, which a wake must not undo.
+      const { parked: _parked, ...unparked } = snapshot;
       return {
         ...record,
-        snapshot: { ...snapshot, state: POD_OPERATION_RULES[event.operation].pending, updatedAt },
+        snapshot: {
+          ...unparked,
+          ...(event.parked === true ? { parked: true as const } : {}),
+          state: POD_OPERATION_RULES[event.operation].pending,
+          updatedAt,
+        },
       };
+    }
     case "pod.operation-succeeded": {
       const state = settledState(event);
       return {
@@ -485,7 +515,11 @@ const reducePodEvent = (
         snapshot: {
           ...snapshot,
           state: POD_OPERATION_RULES[event.operation].failure,
-          lastError: { operation: event.operation, message: event.message, at: updatedAt },
+          lastError: {
+            operation: wireOperation(event.operation),
+            message: event.message,
+            at: updatedAt,
+          },
           startedAt: null,
           updatedAt,
         },

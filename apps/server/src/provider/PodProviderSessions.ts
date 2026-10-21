@@ -1,6 +1,7 @@
 import type {
   AgentRolePresetRunsIn,
   PodRuntimeId,
+  PodRuntimeSnapshot,
   ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
@@ -95,10 +96,20 @@ export const PodProviderPlacement = Context.Reference<{
   readonly podFor: (
     input: ProviderPlacementInput,
   ) => Effect.Effect<PodRuntimeId | undefined, ProviderPodRefusedError>;
+  /**
+   * The pod the session will run in, as it is now, read in order with a park
+   * of it. Undefined on the host, and for a driver the pod refuses, whose
+   * session open says why.
+   */
+  readonly podOf: (input: ProviderPlacementInput) => Effect.Effect<PodRuntimeSnapshot | undefined>;
+  /** Starts the pod unless it runs, and waits until it does. */
+  readonly startPod: (podId: PodRuntimeId) => Effect.Effect<void, ProviderPodRefusedError>;
 }>("t3/provider/PodProviderSessions/PodProviderPlacement", {
   defaultValue: () => ({
     place: () => Effect.succeed(HOST_PLACEMENT),
     podFor: () => Effect.succeed(undefined),
+    podOf: () => Effect.succeed(undefined),
+    startPod: () => Effect.void,
   }),
 });
 

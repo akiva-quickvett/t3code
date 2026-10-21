@@ -1,9 +1,9 @@
 import {
   PodRuntimeError,
   PodRuntimeId,
+  POD_RUNTIME_SHELL_STATES,
   type PodRuntimeOpenShellInput,
   type PodRuntimeOpenShellResult,
-  type PodRuntimeOperation,
   type PodRuntimeOrphan,
   type PodRuntimeRemoveInput,
   type PodRuntimeRequest,
@@ -62,11 +62,13 @@ import {
   type PodOperationContext,
   type PodOperationResult,
   PodStepError,
+  probePodHostname,
 } from "./PodOperations.ts";
 import { resolvePodProviderMounts } from "./PodProviderMounts.ts";
 import {
   boundedPodMessage,
   isPodTransitional,
+  type PodInternalOperation,
   POD_LOOPBACK_ADDRESS,
   POD_OPERATION_RULES,
   type PodObservation,
@@ -107,6 +109,8 @@ export class PodRuntimeService extends Context.Service<
       input: PodRuntimeStatusInput,
     ) => Effect.Effect<PodRuntimeStatus, PodRuntimeError>;
     readonly subscribe: Stream.Stream<PodRuntimeStreamEvent, PodRuntimeError>;
+    /** Every pod not yet removed, from memory: no settings, files or Docker are read. */
+    readonly live: Effect.Effect<ReadonlyArray<PodRuntimeSnapshot>>;
     readonly openShell: (
       input: PodRuntimeOpenShellInput,
     ) => Effect.Effect<PodRuntimeOpenShellResult, PodRuntimeError>;
@@ -132,6 +136,25 @@ export class PodRuntimeService extends Context.Service<
       options?: { readonly forTeardown?: boolean },
     ) => Effect.Effect<PodRuntimeSnapshot, PodRuntimeError>;
     /**
+     * Stops (or, for snoozed threads under a `freeze` setting, freezes) a
+     * running pod whose threads are all parked, marking it so a wake starts it
+     * again. Under the pod's state lock it asks `stillParked`, runs
+     * `beforeStop`, asks again and only then records the stop: a turn reads
+     * its pod under the same lock after its run is recorded as starting, so
+     * a turn that started meanwhile keeps the pod. Answers whether it parked.
+     */
+    readonly park: (
+      podId: PodRuntimeId,
+      options: {
+        /** Every thread on the worktree is settled, not just snoozed: always a stop. */
+        readonly settled: boolean;
+        readonly stillParked: Effect.Effect<boolean>;
+        readonly beforeStop: Effect.Effect<void>;
+      },
+    ) => Effect.Effect<boolean, PodRuntimeError>;
+    /** The pod as it is, read under its state lock so it orders with a park. */
+    readonly current: (podId: PodRuntimeId) => Effect.Effect<PodRuntimeSnapshot | undefined>;
+    /**
      * Marks the worktree at `worktreePath` gone for every removed pod that had
      * it, so a host worktree made later at the same path runs its own teardown.
      */
@@ -146,19 +169,20 @@ const POD_SHELL_TERMINAL_ID = "pod-shell";
 const isLocalDockerHost = (dockerHost: string) =>
   dockerHost.length === 0 || dockerHost.startsWith("unix://");
 const OPERATION_CRASHED = "The pod operation stopped unexpectedly; see the server log.";
+const UNCHANGED_ROUTES = { event: null, failed: null } as const;
 const isPodRuntimeId = Schema.is(PodRuntimeId);
 const EMPTY_POD_CONFIG: T3ProjectFilePod = { services: {} };
-const STARTS_CONTAINERS = new Set<PodRuntimeOperation>([
+const STARTS_CONTAINERS = new Set<PodInternalOperation>([
   "start",
   "recreate",
   "recreateAgentContainer",
 ]);
 /** These create the pod's daemon afresh, so its ports and `.env` are decided again. */
-const BUILDS_FRESH = new Set<PodRuntimeOperation>(["create", "recreate"]);
+const BUILDS_FRESH = new Set<PodInternalOperation>(["create", "recreate"]);
 
 interface QueuedOperation {
   readonly podId: PodRuntimeId;
-  readonly operation: PodRuntimeOperation;
+  readonly operation: PodInternalOperation;
   readonly force: boolean;
 }
 
@@ -458,7 +482,7 @@ const make = Effect.gen(function* () {
    */
   const prepareServices = Effect.fn("PodRuntimeService.prepareServices")(function* (
     queued: PodRuntimeRecord,
-    operation: PodRuntimeOperation,
+    operation: PodInternalOperation,
     config: T3ProjectFilePod,
   ) {
     // Changes to the t3.json services take effect when the daemon is created
@@ -494,7 +518,7 @@ const make = Effect.gen(function* () {
     // Taking the stack down never waits on a t3.json edit: its compose runs
     // with the raw values when they no longer render.
     const env =
-      operation === "stop" || operation === "remove"
+      operation === "stop" || operation === "freeze" || operation === "remove"
         ? yield* rendered.pipe(Effect.orElseSucceed(() => config.env ?? {}))
         : yield* rendered;
     if (BUILDS_FRESH.has(operation))
@@ -561,9 +585,36 @@ const make = Effect.gen(function* () {
           ? hostNetwork.resolvConf.pipe(Effect.map(PodHostPorts.upstreamNameservers))
           : Effect.succeed([]);
 
+  /**
+   * A pod in hostname mode resolves through the proxy's DNS server at the
+   * address it had when the daemon was built; a server that moved since
+   * answers nothing there. A proxy that is down now is not a move: its route
+   * check says so instead.
+   */
+  const checkDnsPin = (
+    record: PodRuntimeRecord,
+    proxy: ReturnType<PodHostnameRouter.PodHostnameRouter["Service"]["resolve"]>,
+  ) =>
+    record.dnsAddress === undefined
+      ? Effect.void
+      : router.prepare(record.dockerHost, proxy).pipe(
+          Effect.flatMap((prepared) =>
+            prepared.type === "ready" && prepared.dnsAddress !== record.dnsAddress
+              ? Effect.fail(
+                  new PodStepError({
+                    step: "Checking the pod's DNS pin",
+                    exitCode: null,
+                    timedOut: false,
+                    daemonMessage: `the hostname proxy's DNS server moved from ${record.dnsAddress} to ${prepared.dnsAddress}. Recreate the pod to resolve through it.`,
+                  }),
+                )
+              : Effect.void,
+          ),
+        );
+
   const operationContext = Effect.fn("PodRuntimeService.operationContext")(function* (
     record: PodRuntimeRecord,
-    operation: PodRuntimeOperation,
+    operation: PodInternalOperation,
   ) {
     const { snapshot } = record;
     const root = yield* projectRoot(snapshot.projectId);
@@ -619,6 +670,8 @@ const make = Effect.gen(function* () {
       worktreePath: snapshot.worktreePath,
       checkHostPorts: podServices.checkHostPorts,
       proxyNetwork: hostnameMode ? proxy.network : null,
+      recorded: { containerIds: snapshot.containerIds, volumeIds: snapshot.volumeIds },
+      checkDnsPin: checkDnsPin(record, proxy),
     } satisfies PodOperationContext;
   });
 
@@ -671,11 +724,35 @@ const make = Effect.gen(function* () {
         error: outcome.failure._tag,
       });
       const routes = yield* syncRoutes(item.podId, null);
-      return yield* complete(item, outcome.failure.message, undefined, routes);
+      return yield* complete(item, outcome.failure.message, undefined, routes.event);
     }
     const routes = yield* syncRoutes(item.podId, item.operation);
-    yield* complete(item, null, outcome.success, routes);
+    // A wake must find the pod as it was, hostnames included; creation keeps
+    // M12's rule that a route problem never fails the pod, only notes it.
+    const unverified =
+      item.operation === "start" ? yield* verifyHostnames(item.podId, routes.failed) : null;
+    if (unverified === null) return yield* complete(item, null, outcome.success, routes.event);
+    yield* Effect.logWarning("pod started without its hostnames", { podId: item.podId });
+    // A failed start serves nothing, so its route goes; its containers keep
+    // running for the shell, and Stop or Recreate is the user's call.
+    const unrouted = yield* syncRoutes(item.podId, null);
+    yield* complete(item, unverified, undefined, unrouted.event ?? routes.event);
   });
+
+  /** Null once a started pod in hostname mode has its route back and its first hostname answers. */
+  const verifyHostnames = (podId: PodRuntimeId, routeFailure: string | null) =>
+    Effect.gen(function* () {
+      const record = yield* store.get(podId);
+      const hostname =
+        record?.hostnames === undefined ? undefined : Object.values(record.hostnames).toSorted()[0];
+      if (record === undefined || hostname === undefined) return null;
+      if (routeFailure !== null) return `Its proxy route is not back: ${routeFailure}.`;
+      const dind = podContainerNames(podId, environmentId).dind;
+      return yield* probePodHostname(driver.forHost(record.dockerHost), dind, hostname).pipe(
+        Effect.as(null),
+        Effect.catch((error) => Effect.succeed(error.message)),
+      );
+    });
 
   /**
    * Puts the pod's proxy route in place when `succeeded` leaves it running in
@@ -683,19 +760,20 @@ const make = Effect.gen(function* () {
    * a link never names a hostname without a route or a route outlives its pod.
    * A pod of ports only has no route and costs nothing here.
    */
-  const syncRoutes = (podId: PodRuntimeId, succeeded: PodRuntimeOperation | null) =>
+  const syncRoutes = (podId: PodRuntimeId, succeeded: PodInternalOperation | null) =>
     Effect.gen(function* () {
       const record = yield* store.get(podId);
-      if (record === undefined) return null;
-      if (succeeded !== null && isStale(record, succeeded)) return null;
+      if (record === undefined) return UNCHANGED_ROUTES;
+      if (succeeded !== null && isStale(record, succeeded)) return UNCHANGED_ROUTES;
       const serves = succeeded !== null && POD_OPERATION_RULES[succeeded].success === "running";
       return yield* routeRecord(record, serves);
     });
 
+  /** The routing event to record, and why the route could not be put in place or taken away. */
   const routeRecord = (record: PodRuntimeRecord, serves: boolean) =>
     Effect.gen(function* () {
       const hostnames = record.hostnames;
-      if (hostnames === undefined && record.routed !== true) return null;
+      if (hostnames === undefined && record.routed !== true) return UNCHANGED_ROUTES;
       const podId = record.snapshot.id;
       const { podRuntime } = yield* settingsFor(null);
       const proxy = router.resolve(podRuntime.hostnameProxy);
@@ -733,15 +811,18 @@ const make = Effect.gen(function* () {
           : desired
             ? `Its proxy route is not in place: ${failed}. Its hostnames will not open until the pod starts again with the route.`
             : `Its proxy route could not be taken away: ${failed}.`;
-      return routesUpdated(
-        record,
-        desired ? failed === null : failed !== null,
-        problem,
-        yield* nowIso,
-      );
+      return {
+        event: routesUpdated(
+          record,
+          desired ? failed === null : failed !== null,
+          problem,
+          yield* nowIso,
+        ),
+        failed,
+      };
     });
 
-  const isStale = (record: PodRuntimeRecord, operation: PodRuntimeOperation) =>
+  const isStale = (record: PodRuntimeRecord, operation: PodInternalOperation) =>
     planPodCompletion(record, operation, { type: "failed", message: "" }, "") === null;
 
   /** Runs after the request's commit; a lost process leaves the transitional state for reconcile. */
@@ -769,6 +850,36 @@ const make = Effect.gen(function* () {
       Effect.asVoid,
     );
 
+  /** Records the request and queues its Docker work; call it under the pod's state lock. */
+  const requestLocked = (
+    record: PodRuntimeRecord,
+    operation: PodRuntimeRequest | "freeze",
+    options: {
+      readonly force?: boolean;
+      readonly allowWhenOff?: boolean;
+      readonly parked?: boolean;
+    } = {},
+  ) =>
+    Effect.gen(function* () {
+      const podId = record.snapshot.id;
+      // Turning pods off stops new containers, never the way out: Stop and
+      // Remove still work, and so does a teardown's start.
+      if (options.allowWhenOff !== true && STARTS_CONTAINERS.has(operation)) {
+        const { podRuntime } = yield* settingsFor(record.snapshot.projectId);
+        if (!podRuntime.enabled) return yield* new PodRuntimeError({ reason: "disabled", podId });
+      }
+      const planned = planPodRequest(record, operation, yield* nowIso, {
+        parked: options.parked === true,
+      });
+      if (Result.isFailure(planned)) return yield* planned.failure;
+      if (planned.success.type === "none") return record.snapshot;
+      const { event } = planned.success;
+      const next = yield* commit(podId, [event]);
+      if (event.type === "pod.operation-requested")
+        yield* enqueue({ podId, operation: event.operation, force: options.force === true });
+      return next?.snapshot ?? record.snapshot;
+    });
+
   const request = (
     podId: PodRuntimeId,
     operation: PodRuntimeRequest,
@@ -776,23 +887,26 @@ const make = Effect.gen(function* () {
   ) =>
     stateLocks.withLock(
       podId,
+      requireRecord(podId).pipe(
+        Effect.flatMap((record) => requestLocked(record, operation, options)),
+      ),
+    );
+
+  const park: PodRuntimeService["Service"]["park"] = (podId, options) =>
+    stateLocks.withLock(
+      podId,
       Effect.gen(function* () {
-        const force = options.force === true;
         const record = yield* requireRecord(podId);
-        // Turning pods off stops new containers, never the way out: Stop and
-        // Remove still work, and so does a teardown's start.
-        if (options.allowWhenOff !== true && STARTS_CONTAINERS.has(operation)) {
-          const { podRuntime } = yield* settingsFor(record.snapshot.projectId);
-          if (!podRuntime.enabled) return yield* new PodRuntimeError({ reason: "disabled", podId });
-        }
-        const planned = planPodRequest(record, operation, yield* nowIso);
-        if (Result.isFailure(planned)) return yield* planned.failure;
-        if (planned.success.type === "none") return record.snapshot;
-        const { event } = planned.success;
-        const next = yield* commit(podId, [event]);
-        if (event.type === "pod.operation-requested")
-          yield* enqueue({ podId, operation: event.operation, force });
-        return next?.snapshot ?? record.snapshot;
+        const { state } = record.snapshot;
+        const { podRuntime } = yield* settingsFor(record.snapshot.projectId);
+        const operation = options.settled || podRuntime.snoozeAction === "stop" ? "stop" : "freeze";
+        // Only a pod that runs, or one frozen whose threads now all settled, has memory to give back.
+        if (state !== "running" && !(state === "frozen" && operation === "stop")) return false;
+        if (!(yield* options.stillParked)) return false;
+        yield* options.beforeStop;
+        if (!(yield* options.stillParked)) return false;
+        const next = yield* requestLocked(record, operation, { parked: true });
+        return next.parked === true;
       }),
     );
 
@@ -985,7 +1099,7 @@ const make = Effect.gen(function* () {
           Effect.gen(function* () {
             const current = yield* store.get(podId);
             if (current === undefined || !owned.answered.has(current.dockerHost)) return;
-            const event = yield* routeRecord(current, current.snapshot.state === "running");
+            const { event } = yield* routeRecord(current, current.snapshot.state === "running");
             if (event !== null)
               yield* stateLocks.withLock(podId, commit(podId, [event]).pipe(Effect.ignore));
           }),
@@ -1159,8 +1273,11 @@ const make = Effect.gen(function* () {
 
   const ensureRunning: PodRuntimeService["Service"]["ensureRunning"] = (podId, options) =>
     Effect.gen(function* () {
-      const current = yield* requireRecord(podId);
-      if (current.snapshot.state !== "running" && !isPodTransitional(current.snapshot.state))
+      yield* requireRecord(podId);
+      // A stop still in flight, such as one its threads' snooze asked for,
+      // finishes first; then the pod starts again.
+      const current = yield* awaitSettled(podId);
+      if (current.state !== "running" && current.state !== "removed")
         yield* request(podId, "start", { allowWhenOff: options?.forTeardown === true });
       const settled = yield* awaitSettled(podId);
       if (settled.state !== "running")
@@ -1176,7 +1293,7 @@ const make = Effect.gen(function* () {
   const openShell: PodRuntimeService["Service"]["openShell"] = (input) =>
     Effect.gen(function* () {
       const record = yield* requireRecord(input.podId);
-      if (record.snapshot.state !== "running")
+      if (!POD_RUNTIME_SHELL_STATES.includes(record.snapshot.state))
         return yield* new PodRuntimeError({
           reason: "invalid-state",
           podId: input.podId,
@@ -1213,11 +1330,15 @@ const make = Effect.gen(function* () {
     remove,
     status,
     subscribe,
+    live: liveSnapshots,
     openShell,
     forPath: (target, options) =>
       store.findByPath(target, options).pipe(Effect.map((record) => record?.snapshot)),
     awaitSettled,
     ensureRunning,
+    park,
+    current: (podId) =>
+      stateLocks.withLock(podId, store.get(podId).pipe(Effect.map((record) => record?.snapshot))),
     releaseWorktree: (worktreePath) =>
       Effect.gen(function* () {
         const target = path.resolve(worktreePath);

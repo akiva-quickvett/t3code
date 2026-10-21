@@ -15,9 +15,11 @@ import {
   type ProviderInstanceId,
   RunId,
   ThreadId,
+  type PodRuntimeId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
+import * as TxRef from "effect/TxRef";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -59,7 +61,7 @@ import {
   findAgentRolePreset,
   threadRolePresetRunsIn,
 } from "../agentRoles/AgentRolePresetService.ts";
-import { PodProviderPlacement } from "../provider/PodProviderSessions.ts";
+import { PodProviderPlacement, ProviderPodRefusedError } from "../provider/PodProviderSessions.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import {
   isRestartNoteContinuation,
@@ -96,6 +98,13 @@ export interface ProviderTurnStartServiceV2Shape {
     readonly runId: RunId;
     readonly willRetry?: boolean;
   }) => Effect.Effect<void, ProviderTurnStartError>;
+  /** Resolves once every turn waiting for its pod to start has started or failed. */
+  readonly drainPodHolds: Effect.Effect<void>;
+}
+
+/** A turn that waited for its pod comes back with what ended the wait, if it failed. */
+interface PodHoldOutcome {
+  readonly failure: { readonly title: string; readonly error: Error } | null;
 }
 
 export class ProviderTurnStartServiceV2 extends Context.Service<
@@ -170,6 +179,16 @@ export const layer: Layer.Layer<
      * is before its pod exists, so the run start moves the thread to the
      * session of the place it runs in now: its pod's, or the host's.
      */
+    const threadRunsIn = (thread: OrchestrationV2AppThread) =>
+      serverSettings.getSettings.pipe(
+        Effect.map((settings) => threadRolePresetRunsIn(settings, thread)),
+        Effect.catch((cause) =>
+          Effect.logWarning("Could not read the thread's role preset.", {
+            threadId: thread.id,
+            cause,
+          }).pipe(Effect.as(undefined)),
+        ),
+      );
     const placeSharedSession = Effect.fn("ProviderTurnStartService.placeSharedSession")(
       function* (input: {
         readonly thread: OrchestrationV2AppThread;
@@ -182,15 +201,7 @@ export const layer: Layer.Layer<
         const stored = input.storedSessionId;
         if (stored !== shared && !stored.startsWith(`${shared}:`)) return stored;
         const { cwd } = input;
-        const runsIn = yield* serverSettings.getSettings.pipe(
-          Effect.map((settings) => threadRolePresetRunsIn(settings, input.thread)),
-          Effect.catch((cause) =>
-            Effect.logWarning("Could not read the thread's role preset.", {
-              threadId: input.thread.id,
-              cause,
-            }).pipe(Effect.as(undefined)),
-          ),
-        );
+        const runsIn = yield* threadRunsIn(input.thread);
         const podId =
           cwd === null
             ? undefined
@@ -327,6 +338,7 @@ export const layer: Layer.Layer<
       readonly threadId: ThreadId;
       readonly runId: RunId;
       readonly willRetry?: boolean;
+      readonly podHold?: PodHoldOutcome;
     }) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
@@ -622,35 +634,6 @@ export const layer: Layer.Layer<
         thread: projection.thread,
         modelSelection: run.modelSelection,
       });
-      const providerSessionId = yield* placeSharedSession({
-        thread: projection.thread,
-        providerThread,
-        storedSessionId: providerThread.providerSessionId,
-        cwd: resolvedRuntimePolicy.cwd,
-      });
-      const existingSessionProjection = projection.providerSessions.find(
-        (candidate) => candidate.id === providerSessionId,
-      );
-      const sessionResult = yield* Effect.result(
-        providerSessions.open({
-          threadId: projection.thread.id,
-          providerSessionId,
-          modelSelection: run.modelSelection,
-          runtimePolicy: resolvedRuntimePolicy,
-          ...(existingSessionProjection === undefined
-            ? {}
-            : { resumeFromSession: existingSessionProjection }),
-          ...(providerThread.nativeThreadRef?.nativeId == null
-            ? {}
-            : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
-          ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
-            ? {}
-            : {
-                initialProviderItemIdentityVersion:
-                  providerThread.nativeMetadata.itemIdentityVersion,
-              }),
-        }),
-      );
       const settleStartFailure = (failed: {
         readonly signal: string;
         readonly title: string;
@@ -680,6 +663,72 @@ export const layer: Layer.Layer<
             },
           });
         });
+      if (input.podHold?.failure != null) {
+        yield* settleStartFailure({ signal: "pod-start-failure", ...input.podHold.failure });
+        return;
+      }
+      // The wake hold: a pod its threads' snooze stopped starts before a
+      // session opens in it. A failed pod is the banner's to retry.
+      const pod =
+        resolvedRuntimePolicy.cwd === null
+          ? undefined
+          : yield* podPlacement.podOf({
+              cwd: resolvedRuntimePolicy.cwd,
+              driver: providerThread.driver,
+              runsIn: yield* threadRunsIn(projection.thread),
+            });
+      if (pod !== undefined && pod.state !== "running") {
+        const failed = pod.state === "start_failed" || pod.state === "stop_failed";
+        if (!failed && input.podHold === undefined) {
+          yield* holdForPod({ threadId: projection.thread.id, runId, podId: pod.id });
+          return;
+        }
+        yield* settleStartFailure({
+          signal: "pod-start-failure",
+          title: "The pod did not start",
+          error: new ProviderPodRefusedError({
+            reason: failed
+              ? `The pod failed to ${pod.state === "start_failed" ? "start" : "stop"}${pod.lastError === null ? "" : `: ${pod.lastError.message}`} Retry it from its banner.`
+              : `The pod is ${pod.state}.`,
+          }),
+        });
+        return;
+      }
+      if (pod?.startedAt != null)
+        yield* providerSessions.releasePod({
+          podId: pod.id,
+          detail: "The pod stopped and started again since this session opened.",
+          openedBefore: Date.parse(pod.startedAt),
+        });
+      const providerSessionId = yield* placeSharedSession({
+        thread: projection.thread,
+        providerThread,
+        storedSessionId: providerThread.providerSessionId,
+        cwd: resolvedRuntimePolicy.cwd,
+      });
+      const existingSessionProjection = projection.providerSessions.find(
+        (candidate) => candidate.id === providerSessionId,
+      );
+      const sessionResult = yield* Effect.result(
+        providerSessions.open({
+          threadId: projection.thread.id,
+          providerSessionId,
+          modelSelection: run.modelSelection,
+          runtimePolicy: resolvedRuntimePolicy,
+          ...(existingSessionProjection === undefined
+            ? {}
+            : { resumeFromSession: existingSessionProjection }),
+          ...(providerThread.nativeThreadRef?.nativeId == null
+            ? {}
+            : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
+          ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
+            ? {}
+            : {
+                initialProviderItemIdentityVersion:
+                  providerThread.nativeMetadata.itemIdentityVersion,
+              }),
+        }),
+      );
       if (sessionResult._tag === "Failure") {
         if (input.willRetry === true) return yield* sessionResult.failure;
         yield* settleStartFailure({
@@ -1468,23 +1517,109 @@ export const layer: Layer.Layer<
       });
     });
 
-    return ProviderTurnStartServiceV2.of({
-      start: (input) =>
-        Effect.gen(function* () {
-          // Storage cleanup removes worktrees under the same lease. Only startup
-          // holds it; the provider turn runs after it is released.
-          const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
-          const providerTurn = yield* thread.worktreePath === null
-            ? start(input)
-            : withWorkspaceLease(path.resolve(thread.worktreePath), start(input));
-          if (providerTurn !== undefined) yield* providerTurn;
-        }).pipe(
-          Effect.mapError((cause) =>
-            isProviderTurnStartError(cause)
-              ? cause
-              : new ProviderTurnStartError({ runId: input.runId, cause }),
-          ),
+    const startTurn = (input: Parameters<typeof start>[0]) =>
+      Effect.gen(function* () {
+        // Storage cleanup removes worktrees under the same lease. Only startup
+        // holds it; the provider turn runs after it is released.
+        const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
+        const providerTurn = yield* thread.worktreePath === null
+          ? start(input)
+          : withWorkspaceLease(path.resolve(thread.worktreePath), start(input));
+        if (providerTurn !== undefined) yield* providerTurn;
+      }).pipe(
+        Effect.mapError((cause) =>
+          isProviderTurnStartError(cause)
+            ? cause
+            : new ProviderTurnStartError({ runId: input.runId, cause }),
         ),
+      );
+
+    // A pod start takes up to minutes, longer than an effect's lease and far
+    // longer than a worker slot should be held, so the turn waits outside the
+    // effect worker and starts once the pod runs. Its run stays starting
+    // meanwhile, which keeps the pod from parking; a server that stops mid-wait
+    // recovers it like any turn cut off while starting.
+    const holdScope = yield* Effect.scope;
+    const heldRuns = new Set<RunId>();
+    const outstandingHolds = yield* TxRef.make(0);
+    const holdForPod = (hold: {
+      readonly threadId: ThreadId;
+      readonly runId: RunId;
+      readonly podId: PodRuntimeId;
+    }): Effect.Effect<void> =>
+      Effect.suspend(() => {
+        if (heldRuns.has(hold.runId)) return Effect.void;
+        heldRuns.add(hold.runId);
+        return TxRef.update(outstandingHolds, (count) => count + 1).pipe(
+          Effect.tx,
+          Effect.andThen(
+            podPlacement.startPod(hold.podId).pipe(
+              Effect.as<PodHoldOutcome>({ failure: null }),
+              Effect.catchTags({
+                ProviderPodRefusedError: (error) =>
+                  Effect.succeed({ failure: { title: "The pod did not start", error } }),
+              }),
+              Effect.flatMap((podHold) =>
+                startTurn({ threadId: hold.threadId, runId: hold.runId, podHold }),
+              ),
+              // No effect retries a held turn, so its run is failed here
+              // rather than left starting, which would keep the pod up and
+              // the queue still. A failure to record even that is left to
+              // startup recovery.
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.void
+                  : Effect.logWarning("a turn waiting for its pod could not start", {
+                      threadId: hold.threadId,
+                      runId: hold.runId,
+                      cause,
+                    }).pipe(
+                      Effect.andThen(
+                        startTurn({
+                          threadId: hold.threadId,
+                          runId: hold.runId,
+                          podHold: {
+                            failure: {
+                              title: "The turn could not start",
+                              error: new ProviderTurnStartError({
+                                runId: hold.runId,
+                                cause: Cause.squash(cause),
+                              }),
+                            },
+                          },
+                        }),
+                      ),
+                      Effect.catchCause((recordCause) =>
+                        Cause.hasInterruptsOnly(recordCause)
+                          ? Effect.void
+                          : Effect.logError("a held turn's failure could not be recorded", {
+                              threadId: hold.threadId,
+                              runId: hold.runId,
+                              cause: recordCause,
+                            }),
+                      ),
+                    ),
+              ),
+              Effect.ensuring(
+                Effect.sync(() => heldRuns.delete(hold.runId)).pipe(
+                  Effect.andThen(
+                    TxRef.update(outstandingHolds, (count) => count - 1).pipe(Effect.tx),
+                  ),
+                ),
+              ),
+              Effect.forkIn(holdScope),
+            ),
+          ),
+          Effect.asVoid,
+        );
+      });
+
+    return ProviderTurnStartServiceV2.of({
+      start: startTurn,
+      drainPodHolds: TxRef.get(outstandingHolds).pipe(
+        Effect.flatMap((count) => (count > 0 ? Effect.txRetry : Effect.void)),
+        Effect.tx,
+      ),
     });
   }),
 );

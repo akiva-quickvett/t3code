@@ -60,6 +60,7 @@ import {
   type ScheduledTaskUpsertInput,
   type ServerProvider,
   ThreadId,
+  type PodRuntimeSnapshot,
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
@@ -101,6 +102,7 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { podRefusalReason } from "../provider/PodProviderSessions.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import {
   buildAgentRolePresetList,
   findAgentRolePresetIn,
@@ -846,6 +848,7 @@ function threadPullRequests(
 function listItemFromShell(
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
+  pod: PodRuntimeSnapshot | undefined,
 ): OrchestratorMcpThreadListItem {
   return {
     threadId: shell.id,
@@ -868,6 +871,9 @@ function listItemFromShell(
       ? {}
       : { supervisorThreadId: shell.lineage.supervisorThreadId }),
     ...(shell.rolePreset == null ? {} : { rolePreset: shell.rolePreset }),
+    ...(pod === undefined
+      ? {}
+      : { pod: { podId: pod.id, state: pod.state, parked: pod.parked === true } }),
     itemCount: shell.visibleItemCount,
     createdAt: DateTime.formatIso(shell.createdAt),
     updatedAt: DateTime.formatIso(shell.updatedAt),
@@ -1058,6 +1064,7 @@ const make = Effect.gen(function* () {
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const pods = yield* PodRuntimeService.PodRuntimeService;
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -2940,7 +2947,12 @@ const make = Effect.gen(function* () {
         return {
           projectId,
           currentThreadId: parent?.thread.id ?? null,
-          threads: page.map((shell) => listItemFromShell(shell, nowMs)),
+          threads: yield* Effect.forEach(page, (shell) =>
+            (shell.worktreePath === null
+              ? Effect.succeed(undefined)
+              : pods.forPath(shell.worktreePath)
+            ).pipe(Effect.map((pod) => listItemFromShell(shell, nowMs, pod))),
+          ),
           nextCursor,
           total: filtered.length,
         } satisfies OrchestratorMcpThreadListResult;
@@ -3171,4 +3183,5 @@ export const layer: Layer.Layer<
   | ProjectService.ProjectService
   | SecretRequests.SecretRequests
   | ServerSettings.ServerSettingsService
+  | PodRuntimeService.PodRuntimeService
 > = Layer.effect(OrchestratorMcpService, make);

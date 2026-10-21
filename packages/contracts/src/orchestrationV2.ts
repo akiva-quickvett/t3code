@@ -361,6 +361,21 @@ export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
 );
 export type OrchestrationV2LimitRecoveryUpdate = typeof OrchestrationV2LimitRecoveryUpdate.Type;
 
+/**
+ * `tree` covers the thread and every thread under it in the agent tree: its
+ * delegated subagents and the threads it supervises, transitively.
+ */
+export const ThreadSnoozeScope = Schema.Literals(["thread", "tree"]);
+export type ThreadSnoozeScope = typeof ThreadSnoozeScope.Type;
+
+/** A snooze asked for while work was active; it applies once that work ends. */
+export const OrchestrationV2SnoozeWhenIdle = Schema.Struct({
+  snoozedUntil: IsoDateTime,
+  requestedAt: IsoDateTime,
+  scope: ThreadSnoozeScope,
+});
+export type OrchestrationV2SnoozeWhenIdle = typeof OrchestrationV2SnoozeWhenIdle.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -402,6 +417,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  snoozeWhenIdle: Schema.optional(Schema.NullOr(OrchestrationV2SnoozeWhenIdle)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -1868,6 +1884,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  snoozeWhenIdle: Schema.optional(Schema.NullOr(OrchestrationV2SnoozeWhenIdle)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2637,12 +2654,18 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     snoozedUntil: IsoDateTime,
+    /** Absent means `thread`, as servers and clients from before snooze trees send it. */
+    scope: Schema.optional(ThreadSnoozeScope),
+    /** Waits for active runs, queued work and pending requests to end instead of refusing. */
+    whenIdle: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.unsnooze"),
     commandId: CommandId,
     threadId: ThreadId,
     reason: Schema.Literal("user"),
+    /** Absent means `thread`. */
+    scope: Schema.optional(ThreadSnoozeScope),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.auto-settle.set"),

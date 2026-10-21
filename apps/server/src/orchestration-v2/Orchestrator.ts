@@ -31,6 +31,7 @@ import {
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
   type OrchestrationV2AppThread,
+  type OrchestrationV2SnoozeWhenIdle,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
   type OrchestrationV2ContextTransfer,
@@ -390,6 +391,14 @@ export interface OrchestratorV2Shape {
 export class OrchestratorV2 extends Context.Service<OrchestratorV2, OrchestratorV2Shape>()(
   "t3/orchestration-v2/Orchestrator/OrchestratorV2",
 ) {}
+
+const ACTIVE_OR_QUEUED_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
+  "queued",
+  "preparing",
+  "starting",
+  "running",
+  "waiting",
+]);
 
 /** Run ordinals can skip values: a queued run moves past newer runs when it starts. */
 function nextRunOrdinal(projection: Pick<OrchestrationV2ThreadProjection, "runs">): number {
@@ -2860,6 +2869,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
     }
     let snoozedUntil: DateTime.Utc | null = null;
+    let snoozeWhenIdle: OrchestrationV2SnoozeWhenIdle | null = null;
     if (command.type === "thread.snooze") {
       const projection = yield* loadProjectionForCommand(command, ["runs", "runtimeRequests"], {
         turnItemTypes: [],
@@ -2875,36 +2885,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Thread ${command.threadId} snooze wake time ${command.snoozedUntil} is not in the future.`,
         });
       }
-      if (projection.runtimeRequests.some((request) => request.status === "pending")) {
+      const busy =
+        projection.runtimeRequests.some((request) => request.status === "pending") ||
+        projection.runs.some((run) => ACTIVE_OR_QUEUED_RUN_STATUSES.has(run.status));
+      // A tree snooze reaches a single thread's lock only once dispatchSnoozeTree
+      // found the tree busy and the caller asked to wait for it.
+      if (command.scope === "tree" || (command.whenIdle === true && busy)) {
+        snoozeWhenIdle = {
+          snoozedUntil: DateTime.formatIso(parsedSnoozedUntil.value),
+          requestedAt: DateTime.formatIso(now),
+          scope: command.scope ?? "thread",
+        };
+      } else if (projection.runtimeRequests.some((request) => request.status === "pending")) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: `Thread ${command.threadId} has a pending approval or user-input request and cannot be snoozed.`,
         });
       }
-      const queuedRuns = projection.runs.filter((run) => run.status === "queued");
-      const queuedMessages =
-        queuedRuns.length === 0
-          ? []
-          : (yield* loadProjectionForCommand(command, ["messages"], {
-              messageIds: queuedRuns.map((run) => run.userMessageId),
-            })).messages;
-      const automaticMessageIds = new Set(
-        queuedMessages
-          .filter(
-            (message) =>
-              message.notification !== undefined || message.delegatedCompletion !== undefined,
-          )
-          .map((message) => message.id),
-      );
-      if (queuedRuns.some((run) => !automaticMessageIds.has(run.userMessageId))) {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: `Thread ${command.threadId} has a queued run and cannot be snoozed.`,
-        });
+      if (snoozeWhenIdle === null) {
+        const queuedRuns = projection.runs.filter((run) => run.status === "queued");
+        const queuedMessages =
+          queuedRuns.length === 0
+            ? []
+            : (yield* loadProjectionForCommand(command, ["messages"], {
+                messageIds: queuedRuns.map((run) => run.userMessageId),
+              })).messages;
+        const automaticMessageIds = new Set(
+          queuedMessages
+            .filter(
+              (message) =>
+                message.notification !== undefined || message.delegatedCompletion !== undefined,
+            )
+            .map((message) => message.id),
+        );
+        if (queuedRuns.some((run) => !automaticMessageIds.has(run.userMessageId))) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Thread ${command.threadId} has a queued run and cannot be snoozed.`,
+          });
+        }
+        snoozedUntil = parsedSnoozedUntil.value;
       }
-      snoozedUntil = parsedSnoozedUntil.value;
     }
     let markUnreadVisitedAt: DateTime.Utc | null = null;
     if (command.type === "thread.mark-unread") {
@@ -2938,6 +2961,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return {
             ...thread,
             settledOverride: "settled",
+            snoozeWhenIdle: null,
             settledAt: alreadySettled ? thread.settledAt : (command.settledAt ?? now),
             pullRequests: thread.pullRequests?.map((link) => withPullRequestWatch(link, undefined)),
             unsettledAt: null,
@@ -2958,12 +2982,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           };
         }
         case "thread.snooze": {
+          if (snoozeWhenIdle !== null) return { ...thread, snoozeWhenIdle, updatedAt: now };
           // Always restamp, even for the same wake time: a re-snooze after a
           // failure or completion woke the thread means "I saw it, not now".
           // Retries are deduplicated by commandId before reaching here.
           return {
             ...thread,
             snoozedUntil,
+            snoozeWhenIdle: null,
             limitRecovery: thread.limitRecovery ? { ...thread.limitRecovery, snooze: false } : null,
             snoozedAt: now,
             updatedAt: now,
@@ -2975,8 +3001,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...thread,
             snoozedUntil: null,
             snoozedAt: null,
+            snoozeWhenIdle: null,
             lastSnoozeWakeAt: alreadyAwake ? thread.lastSnoozeWakeAt : now,
-            updatedAt: alreadyAwake ? thread.updatedAt : now,
+            updatedAt: alreadyAwake && thread.snoozeWhenIdle == null ? thread.updatedAt : now,
           };
         }
         case "thread.auto-settle.set": {
@@ -3001,6 +3028,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             settledAt: thread.settledOverride === "settled" ? null : thread.settledAt,
             snoozedUntil: null,
             snoozedAt: null,
+            snoozeWhenIdle: null,
             lastSnoozeWakeAt: thread.snoozedUntil == null ? thread.lastSnoozeWakeAt : now,
             updatedAt: alreadyPinned && !promotes ? thread.updatedAt : now,
           };
@@ -3377,7 +3405,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         case "thread.unsettle":
           return "thread.unsettled" as const;
         case "thread.snooze":
-          return "thread.snoozed" as const;
+          return snoozeWhenIdle === null
+            ? ("thread.snoozed" as const)
+            : ("thread.metadata-updated" as const);
         case "thread.unsnooze":
           return "thread.unsnoozed" as const;
         case "thread.auto-settle.set":
@@ -4798,12 +4828,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
         projection = yield* getProjectionWithPendingEvents(command.threadId, events);
       }
-      if (projection.thread.snoozedUntil != null) {
+      // A deferred snooze waits for automatic deliveries, such as a child's
+      // result, to be handled; new work sent to the thread calls it off.
+      const cancelsSnoozeWhenIdle =
+        projection.thread.snoozeWhenIdle != null &&
+        command.notification === undefined &&
+        command.delegatedCompletion === undefined &&
+        command.restartContinuationOfRunId === undefined;
+      if (projection.thread.snoozedUntil != null || cancelsSnoozeWhenIdle) {
         const now = yield* DateTime.now;
         const thread: OrchestrationV2AppThread = {
           ...projection.thread,
           snoozedUntil: null,
           snoozedAt: null,
+          ...(cancelsSnoozeWhenIdle ? { snoozeWhenIdle: null } : {}),
           updatedAt: now,
         };
         yield* emit(
@@ -11678,6 +11716,68 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : threadDispatch.withLock(taskParent.parentThreadId, dispatch);
     });
 
+  /**
+   * A tree snooze or wake is one command for the caller and one per thread for
+   * the event log, each under its own thread's lock. The root goes first under
+   * the command's own id: if it is refused nothing changed, and once it is in,
+   * waking it undoes the rest. Descendants follow under ids derived from the
+   * command's, so a retry with the same id finishes what a failure part way
+   * left; a descendant that refused keeps refusing that id, and clients send
+   * a new id per click.
+   */
+  const dispatchSnoozeTree = Effect.fn("orchestrationV2.dispatch.snoozeTree")(function* (
+    command: Extract<
+      OrchestrationV2ServerCommand,
+      { readonly type: "thread.snooze" | "thread.unsnooze" }
+    >,
+  ) {
+    const tree = yield* projectionStore
+      .getThreadParking({ treeOf: command.threadId })
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        ),
+      );
+    const descendants = tree.filter(
+      (thread) => thread.id !== command.threadId && !thread.archived && !thread.settled,
+    );
+    if (command.type === "thread.snooze") {
+      // The root keeps its own thread's rule, so an agent may snooze itself
+      // mid-turn; only work under it makes the tree wait.
+      const working = descendants.filter((thread) => thread.busy);
+      const rootWorking = tree.some((thread) => thread.id === command.threadId && thread.busy);
+      if (command.whenIdle === true && (working.length > 0 || rootWorking))
+        // Recorded on the root alone; the whole tree snoozes when it is idle.
+        return yield* dispatchWithReceipt({ ...command, scope: "tree" });
+      if (working.length > 0)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `${working.length === 1 ? "A thread" : `${working.length} threads`} under this one ${working.length === 1 ? "is" : "are"} still working. Choose Snooze when idle to snooze the tree once ${working.length === 1 ? "it finishes" : "they finish"}.`,
+        });
+    }
+    const result = yield* dispatchWithReceipt({ ...command, scope: "thread" });
+    for (const thread of descendants)
+      if (
+        command.type === "thread.snooze" ||
+        thread.snoozedUntil !== null ||
+        thread.snoozeWhenIdle !== null
+      )
+        yield* dispatchWithReceipt({
+          ...command,
+          scope: "thread",
+          commandId: CommandId.make(`${command.commandId}:tree:${thread.id}`),
+          threadId: thread.id,
+        });
+    return result;
+  });
+
+  const dispatchCommand = (command: OrchestrationV2ServerCommand) =>
+    (command.type === "thread.snooze" || command.type === "thread.unsnooze") &&
+    command.scope === "tree"
+      ? dispatchSnoozeTree(command)
+      : dispatchWithReceipt(command);
+
   const handleRunUpdate = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
       if (stored.event.type !== "run.updated") return;
@@ -11906,7 +12006,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       awaitsRestartContinuation(run).pipe(Effect.orElseSucceed(() => false)),
     awaitRestartContinuation: (run) =>
       effectOutbox.awaitSettled(`effect:restart-continuation:${run.id}`).pipe(Effect.ignore),
-    dispatch: dispatchWithReceipt,
+    dispatch: dispatchCommand,
     searchThreadStream: (input) =>
       projectionStore
         .searchThreadStream(input)

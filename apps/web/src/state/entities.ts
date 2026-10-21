@@ -323,6 +323,14 @@ export function readEnvironmentSupportsSnooze(environmentId: EnvironmentId): boo
   );
 }
 
+/** Snooze and wake cover the agent tree, and can wait until its work ends. */
+export function readEnvironmentSupportsSnoozeTree(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadSnoozeTree === true
+  );
+}
+
 export function readEnvironmentSupportsVisitedTracking(environmentId: EnvironmentId): boolean {
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities

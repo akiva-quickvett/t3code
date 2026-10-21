@@ -1,6 +1,7 @@
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
+import { PodFailureBanner } from "./pods/PodFailureBanner";
 import {
   isThreadWokeUnseen,
   mergeDirectPreviewAnnotation,
@@ -7965,6 +7966,12 @@ export default function ChatView(props: ChatViewProps) {
                   setThreadErrorBannerDismissTick((tick) => tick + 1);
                 }}
               />
+              {isServerThread && activeThreadRef ? (
+                <PodFailureBanner
+                  environmentId={activeThreadRef.environmentId}
+                  threadId={activeThreadRef.threadId}
+                />
+              ) : null}
             </div>
             <div className="relative flex min-h-0 flex-1 flex-col bg-background">
               <MessagesTimeline
