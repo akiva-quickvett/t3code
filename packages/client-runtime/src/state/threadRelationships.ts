@@ -5,7 +5,7 @@ import type {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-export type ThreadRelationshipKind = "parent" | "fork" | "subagent" | "transfer";
+export type ThreadRelationshipKind = "parent" | "fork" | "subagent" | "supervised" | "transfer";
 
 export interface ThreadRelationshipNode {
   readonly threadId: ThreadId;
@@ -80,6 +80,16 @@ export function deriveThreadRelationshipGraph(input: {
   };
 
   for (const thread of threads) {
+    const status = thread.activityRunStatus ?? thread.status;
+    const supervisorThreadId = thread.lineage.supervisorThreadId;
+    if (supervisorThreadId !== undefined) {
+      addEdge({
+        sourceThreadId: supervisorThreadId,
+        targetThreadId: thread.id,
+        kind: "supervised",
+        status,
+      });
+    }
     const parentThreadId =
       thread.forkedFrom?.type === "run"
         ? thread.forkedFrom.threadId
@@ -89,14 +99,15 @@ export function deriveThreadRelationshipGraph(input: {
       sourceThreadId: parentThreadId,
       targetThreadId: thread.id,
       kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "fork",
-      status: thread.activityRunStatus ?? thread.status,
+      status,
     });
   }
 
   if (input.projection !== null) {
     const ownerThreadId = input.projection.thread.id;
     for (const subagent of input.projection.subagents) {
-      if (subagent.childThreadId === null) continue;
+      // A supervised thread's tasks only track its runs; its lineage edge already names it.
+      if (subagent.childThreadId === null || subagent.supervised) continue;
       const child = threadsById.get(subagent.childThreadId);
       addEdge({
         sourceThreadId: ownerThreadId,

@@ -270,6 +270,7 @@ export function layerWithRegistry<Error>(
     readonly runContinuationWorker?: boolean;
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
+    readonly supervisedWakes?: boolean;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -302,6 +303,7 @@ export function layerWithRegistry<Error>(
     ...(options.continueThreadsAfterServerUpdate === undefined
       ? {}
       : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
+    ...(options.supervisedWakes === undefined ? {} : { supervisedWakes: options.supervisedWakes }),
   }).pipe(Layer.orDie);
   const layerStores = Layer.mergeAll(
     EventStore.layer,

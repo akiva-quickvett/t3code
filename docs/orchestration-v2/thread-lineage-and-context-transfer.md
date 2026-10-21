@@ -71,6 +71,12 @@ Cross-provider T3 subagents:
 
 The shared model should make user forks and agent-created subthreads feel like the same graph shape with different `createdBy` and lifecycle policy.
 
+### Supervised Threads
+
+A supervised thread is a top-level thread an agent launched with `supervise: true`. Its lineage names the launcher in `supervisorThreadId` only so the launcher can be woken: each run the launcher starts there reports back through the same `subagent_result` transfer and completion delivery as a delegated task. It is not a subagent. It keeps its own sidebar row, conversation, pull requests, and children, and it is the root of its own tree (no parent, `rootThreadId` is itself). See [Supervised Threads](./orchestrator-mcp-server.md#supervised-threads).
+
+The supervisor is a separate optional key rather than a `relationshipToParent` value because clients built before it decode that field strictly and would reject the whole thread list; they drop the unknown key and see a plain top-level thread. Anything that walks lineage for a cascade (stop, snooze, the agent tree) has to read `supervisorThreadId` as well as `parentThreadId`.
+
 ## Core Concepts
 
 ### Thread Relationship
@@ -230,6 +236,7 @@ The same paginated-history constraint applies to direct checkpoint rollback: `th
 type AppThreadLineage = {
   parentThreadId: ThreadId | null;
   relationshipToParent: "fork" | "subagent" | null;
+  supervisorThreadId?: ThreadId;
   rootThreadId: ThreadId;
 };
 ```
