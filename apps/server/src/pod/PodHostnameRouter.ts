@@ -11,9 +11,6 @@ import * as Semaphore from "effect/Semaphore";
 import { ServerConfig } from "../config.ts";
 import * as ContainerDriver from "./ContainerDriver.ts";
 
-/** The proxy settings with `~/` resolved to the home directory. */
-export type HostnameProxy = PodHostnameProxySettings;
-
 export interface PodRoute {
   readonly hostname: string;
   /** `<container>:<port>` on the proxy's network. */
@@ -32,6 +29,8 @@ const ROUTE_SUFFIX = ".caddy";
 const CANDIDATE_SUFFIX = ".caddy.next";
 const CHECK_SUFFIX = ".validate";
 const PROXY_COMMAND_TIMEOUT_MS = 60_000;
+/** Caddy's refusal of an `import` whose file is gone. */
+const IMPORT_VANISHED = /File to import not found|no such file/i;
 
 /**
  * Every route file the proxy loads, the candidate in place of the pod's own
@@ -69,31 +68,36 @@ export type PodHostnamePreparation =
 export class PodHostnameRouter extends Context.Service<
   PodHostnameRouter,
   {
-    readonly resolve: (settings: PodHostnameProxySettings) => HostnameProxy;
+    /** The settings with `~/` in their host paths resolved to the home directory. */
+    readonly resolve: (settings: PodHostnameProxySettings) => PodHostnameProxySettings;
     /** For a pod about to be built: the proxy DNS server's address, or why hostnames cannot work. */
     readonly prepare: (
       dockerHost: string,
-      proxy: HostnameProxy,
+      proxy: PodHostnameProxySettings,
     ) => Effect.Effect<PodHostnamePreparation>;
     /** Puts `<stem>.caddy` in place; null once the proxy serves it. */
     readonly install: (input: {
       readonly dockerHost: string;
-      readonly proxy: HostnameProxy;
+      readonly proxy: PodHostnameProxySettings;
       readonly stem: string;
+      /** The container the routes reach, which must be on the proxy's network. */
+      readonly upstreamContainer: string;
       readonly routes: ReadonlyArray<PodRoute>;
     }) => Effect.Effect<string | null>;
     /** Takes `<stem>.caddy` away; null once the proxy no longer serves it. */
     readonly uninstall: (input: {
       readonly dockerHost: string;
-      readonly proxy: HostnameProxy;
+      readonly proxy: PodHostnameProxySettings;
       readonly stem: string;
+      /** The proxy may still serve it: an earlier removal's reload failed. */
+      readonly routed: boolean;
     }) => Effect.Effect<string | null>;
-    /** Removes the files of pods named `<prefix>…` that are not in `keep`. */
+    /** Removes the files of pods named `<prefix>…` whose stem `keep`, read under the lock, lacks. */
     readonly prune: (input: {
       readonly dockerHost: string;
-      readonly proxy: HostnameProxy;
+      readonly proxy: PodHostnameProxySettings;
       readonly prefix: string;
-      readonly keep: ReadonlySet<string>;
+      readonly keep: Effect.Effect<ReadonlySet<string>>;
     }) => Effect.Effect<void>;
     /**
      * This server's Tailscale Serve takes :443 of the tailnet address, where
@@ -119,7 +123,11 @@ const make = Effect.gen(function* () {
         ? path.join(homeDirectory, value.slice(2))
         : value;
 
-  const proxyExec = (dockerHost: string, proxy: HostnameProxy, command: ReadonlyArray<string>) =>
+  const proxyExec = (
+    dockerHost: string,
+    proxy: PodHostnameProxySettings,
+    command: ReadonlyArray<string>,
+  ) =>
     driver
       .forHost(dockerHost)
       .exec(proxy.proxyContainer, { command, timeoutMs: PROXY_COMMAND_TIMEOUT_MS })
@@ -136,7 +144,7 @@ const make = Effect.gen(function* () {
         Effect.catch((error) => Effect.succeed(error.message)),
       );
 
-  const reload = (dockerHost: string, proxy: HostnameProxy) =>
+  const reload = (dockerHost: string, proxy: PodHostnameProxySettings) =>
     proxyExec(dockerHost, proxy, [
       "caddy",
       "reload",
@@ -157,7 +165,7 @@ const make = Effect.gen(function* () {
     });
 
   /** Where the proxy sees the routes directory, or why it cannot serve routes from it. */
-  const probeProxy = (dockerHost: string, proxy: HostnameProxy) =>
+  const probeProxy = (dockerHost: string, proxy: PodHostnameProxySettings) =>
     Effect.gen(function* () {
       const inspected = yield* driver
         .forHost(dockerHost)
@@ -176,7 +184,7 @@ const make = Effect.gen(function* () {
       return { reason: `${proxy.proxyContainer} does not mount ${proxy.routesDir}` };
     });
 
-  const listRoutes = (proxy: HostnameProxy) =>
+  const listRoutes = (proxy: PodHostnameProxySettings) =>
     fileSystem.readDirectory(proxy.routesDir).pipe(Effect.orElseSucceed(() => [] as Array<string>));
 
   const remove = (file: string) => fileSystem.remove(file, { force: true }).pipe(Effect.ignore);
@@ -207,43 +215,59 @@ const make = Effect.gen(function* () {
         const routeName = `${stem}${ROUTE_SUFFIX}`;
         const file = path.join(proxy.routesDir, routeName);
         const text = podRouteText(input.routes);
-        const previous = yield* fileSystem.readFileString(file).pipe(Effect.option);
-        if (Option.isSome(previous) && previous.value === text) return null;
         const probed = yield* probeProxy(input.dockerHost, proxy);
         if ("reason" in probed) return probed.reason;
+        const upstream = yield* driver
+          .forHost(input.dockerHost)
+          .inspect(input.upstreamContainer)
+          .pipe(Effect.orElseSucceed(() => null));
+        if (upstream?.networks[proxy.network] === undefined)
+          return `${input.upstreamContainer} is not on the ${proxy.network} network`;
+        const previous = yield* fileSystem.readFileString(file).pipe(Effect.option);
+        if (Option.isSome(previous) && previous.value === text) return null;
         const candidateName = `${stem}${CANDIDATE_SUFFIX}`;
         const candidate = path.join(proxy.routesDir, candidateName);
-        const check = path.join(proxy.routesDir, `${stem}${CHECK_SUFFIX}`);
-        const others = (yield* listRoutes(proxy))
-          .filter((name) => name.endsWith(ROUTE_SUFFIX) && name !== routeName)
-          .toSorted();
-        const written = yield* Effect.all([
-          fileSystem.writeFileString(candidate, text),
-          fileSystem.writeFileString(
-            check,
-            validationConfigText({
-              mountTarget: probed.mountTarget,
-              others,
-              candidate: candidateName,
-            }),
-          ),
-        ]).pipe(Effect.result);
-        if (written._tag === "Failure") {
+        const checkName = `${stem}${CHECK_SUFFIX}`;
+        const check = path.join(proxy.routesDir, checkName);
+        /** Null when the candidate validates beside the routes listed right now. */
+        const validate = Effect.gen(function* () {
+          const others = (yield* listRoutes(proxy))
+            .filter((name) => name.endsWith(ROUTE_SUFFIX) && name !== routeName)
+            .toSorted();
+          const written = yield* fileSystem
+            .writeFileString(
+              check,
+              validationConfigText({
+                mountTarget: probed.mountTarget,
+                others,
+                candidate: candidateName,
+              }),
+            )
+            .pipe(Effect.result);
+          if (written._tag === "Failure") return `could not write to ${proxy.routesDir}`;
+          const rejected = yield* proxyExec(input.dockerHost, proxy, [
+            "caddy",
+            "validate",
+            "--config",
+            `${probed.mountTarget}/${checkName}`,
+            "--adapter",
+            "caddyfile",
+          ]).pipe(Effect.ensuring(remove(check)));
+          return rejected === null ? null : `the proxy rejected the route: ${rejected}`;
+        });
+        if (
+          (yield* fileSystem.writeFileString(candidate, text).pipe(Effect.result))._tag ===
+          "Failure"
+        ) {
           yield* remove(candidate);
-          yield* remove(check);
           return `could not write to ${proxy.routesDir}`;
         }
-        const rejected = yield* proxyExec(input.dockerHost, proxy, [
-          "caddy",
-          "validate",
-          "--config",
-          `${probed.mountTarget}/${stem}${CHECK_SUFFIX}`,
-          "--adapter",
-          "caddyfile",
-        ]).pipe(Effect.ensuring(remove(check)));
+        let rejected = yield* validate;
+        // Another tool's route went away between the listing and the check.
+        if (rejected !== null && IMPORT_VANISHED.test(rejected)) rejected = yield* validate;
         if (rejected !== null) {
           yield* remove(candidate);
-          return `the proxy rejected the route: ${rejected}`;
+          return rejected;
         }
         const placed = yield* fileSystem.rename(candidate, file).pipe(Effect.result);
         if (placed._tag === "Failure") {
@@ -272,9 +296,12 @@ const make = Effect.gen(function* () {
         yield* remove(path.join(proxy.routesDir, `${stem}${CANDIDATE_SUFFIX}`));
         yield* remove(path.join(proxy.routesDir, `${stem}${CHECK_SUFFIX}`));
         const file = path.join(proxy.routesDir, `${stem}${ROUTE_SUFFIX}`);
-        if (!(yield* fileSystem.exists(file).pipe(Effect.orElseSucceed(() => false)))) return null;
-        const removed = yield* fileSystem.remove(file).pipe(Effect.result);
-        if (removed._tag === "Failure") return `could not remove ${file}`;
+        const exists = yield* fileSystem.exists(file).pipe(Effect.orElseSucceed(() => false));
+        if (!exists && !input.routed) return null;
+        if (exists) {
+          const removed = yield* fileSystem.remove(file).pipe(Effect.result);
+          if (removed._tag === "Failure") return `could not remove ${file}`;
+        }
         // A proxy that is down loads the directory as it now is when it comes back.
         const probed = yield* probeProxy(input.dockerHost, proxy);
         return "reason" in probed ? null : yield* reload(input.dockerHost, proxy);
@@ -285,12 +312,13 @@ const make = Effect.gen(function* () {
     lock.withPermits(1)(
       Effect.gen(function* () {
         let removedRoute = false;
+        const keep = yield* input.keep;
         for (const name of yield* listRoutes(input.proxy)) {
           if (!name.startsWith(input.prefix)) continue;
           const suffix = [CANDIDATE_SUFFIX, ROUTE_SUFFIX, CHECK_SUFFIX].find((end) =>
             name.endsWith(end),
           );
-          if (suffix === undefined || input.keep.has(name.slice(0, -suffix.length))) continue;
+          if (suffix === undefined || keep.has(name.slice(0, -suffix.length))) continue;
           yield* remove(path.join(input.proxy.routesDir, name));
           if (suffix === ROUTE_SUFFIX) removedRoute = true;
         }

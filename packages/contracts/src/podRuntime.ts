@@ -153,8 +153,9 @@ export type PodRuntimeStatusInput = typeof PodRuntimeStatusInput.Type;
 
 /**
  * `tailscale-serve-443`: a project serves its pods on hostnames, whose proxy
- * owns :443 on the tailnet address, and this server's Tailscale Serve is set to
- * the same port, so tailscaled takes it and other devices cannot reach the pods.
+ * owns :443 on the tailnet address, and this server was started with Tailscale
+ * Serve on the same port, so tailscaled takes it and other devices cannot reach
+ * the pods. A serve this server did not start is not seen.
  */
 export const PodRuntimeWarning = Schema.Literals(["tailscale-serve-443"]);
 export type PodRuntimeWarning = typeof PodRuntimeWarning.Type;

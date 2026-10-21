@@ -88,7 +88,7 @@ Some stacks only work over HTTPS on a real hostname, for example when their CORS
 WebSocket URLs are built from it. Add `"hostnames": true` to the project's `pod` block and each
 service is served at `https://<pod>-<service>.pods.internal` instead of a port: the pod chip,
 **Settings → Diagnostics → Pods**, the local servers list and `{web.url}` in `env` all use that
-address.
+address. `{web.port}` is then 443.
 
 Hostname mode uses the pods proxy that `orch` runs on this machine: a Caddy container
 (`pods-proxy`) with its own certificate authority, and DNS servers that answer `*.pods.internal`.
@@ -106,7 +106,9 @@ on the machine running T3 Code:
    other devices on 443 of this machine's tailnet address, and Tailscale Serve on the same port
    takes it over. Start T3 Code with `--tailscale-serve-port 8443` (or
    `T3CODE_TAILSCALE_SERVE_PORT=8443`), or pick another port when you turn on Tailscale HTTPS in
-   **Settings → Connections**. Both that screen and Diagnostics warn while the ports clash.
+   **Settings → Connections**. Both that screen and Diagnostics warn while T3 Code's own Tailscale
+   Serve uses 443; a serve on 443 set up any other way, such as one `t3 pair` left running, is not
+   detected, so check `tailscale serve status`.
 
 Inside the pod, the stack's containers resolve `*.pods.internal` too, and the agent container
 trusts the proxy's certificates, so commands there can reach any pod's hostname.

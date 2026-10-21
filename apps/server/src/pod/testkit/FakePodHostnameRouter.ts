@@ -1,3 +1,4 @@
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 
 import {
@@ -15,6 +16,7 @@ export const makeFakePodHostnameRouter = (
   const calls: Array<string> = [];
   let preparation: PodHostnamePreparation = { type: "ready", dnsAddress: "172.21.0.2" };
   let installFailure: string | null = null;
+  let pruneGate: Deferred.Deferred<void> | null = null;
 
   const router = PodHostnameRouter.of({
     resolve: (settings) => settings,
@@ -33,10 +35,12 @@ export const makeFakePodHostnameRouter = (
         return null;
       }),
     prune: ({ prefix, keep }) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         calls.push(`prune ${prefix}`);
+        if (pruneGate !== null) yield* Deferred.await(pruneGate);
+        const kept = yield* keep;
         for (const stem of routes.keys())
-          if (stem.startsWith(prefix) && !keep.has(stem)) routes.delete(stem);
+          if (stem.startsWith(prefix) && !kept.has(stem)) routes.delete(stem);
       }),
     tailscaleServeOnProxyPort: options.tailscaleServeOnProxyPort ?? false,
   });
@@ -47,6 +51,10 @@ export const makeFakePodHostnameRouter = (
     calls,
     prepareAs: (next: PodHostnamePreparation) => {
       preparation = next;
+    },
+    /** Prune waits for this before it reads what to keep, as if another pod's work fell in between. */
+    holdPrune: (gate: Deferred.Deferred<void>) => {
+      pruneGate = gate;
     },
     failInstall: (reason: string | null) => {
       installFailure = reason;

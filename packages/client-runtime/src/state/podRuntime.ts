@@ -83,7 +83,7 @@ export function podBrowsingThread(
 
 const WARNING_MESSAGES: Readonly<Record<PodRuntimeWarning, string>> = {
   "tailscale-serve-443":
-    "A project serves its pods on hostnames, which need port 443 of this machine's tailnet address, and Tailscale Serve for T3 Code uses that port too, so other devices cannot open the pods. Serve T3 Code on another port, such as 8443 (--tailscale-serve-port 8443).",
+    "A project serves its pods on hostnames, which need port 443 of this machine's tailnet address, and T3 Code was started with Tailscale Serve on that port too, so other devices cannot open the pods. Serve T3 Code on another port, such as 8443 (--tailscale-serve-port 8443).",
 };
 
 export function podRuntimeWarningMessage(warning: PodRuntimeWarning): string {

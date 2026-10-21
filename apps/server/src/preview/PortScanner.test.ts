@@ -314,6 +314,38 @@ effectIt.effect("probes a pod hostname the server registers, never one a client 
   }).pipe(Effect.provide(layer));
 });
 
+effectIt.effect("lists a registered hostname as itself while probing it at its probe URL", () => {
+  const requests: string[] = [];
+  const fetchFn = ((input: Parameters<typeof globalThis.fetch>[0]) => {
+    requests.push(String(input));
+    return Promise.resolve(new Response("pod", { headers: { "content-type": "text/html" } }));
+  }) as typeof globalThis.fetch;
+  const layer = layerLsofScanner({ pid: () => 1234, fetch: fetchFn });
+  const podUrl = "https://t3-envtest-pod-abc123-web.pods.internal/";
+
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerConfiguredUrls({
+      owner: "pod:pod-abc123",
+      // A probe URL must be loopback; anything else is dropped and the URL probed as itself.
+      urls: [
+        { url: podUrl, probeUrl: "http://127.0.0.1:20000" },
+        {
+          url: "https://t3-envtest-pod-abc123-api.pods.internal/",
+          probeUrl: "http://example.com/",
+        },
+      ],
+    });
+    const servers = yield* scanner.scan();
+    expect(servers.find((server) => server.url === podUrl)?.host).toBe(
+      "t3-envtest-pod-abc123-web.pods.internal",
+    );
+    expect(requests).toContain("http://127.0.0.1:20000/");
+    expect(requests).not.toContain(podUrl);
+    expect(requests).not.toContain("http://example.com/");
+  }).pipe(Effect.provide(layer));
+});
+
 effectIt.effect("probes configured custom ports through a canonical loopback host", () => {
   const customPort = 43_124;
   const configuredUrl = `http://0.0.0.0:${customPort}/docs`;

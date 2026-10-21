@@ -9,6 +9,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -62,7 +63,10 @@ const harness = (options: {
   const opened: Array<string> = [];
   const network = options.network ?? makeFakeHostNetwork();
   /** What the preview's server list probes for each pod, by owner. */
-  const discovery = new Map<string, ReadonlyArray<string>>();
+  const discovery = new Map<
+    string,
+    ReadonlyArray<string | { readonly url: string; readonly probeUrl: string }>
+  >();
   const base = Layer.mergeAll(
     PodRuntimeStore.layer,
     Layer.succeed(ContainerDriver.ContainerDriver, options.driver.driver),
@@ -971,9 +975,13 @@ describe("PodRuntimeService hostnames", () => {
         { hostname: hostname(id, "web"), upstream: `${stem}-dind:3000` },
         { hostname: hostname(id, "api"), upstream: `${stem}-dind:8000` },
       ]);
-      expect(discovery.get(`pod:${id}`)).toEqual(urls);
+      // Listed by hostname, probed at the loopback port the server's own fetch can reach.
+      expect(discovery.get(`pod:${id}`)).toEqual([
+        { url: urls[0], probeUrl: "http://127.0.0.1:20000" },
+        { url: urls[1], probeUrl: "http://127.0.0.1:20001" },
+      ]);
       expect(yield* fileSystem.readFileString(`${worktree}/.env`)).toBe(
-        `WEB=https://${hostname(id, "web")}\nWEB_PORT=20000\n`,
+        `WEB=https://${hostname(id, "web")}\nWEB_PORT=443\n`,
       );
       const dind = driver.containers().find((container) => container.name === `${stem}-dind`);
       expect(dind?.spec?.dns).toEqual(["172.21.0.2"]);
@@ -1063,21 +1071,23 @@ describe("PodRuntimeService hostnames", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
   });
 
-  it.effect("still starts a pod whose daemon cannot join the proxy's network", () => {
+  it.effect("fails a start whose daemon cannot join the proxy's network, routing nothing", () => {
     const driver = makeFakeContainerDriver();
     driver.failWhen((call) => call.operation === "connect");
     const router = makeFakePodHostnameRouter();
-    router.failInstall("pods-proxy is not on the pods network");
     return withPods(
       driver,
       (pods) =>
         Effect.gen(function* () {
           const { id } = yield* pods.create({ projectId, worktreePath });
           yield* pods.drain;
-          const running = yield* pods.awaitSettled(id);
-          expect(running).toMatchObject({ state: "running", lastError: null });
-          expect(running.hostnameProblem).toContain("pods-proxy is not on the pods network");
-          expect(running.services[0]?.url).toBe("http://127.0.0.1:20000");
+          expect(yield* pods.awaitSettled(id)).toMatchObject({
+            state: "start_failed",
+            lastError: {
+              message: "Joining the hostname proxy's network failed: fake connect refused",
+            },
+          });
+          expect(router.routes.size).toBe(0);
           // Joining is all it ever asks of that network.
           expect(
             driver.calls
@@ -1087,6 +1097,63 @@ describe("PodRuntimeService hostnames", () => {
         }),
       { router, projectFile: hostnameProject() },
     );
+  });
+
+  it.effect("says a pod built for ports needs Recreate once t3.json asks for hostnames", () => {
+    const driver = makeFakeContainerDriver();
+    const projectFile: T3ProjectFile = { pod: { services: { web: 3000 } } };
+    return withPods(
+      driver,
+      (pods) =>
+        Effect.gen(function* () {
+          const { id } = yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          const restart = Effect.gen(function* () {
+            yield* pods.stop(id);
+            yield* pods.drain;
+            yield* pods.start(id);
+            yield* pods.drain;
+            return yield* pods.awaitSettled(id);
+          });
+          Object.assign(projectFile, { pod: { services: { web: 3000 }, hostnames: true } });
+          const asked = yield* restart;
+          expect(asked.hostnameProblem).toBe(
+            "This pod was built for ports; Recreate it to serve its services on hostnames.",
+          );
+          expect(asked.services[0]?.url).toBe("http://127.0.0.1:20000");
+          Object.assign(projectFile, { pod: { services: { web: 3000 } } });
+          expect(yield* restart).not.toHaveProperty("hostnameProblem");
+        }),
+      { projectFile },
+    );
+  });
+
+  it.effect("keeps the route of a pod that starts while the startup prune waits", () => {
+    const driver = makeFakeContainerDriver();
+    const router = makeFakePodHostnameRouter();
+    const { base } = harness({ driver, router, projectFile: hostnameProject() });
+    return Effect.gen(function* () {
+      const context = yield* Layer.build(base);
+      const startServer = Layer.build(
+        PodRuntimeService.layer.pipe(Layer.provideMerge(PodRuntimeStore.layer)),
+      ).pipe(Effect.provide(context));
+      const first = Context.get(yield* startServer, PodRuntimeService.PodRuntimeService);
+      const { id } = yield* first.create({ projectId, worktreePath });
+      yield* first.drain;
+      yield* first.stop(id);
+      yield* first.drain;
+
+      const gate = yield* Deferred.make<void>();
+      router.holdPrune(gate);
+      const again = Context.get(yield* startServer, PodRuntimeService.PodRuntimeService);
+      // Startup's per-pod pass found it stopped; it starts before the prune reads what to keep.
+      yield* again.start(id);
+      expect((yield* again.awaitSettled(id)).state).toBe("running");
+      expect(router.routes.has(`t3-envtest-${id}`)).toBe(true);
+      yield* Deferred.succeed(gate, undefined);
+      yield* again.drain;
+      expect(router.routes.has(`t3-envtest-${id}`)).toBe(true);
+    }).pipe(Effect.scoped);
   });
 
   it.effect("keeps links on ports while the proxy refuses the route, and says why", () => {
@@ -1176,6 +1243,18 @@ describe("PodRuntimeService hostnames", () => {
         expect(yield* warningsFor({ serveOn443: true, hostnames: true })).toEqual([
           "tailscale-serve-443",
         ]);
+        // A project's own status, which the composer reads, never pays for the scan.
+        expect(
+          yield* withPods(
+            makeFakeContainerDriver(),
+            (pods) => pods.status({ projectId }).pipe(Effect.map((status) => status.warnings)),
+            {
+              projects,
+              router: makeFakePodHostnameRouter({ tailscaleServeOnProxyPort: true }),
+              projectFile: { pod: { services: { web: 3000 }, hostnames: true } },
+            },
+          ),
+        ).toBeUndefined();
         expect(yield* warningsFor({ serveOn443: false, hostnames: true })).toBeUndefined();
         expect(yield* warningsFor({ serveOn443: true, hostnames: false })).toBeUndefined();
         expect(

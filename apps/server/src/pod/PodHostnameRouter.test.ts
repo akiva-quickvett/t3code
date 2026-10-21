@@ -21,6 +21,7 @@ import {
 
 const DEFAULTS = Schema.decodeSync(PodHostnameProxySettings)({});
 const STEM = "t3-envtest-pod-abc123";
+const DIND = `${STEM}-dind`;
 const ROUTES = [
   { hostname: `${STEM}-web.pods.internal`, upstream: `${STEM}-dind:3000` },
   { hostname: `${STEM}-api.pods.internal`, upstream: `${STEM}-dind:8000` },
@@ -43,6 +44,11 @@ const setup = (options: { readonly serve?: { enabled: boolean; port: number } } 
       status: "running",
       networks: { pods: "172.21.0.4" },
       mounts: [{ source: routesDir, destination: "/routes" }],
+    });
+    driver.seedInspection(`${STEM}-dind`, {
+      status: "running",
+      networks: { "t3-pods": "172.20.0.2", pods: "172.21.0.9" },
+      mounts: [],
     });
     driver.seedInspection("pods-dns-int", {
       status: "running",
@@ -94,7 +100,13 @@ describe("PodHostnameRouter", () => {
         if (call.command?.[1] === "validate") checked = read(`${STEM}.validate`);
         return 0;
       });
-      const failure = yield* router.install({ dockerHost: "", proxy, stem: STEM, routes: ROUTES });
+      const failure = yield* router.install({
+        dockerHost: "",
+        proxy,
+        stem: STEM,
+        upstreamContainer: DIND,
+        routes: ROUTES,
+      });
       expect(failure).toBeNull();
       expect(files()).toEqual([ORCH_ROUTE, `${STEM}.caddy`]);
       expect(read(`${STEM}.caddy`)).toBe(
@@ -122,12 +134,18 @@ describe("PodHostnameRouter", () => {
       ]);
       expect(read(ORCH_ROUTE)).toBe(ORCH_TEXT);
 
-      // The same route again asks nothing of the proxy.
+      // The same route again only looks: no validate, no reload.
       driver.calls.length = 0;
       expect(
-        yield* router.install({ dockerHost: "", proxy, stem: STEM, routes: ROUTES }),
+        yield* router.install({
+          dockerHost: "",
+          proxy,
+          stem: STEM,
+          upstreamContainer: DIND,
+          routes: ROUTES,
+        }),
       ).toBeNull();
-      expect(driver.calls).toEqual([]);
+      expect(proxyCommands(driver)).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -136,7 +154,13 @@ describe("PodHostnameRouter", () => {
     () =>
       Effect.gen(function* () {
         const { router, proxy, driver, files, read } = yield* setup();
-        yield* router.install({ dockerHost: "", proxy, stem: STEM, routes: ROUTES.slice(0, 1) });
+        yield* router.install({
+          dockerHost: "",
+          proxy,
+          stem: STEM,
+          upstreamContainer: DIND,
+          routes: ROUTES.slice(0, 1),
+        });
         const previous = read(`${STEM}.caddy`);
         driver.calls.length = 0;
         driver.execExitCode((call) => (call.command?.[1] === "validate" ? 1 : 0));
@@ -145,6 +169,7 @@ describe("PodHostnameRouter", () => {
           dockerHost: "",
           proxy,
           stem: STEM,
+          upstreamContainer: DIND,
           routes: ROUTES,
         });
         expect(failure).toBe(
@@ -161,7 +186,13 @@ describe("PodHostnameRouter", () => {
       const { router, proxy, driver, files } = yield* setup();
       driver.execExitCode((call) => (call.command?.[1] === "reload" ? 1 : 0));
       driver.execOutput(() => "connection refused");
-      const failure = yield* router.install({ dockerHost: "", proxy, stem: STEM, routes: ROUTES });
+      const failure = yield* router.install({
+        dockerHost: "",
+        proxy,
+        stem: STEM,
+        upstreamContainer: DIND,
+        routes: ROUTES,
+      });
       expect(failure).toBe("reloading the proxy failed: connection refused");
       expect(files()).toEqual([ORCH_ROUTE]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
@@ -172,7 +203,13 @@ describe("PodHostnameRouter", () => {
       const { router, proxy, driver, files, routesDir } = yield* setup();
       const reasonWith = (inspection: ContainerDriver.ContainerInspection | null) => {
         driver.seedInspection("pods-proxy", inspection);
-        return router.install({ dockerHost: "", proxy, stem: STEM, routes: ROUTES });
+        return router.install({
+          dockerHost: "",
+          proxy,
+          stem: STEM,
+          upstreamContainer: DIND,
+          routes: ROUTES,
+        });
       };
       const running = { status: "running" as const, networks: { pods: "172.21.0.4" } };
       expect(yield* reasonWith(null)).toBe("no container is named pods-proxy");
@@ -196,13 +233,80 @@ describe("PodHostnameRouter", () => {
   it.effect("removes only its own route and reloads; a pod without one asks nothing", () =>
     Effect.gen(function* () {
       const { router, proxy, driver, files } = yield* setup();
-      expect(yield* router.uninstall({ dockerHost: "", proxy, stem: STEM })).toBeNull();
+      expect(
+        yield* router.uninstall({ dockerHost: "", proxy, stem: STEM, routed: false }),
+      ).toBeNull();
       expect(driver.calls).toEqual([]);
-      yield* router.install({ dockerHost: "", proxy, stem: STEM, routes: ROUTES });
+      yield* router.install({
+        dockerHost: "",
+        proxy,
+        stem: STEM,
+        upstreamContainer: DIND,
+        routes: ROUTES,
+      });
       driver.calls.length = 0;
-      expect(yield* router.uninstall({ dockerHost: "", proxy, stem: STEM })).toBeNull();
+      expect(
+        yield* router.uninstall({ dockerHost: "", proxy, stem: STEM, routed: true }),
+      ).toBeNull();
       expect(files()).toEqual([ORCH_ROUTE]);
       expect(proxyCommands(driver)).toEqual(["caddy reload"]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reloads again for a route whose earlier removal the proxy never applied", () =>
+    Effect.gen(function* () {
+      const { router, proxy, driver, files } = yield* setup();
+      expect(
+        yield* router.uninstall({ dockerHost: "", proxy, stem: STEM, routed: true }),
+      ).toBeNull();
+      expect(files()).toEqual([ORCH_ROUTE]);
+      expect(proxyCommands(driver)).toEqual(["caddy reload"]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("routes nothing to a daemon that is not on the proxy's network", () =>
+    Effect.gen(function* () {
+      const { router, proxy, driver, files } = yield* setup();
+      driver.seedInspection(DIND, {
+        status: "running",
+        networks: { "t3-pods": "172.20.0.2" },
+        mounts: [],
+      });
+      expect(
+        yield* router.install({
+          dockerHost: "",
+          proxy,
+          stem: STEM,
+          upstreamContainer: DIND,
+          routes: ROUTES,
+        }),
+      ).toBe(`${DIND} is not on the pods network`);
+      expect(files()).toEqual([ORCH_ROUTE]);
+      expect(driver.calls.some((call) => call.operation === "exec")).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("checks again once when another tool's route vanished mid-check", () =>
+    Effect.gen(function* () {
+      const { router, proxy, driver, files } = yield* setup();
+      let validations = 0;
+      driver.execExitCode((call) =>
+        call.command?.[1] === "validate" && ++validations === 1 ? 1 : 0,
+      );
+      driver.execOutput(() =>
+        validations === 1 ? `Error: File to import not found: /routes/${ORCH_ROUTE}` : "",
+      );
+      expect(
+        yield* router.install({
+          dockerHost: "",
+          proxy,
+          stem: STEM,
+          upstreamContainer: DIND,
+          routes: ROUTES,
+        }),
+      ).toBeNull();
+      expect(proxyCommands(driver)).toEqual(["caddy validate", "caddy validate", "caddy reload"]);
+      expect(files()).toEqual([ORCH_ROUTE, `${STEM}.caddy`]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -220,13 +324,18 @@ describe("PodHostnameRouter", () => {
         dockerHost: "",
         proxy,
         prefix: "t3-envtest-",
-        keep: new Set([STEM]),
+        keep: Effect.succeed(new Set([STEM])),
       });
       expect(files()).toEqual([ORCH_ROUTE, `${STEM}.caddy`, "t3-otherenv-pod-def456.caddy"]);
       expect(proxyCommands(driver)).toEqual(["caddy reload"]);
 
       driver.calls.length = 0;
-      yield* router.prune({ dockerHost: "", proxy, prefix: "t3-envtest-", keep: new Set([STEM]) });
+      yield* router.prune({
+        dockerHost: "",
+        proxy,
+        prefix: "t3-envtest-",
+        keep: Effect.succeed(new Set([STEM])),
+      });
       expect(driver.calls.some((call) => call.operation === "exec")).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
@@ -252,7 +361,7 @@ describe("PodHostnameRouter", () => {
         return call.command?.[1] === "validate" ? validateExit : reloadExit;
       });
       const install = (routes = ROUTES) =>
-        router.install({ dockerHost: "", proxy, stem: STEM, routes });
+        router.install({ dockerHost: "", proxy, stem: STEM, upstreamContainer: DIND, routes });
 
       yield* install();
       validateExit = 1;
@@ -261,9 +370,14 @@ describe("PodHostnameRouter", () => {
       reloadExit = 1;
       yield* install(ROUTES.slice(0, 1));
       reloadExit = 0;
-      yield* router.uninstall({ dockerHost: "", proxy, stem: STEM });
+      yield* router.uninstall({ dockerHost: "", proxy, stem: STEM, routed: true });
       yield* install();
-      yield* router.prune({ dockerHost: "", proxy, prefix: "t3-envtest-", keep: new Set() });
+      yield* router.prune({
+        dockerHost: "",
+        proxy,
+        prefix: "t3-envtest-",
+        keep: Effect.succeed(new Set<string>()),
+      });
 
       expect(files()).toEqual(Object.keys(foreign).toSorted());
       for (const [name, text] of Object.entries(foreign)) expect(read(name)).toBe(text);
@@ -275,12 +389,24 @@ describe("PodHostnameRouter", () => {
   it.effect("puts back the route the proxy ran when reloading a changed one fails", () =>
     Effect.gen(function* () {
       const { router, proxy, driver, files, read } = yield* setup();
-      yield* router.install({ dockerHost: "", proxy, stem: STEM, routes: ROUTES.slice(0, 1) });
+      yield* router.install({
+        dockerHost: "",
+        proxy,
+        stem: STEM,
+        upstreamContainer: DIND,
+        routes: ROUTES.slice(0, 1),
+      });
       const previous = read(`${STEM}.caddy`);
       driver.execExitCode((call) => (call.command?.[1] === "reload" ? 1 : 0));
-      expect(yield* router.install({ dockerHost: "", proxy, stem: STEM, routes: ROUTES })).toMatch(
-        /^reloading the proxy failed/,
-      );
+      expect(
+        yield* router.install({
+          dockerHost: "",
+          proxy,
+          stem: STEM,
+          upstreamContainer: DIND,
+          routes: ROUTES,
+        }),
+      ).toMatch(/^reloading the proxy failed/);
       expect(read(`${STEM}.caddy`)).toBe(previous);
       expect(files()).toEqual([ORCH_ROUTE, `${STEM}.caddy`]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
