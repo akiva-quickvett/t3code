@@ -13,6 +13,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -358,8 +359,7 @@ const descendants = (pid: number): Array<string> =>
   NodeFS.readFileSync(`/proc/${pid}/task/${pid}/children`, "utf8")
     .trim()
     .split(/\s+/)
-    .filter((child) => child.length > 0)
-    .flatMap((child) => [child, ...descendants(Number(child))]);
+    .flatMap((child) => (child.length > 0 ? [child, ...descendants(Number(child))] : []));
 const ready = (child: NodeChildProcess.ChildProcess) =>
   Effect.promise(() => new Promise((resolve) => child.stdout!.once("data", resolve)));
 /** Listens now, so an exit before the effect runs is not missed. */
@@ -370,7 +370,7 @@ const exited = (child: NodeChildProcess.ChildProcess) => {
   return Effect.promise(() => signal);
 };
 
-describe.skipIf(process.platform !== "linux")("pod provider process", () => {
+describe.skipIf(HostProcess.Platform.defaultValue() !== "linux")("pod provider process", () => {
   it.effect("marks each launch and stops every process carrying its mark", () => {
     const procRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fake-proc-"));
     const { layer, launched, commands, stops } = localProcessLayer(procRoot);

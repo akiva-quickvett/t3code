@@ -196,7 +196,7 @@ export const layer: Layer.Layer<
             ? undefined
             : yield* podPlacement.podFor({ cwd, driver, runsIn }).pipe(
                 // A thread its pod refuses keeps the host's; opening says why.
-                Effect.catchTag("ProviderPodRefusedError", () => Effect.succeed(undefined)),
+                Effect.catchTags({ ProviderPodRefusedError: () => Effect.succeed(undefined) }),
               );
         const placed = idAllocator.derive.providerSession({
           providerInstanceId,

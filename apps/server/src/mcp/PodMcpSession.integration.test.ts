@@ -247,7 +247,9 @@ it.effect(
         })).body,
       );
       expect(prepared.result?.isError, JSON.stringify(prepared)).not.toBe(true);
-      const { relativeUrl } = prepared.result?.structuredContent as { relativeUrl: string };
+      const structured = prepared.result?.structuredContent as { relativeUrl: string } | undefined;
+      expect(structured, JSON.stringify(prepared)).toBeDefined();
+      const relativeUrl = structured?.relativeUrl ?? "";
 
       const upload = yield* send(endpoint, {
         method: "POST",
