@@ -115,6 +115,8 @@ import {
 } from "../../provider/EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
+import { podEnvironmentValues, ProviderPodProcess } from "../../provider/PodProviderSessions.ts";
+import type * as WorkspaceExecutionTarget from "../../pod/WorkspaceExecutionTarget.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -1275,6 +1277,8 @@ export interface CodexAppServerClientFactoryShape {
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     readonly settings: CodexSettings;
     readonly environment: NodeJS.ProcessEnv;
+    /** The whole environment of an app-server in a pod, instead of `environment`; none can run in one without it. */
+    readonly podEnvironment?: NodeJS.ProcessEnv;
   }) => Effect.Effect<
     CodexClient.CodexAppServerClient["Service"],
     ProviderAdapter.ProviderAdapterOpenSessionError,
@@ -1382,6 +1386,39 @@ export const makeCodexAppServerSpawnCommand = Effect.fn(
     ...(input.extendEnv === undefined ? {} : { extendEnv: input.extendEnv }),
     shell: spawnCommand.shell,
   });
+});
+
+/**
+ * The app-server through `docker exec` in the pod's agent container: the
+ * container gets the instance's own variables and its Codex home, never the
+ * server's environment, and runs the binary the pod mounts for the instance.
+ */
+const makeCodexPodSpawnCommand = Effect.fn("CodexAdapterV2.makeCodexPodSpawnCommand")(function* (
+  target: WorkspaceExecutionTarget.PodExecutionTarget,
+  input: {
+    readonly settings: CodexSettings;
+    readonly environment: NodeJS.ProcessEnv;
+    readonly podEnvironment: NodeJS.ProcessEnv;
+    readonly cwd: string | null;
+  },
+) {
+  const podProcess = yield* ProviderPodProcess;
+  const codexHome = input.settings.homePath || input.environment.CODEX_HOME;
+  const environment = {
+    ...codexAppServerEnvironment(input.podEnvironment),
+    ...(codexHome ? { CODEX_HOME: codexHome } : {}),
+  };
+  const launch = podProcess.launch(target, {
+    command: [
+      yield* podProcess.command(input.settings.binaryPath || "codex"),
+      ...codexAppServerArgs(resolveCodexLaunchArgs(input.settings.launchArgs, input.environment)),
+    ],
+    ...(input.cwd === null ? {} : { cwd: input.cwd }),
+    env: podEnvironmentValues(environment),
+  });
+  // The docker CLI runs with the host's environment; the container receives
+  // only the variables the launch names.
+  return ChildProcess.make(launch.command, launch.args, { env: launch.env, extendEnv: true });
 });
 
 const layerCodexAppServerClientFactoryCommand = (
@@ -1510,23 +1547,40 @@ export const layerAppServerClientFactory: Layer.Layer<
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
+    const podProcess = yield* ProviderPodProcess;
 
     return CodexAppServerClientFactory.of({
       open: (input) =>
         Effect.gen(function* () {
           const scope = yield* Scope.Scope;
+          const podTarget = yield* podProcess.resolve(input.runtimePolicy.cwd);
           const environment = {
             ...codexAppServerEnvironment(input.environment),
             ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
           };
-          const command = yield* makeCodexAppServerSpawnCommand({
-            command: input.settings.binaryPath || "codex",
-            args: codexAppServerArgs(
-              resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
-            ),
-            env: environment,
-            threadId: input.threadId,
-          }).pipe(Effect.provideService(AgentScope, agentScope));
+          const podEnvironment = input.podEnvironment;
+          if (podTarget !== undefined && podEnvironment === undefined)
+            return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
+              driver: CODEX_PROVIDER,
+              providerSessionId: input.providerSessionId,
+              cause: new Error("This Codex instance's T3-managed runtime cannot run in a pod."),
+            });
+          const command =
+            podTarget === undefined || podEnvironment === undefined
+              ? yield* makeCodexAppServerSpawnCommand({
+                  command: input.settings.binaryPath || "codex",
+                  args: codexAppServerArgs(
+                    resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
+                  ),
+                  env: environment,
+                  threadId: input.threadId,
+                }).pipe(Effect.provideService(AgentScope, agentScope))
+              : yield* makeCodexPodSpawnCommand(podTarget, {
+                  settings: input.settings,
+                  environment: input.environment,
+                  podEnvironment,
+                  cwd: input.runtimePolicy.cwd,
+                }).pipe(Effect.provideService(ProviderPodProcess, podProcess));
           const handle = yield* spawner.spawn(command).pipe(
             Effect.provideService(Scope.Scope, scope),
             Effect.mapError(
@@ -1606,6 +1660,7 @@ export const createCodexAdapterV2 = (
       instanceId,
       settings,
       environment: yield* mergeProviderInstanceEnvironment(environment, hostEnvironment),
+      podEnvironment: yield* mergeProviderInstanceEnvironment(environment, {}),
       clientFactory,
       crypto,
       fileSystem,
@@ -1661,6 +1716,8 @@ export interface CodexAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: CodexSettings;
   readonly environment: NodeJS.ProcessEnv;
+  /** The instance's own variables: all an app-server in a pod inherits. */
+  readonly podEnvironment?: NodeJS.ProcessEnv;
   readonly clientFactory: CodexAppServerClientFactoryShape;
   readonly onUsageLimits?: ManagedServerProvider["applyUsageLimits"];
   readonly resolveRuntime?: Effect.Effect<CodexEffectiveRuntime, ProviderSetupError, Scope.Scope>;
@@ -1716,6 +1773,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           runtimePolicy: input.runtimePolicy,
           settings: resolvedRuntime?.config ?? adapterOptions.settings,
           environment: resolvedRuntime?.environment ?? adapterOptions.environment,
+          // A managed runtime's binary and token live in T3's own state, which pods do not mount.
+          ...(adapterOptions.podEnvironment === undefined || resolvedRuntime !== undefined
+            ? {}
+            : { podEnvironment: adapterOptions.podEnvironment }),
         });
         const additionalContextByThread = yield* Ref.make(
           new Map<

@@ -3,15 +3,16 @@
 A pod belongs to a worktree path, not to the thread that created it. Every thread, terminal and
 script on that path runs in the pod, so anything that runs a command in a workspace asks
 [`WorkspaceExecutionTarget`](../../apps/server/src/pod/WorkspaceExecutionTarget.ts) where to run
-it. Today that is the terminal manager and the setup-script runner; provider sessions join them.
+it: the terminal manager, the setup-script runner, and the Claude and Codex spawns.
 A caller that spawns on the host without asking runs the command against the wrong Docker daemon
 and the wrong filesystem view.
 
 Git, checkpoints, diffs and file search stay on the host: the agent container mounts the worktree
 and the repository's `.git` at their host paths, so both sides see the same files. Stack commands
 (`up`, seeds, compose start, stop and down) run in the agent container as the host user, against the
-pod's daemon, so nothing they write in the worktree is root-owned. Provider binaries mount at
-pod-private paths after the image's own on PATH, never over a system directory.
+pod's daemon, so nothing they write in the worktree is root-owned. A provider binary's real
+directory mounts under `/opt/t3/provider-bin` at its own host path, after the image's directories
+on PATH and never over a system directory, so a host binary maps to exactly one pod path.
 
 The `docker` CLI on the host reads `DOCKER_*`, `PATH` and `HOME` from its own environment, so a
 container's values for those names are passed inline and never reach the CLI's environment
@@ -50,9 +51,44 @@ its core handler layer and serves them from their own, as it does chat channels,
 layer's type sits at the checker's limit. `RpcAuthorization.test.ts` fails for any RPC without the
 scope middleware.
 
-## Before provider sessions run in pods
+## Provider sessions
 
-Two things the default setup does not yet give a provider process. A provider binary mounts by its
-real directory, so a launcher symlink's name (a native Claude install resolves to
-`.../claude/versions/<version>`) is not on the pod's PATH. And `docker:27-cli` is Alpine, so
-glibc-linked provider binaries do not run in it. Spawning providers in pods has to settle both.
+[`PodProviderPlacement`](../../apps/server/src/provider/PodProviderSessionsLive.ts) decides, when
+a provider session opens, where it runs. On a pod's worktree Claude and Codex run in the pod.
+Other drivers (Cursor runs in the server process, OpenCode serves every directory from one server,
+Antigravity is bound to the host) run on the host only when the thread's role preset says
+`runsIn: host`, and are refused otherwise: a session on the host would reach the host's Docker
+while the worktree's stack lives in the pod. `orchestrator_capabilities` lists each refusal.
+
+A session in a pod never inherits the server's environment. `docker exec` names only the
+instance's own variables, its config-dir variable and the role's context window; inherited
+`ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are stripped even from those. The MCP token is
+not in that environment either: Claude takes it over its control channel and Codex in its thread
+config, so commands the agent runs never see it. A `settings.json` `env` block in the mounted
+config dir still overrides the role's context window, as it does on the host.
+
+The agent container mounts the config dirs (and a Claude shared config dir) of the project's
+enabled Claude and Codex instances when it is made. A session whose instance's dirs are missing
+recreates the agent container from current settings; the daemon, its volume and the stack stay,
+and the pod's other sessions are released so their next turn resumes in the new container.
+
+## Pod-facing MCP listener
+
+`127.0.0.1` inside a pod is the pod, so pod sessions reach T3 through
+[`PodMcpListener`](../../apps/server/src/mcp/PodMcpListener.ts). It must never widen what the
+server exposes:
+
+- It binds the pod network's gateway address, only while a pod uses that network, and admits only
+  peers in the network's subnet.
+- It admits exactly `/mcp` and the signed attachment upload URL, matched on the raw path, and hands
+  them to the main server's own routes, so the same bearer check and upload signature apply.
+  Pairing, the API, OAuth, webhooks, the preview stream, the relay and the WebSocket answer 404.
+- It takes only provider-session tokens; a paired device's OAuth token is refused.
+
+Containers reach it as `host.docker.internal`, which the daemon container maps to the network's
+gateway address and the agent container shares through its network namespace. Docker's
+`host-gateway` is the default bridge's address, where the listener does not bind. Docker Desktop
+for macOS gives containers no route to such an address; a unix-socket listener for it is not built.
+
+Still open: the default image `docker:27-cli` is Alpine, so glibc-linked provider binaries do not
+run in it. Claude's `~/.claude.json` lives outside its config dir and is not mounted.

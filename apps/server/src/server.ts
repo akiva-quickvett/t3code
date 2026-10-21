@@ -102,6 +102,8 @@ import * as ContainerDriver from "./pod/ContainerDriver.ts";
 import * as PodRuntimeService from "./pod/PodRuntimeService.ts";
 import * as PodRuntimeStore from "./pod/PodRuntimeStore.ts";
 import * as WorkspaceExecutionTarget from "./pod/WorkspaceExecutionTarget.ts";
+import * as PodMcpListener from "./mcp/PodMcpListener.ts";
+import * as PodProviderSessionsLive from "./provider/PodProviderSessionsLive.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
@@ -296,16 +298,24 @@ const layerRelayClient = Layer.unwrap(
 const layerHttpServer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
-    return NodeHttpServer.layer(() => guardHttpResponseWriteErrors(NodeHttp.createServer()), {
-      host: config.host ?? "127.0.0.1",
-      port: config.port,
-      gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
-      // Context takeover stays enabled (ws default) so the compression
-      // window is shared across frames — that also makes small frames cheap
-      // to compress, so no size threshold is set (ws only honors
-      // `threshold` when context takeover is disabled).
-      websocket: { perMessageDeflate: true },
-    });
+    const server = guardHttpResponseWriteErrors(NodeHttp.createServer());
+    return Layer.merge(
+      NodeHttpServer.layer(() => server, {
+        host: config.host ?? "127.0.0.1",
+        port: config.port,
+        gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
+        // Context takeover stays enabled (ws default) so the compression
+        // window is shared across frames — that also makes small frames cheap
+        // to compress, so no size threshold is set (ws only honors
+        // `threshold` when context takeover is disabled).
+        websocket: { perMessageDeflate: true },
+      }),
+      // The pod-facing listener hands the requests it admits to this server's
+      // own routes, so they meet the same MCP auth and upload checks.
+      Layer.succeed(PodMcpListener.McpRequestDispatch, {
+        dispatch: (request, response) => server.emit("request", request, response),
+      }),
+    );
   }),
 );
 
@@ -419,6 +429,18 @@ const layerPodRuntime = PodRuntimeService.layer.pipe(
   Layer.provide(GitVcsDriver.layer),
 );
 
+// One listener: the placement is the only consumer of the pod-facing MCP listener.
+const layerPodProviderPlacement = PodProviderSessionsLive.layerPlacement.pipe(
+  Layer.provide(PodMcpListener.layer),
+  Layer.provide(layerPodRuntime),
+);
+
+// Provider drivers spawn through it, and they are built below the pod runtime.
+const layerProviderPodProcess = PodProviderSessionsLive.layerProcess.pipe(
+  Layer.provide(layerWorkspaceExecutionTarget),
+  Layer.provide(layerPersistence),
+);
+
 const layerWorktreeLifecycle = WorktreeLifecycle.layer.pipe(
   Layer.provide(layerGitWorkflow),
   Layer.provide(RuntimeLayer.layerProjectService),
@@ -519,6 +541,7 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
 );
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+  Layer.provide(layerPodProviderPlacement),
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderEventIngestor.layerAnalytics),
   Layer.provide(layerCheckpointStore),
@@ -640,7 +663,9 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // Agents read limits through UsageService, so it sits above the provider registry.
   Layer.provideMerge(layerUsage),
   Layer.provideMerge(ProviderRegistry.layer),
-  Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+  Layer.provideMerge(
+    ProviderInstanceRegistryHydration.layer.pipe(Layer.provide(layerProviderPodProcess)),
+  ),
   Layer.provideMerge(
     Layer.mergeAll(
       AntigravityInstallation.AntigravityInstallation.layer,

@@ -10,6 +10,7 @@ import {
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
+  PodRuntimeId,
   type Project,
   ProjectId,
   ProviderDriverKind,
@@ -51,6 +52,11 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import {
+  type ProviderSessionPlacement,
+  PodProviderPlacement,
+  ProviderPodRefusedError,
+} from "../provider/PodProviderSessions.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -488,6 +494,7 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly podPlacement?: typeof PodProviderPlacement.Service;
 }) {
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
@@ -565,6 +572,9 @@ function layerTest(input: {
           layerTestStores,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
+          ...(input.podPlacement === undefined
+            ? []
+            : [Layer.succeed(PodProviderPlacement, input.podPlacement)]),
         ),
       ),
     ),
@@ -4906,5 +4916,150 @@ it.effect(
         projectExists: false,
       });
       assert.isFalse(denied?.capabilities?.has("device"));
+    }),
+);
+
+const POD_ID = PodRuntimeId.make("pod-sessions1");
+const POD_ENDPOINT = "http://host.docker.internal:40123/mcp";
+
+const podPlacement = (
+  place: (
+    runsIn: string | undefined,
+  ) => Effect.Effect<ProviderSessionPlacement, ProviderPodRefusedError>,
+): typeof PodProviderPlacement.Service => ({
+  place: (input) => place(input.runsIn),
+  podOf: () => Effect.succeed(POD_ID),
+});
+
+const openThread = (name: string, runsIn?: "host" | "pod") =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const threadId = ThreadId.make(name);
+    const providerSessionId = yield* idAllocator.allocate.providerSession({
+      providerInstanceId: modelSelection.instanceId,
+      threadId,
+    });
+    yield* eventSink.write({
+      events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now: yield* DateTime.now })],
+    });
+    const opened = yield* manager
+      .open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+        ...(runsIn === undefined ? {} : { runsIn }),
+      })
+      .pipe(Effect.exit);
+    return { threadId, providerSessionId, opened };
+  });
+
+it.effect("ProviderSessionManagerV2 gives a pod session the pod listener's endpoint", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const mcpConfigs = yield* Ref.make<
+      ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+    >([]);
+    yield* Effect.gen(function* () {
+      const registry = yield* McpSessionRegistry.McpSessionRegistry;
+      const { opened } = yield* openThread("thread-pod-endpoint");
+      assert.isTrue(Exit.isSuccess(opened));
+      const issued = (yield* Ref.get(mcpConfigs)).at(-1);
+      assert.equal(issued?.endpoint, POD_ENDPOINT);
+      const scope = yield* registry.resolve(issued!.authorizationHeader.replace(/^Bearer\s+/, ""));
+      assert.isTrue(scope?.capabilities.has("orchestration"));
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          mcpConfigs,
+          podPlacement: podPlacement(() =>
+            Effect.succeed({
+              type: "pod",
+              podId: POD_ID,
+              mcpEndpoint: POD_ENDPOINT,
+              agentRecreated: false,
+            }),
+          ),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 refuses a session the pod cannot run, before any credential",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const runsInSeen: Array<string | undefined> = [];
+      yield* Effect.gen(function* () {
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        const { threadId, opened } = yield* openThread("thread-pod-refused", "pod");
+        assert.isTrue(Exit.isFailure(opened));
+        const failure = Exit.isFailure(opened) ? Cause.squash(opened.cause) : undefined;
+        assert.instanceOf(failure, ProviderSessionManager.ProviderSessionOpenError);
+        assert.equal(
+          (failure as ProviderSessionManager.ProviderSessionOpenError).cause instanceof Error
+            ? ((failure as ProviderSessionManager.ProviderSessionOpenError).cause as Error).message
+            : undefined,
+          "Cursor cannot run in a pod.",
+        );
+        assert.deepEqual(runsInSeen, ["pod"]);
+        assert.isUndefined(yield* mcpSessions.read(threadId));
+        assert.equal((yield* Ref.get(state)).openCount, 0);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            podPlacement: podPlacement((runsIn) => {
+              runsInSeen.push(runsIn);
+              return Effect.fail(
+                new ProviderPodRefusedError({ reason: "Cursor cannot run in a pod." }),
+              );
+            }),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 releases a pod's sessions when its agent container is replaced",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const recreate = yield* Ref.make(false);
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const first = yield* openThread("thread-pod-first");
+        assert.isTrue(Exit.isSuccess(first.opened));
+        yield* Ref.set(recreate, true);
+        const second = yield* openThread("thread-pod-second");
+        assert.isTrue(Exit.isSuccess(second.opened));
+        assert.isTrue(Option.isNone(yield* manager.get(first.providerSessionId)));
+        assert.isTrue(Option.isSome(yield* manager.get(second.providerSessionId)));
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            podPlacement: podPlacement(() =>
+              Ref.get(recreate).pipe(
+                Effect.map((agentRecreated): ProviderSessionPlacement => ({
+                  type: "pod",
+                  podId: POD_ID,
+                  mcpEndpoint: POD_ENDPOINT,
+                  agentRecreated,
+                })),
+              ),
+            ),
+          }),
+        ),
+      );
     }),
 );
