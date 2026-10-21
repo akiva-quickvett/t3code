@@ -1,4 +1,5 @@
 import {
+  type AgentUsageHeadroom,
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -18,6 +19,8 @@ import {
   needsCursorKeychainAccess,
   refreshUsage,
   refreshUsageLimits,
+  sortByHeadroom,
+  switchAccountCandidates,
 } from "./usage.ts";
 
 const input = {
@@ -320,6 +323,110 @@ describe("needsCursorKeychainAccess", () => {
         off,
         { summary: account, needsCursorKeychainAccess: false },
       ]),
+    ).toEqual([]);
+  });
+});
+
+describe("switch account ordering", () => {
+  const now = Date.parse("2026-09-05T12:00:00Z");
+  const thresholds = { sessionLowPercent: 85, weeklyLowPercent: 95 };
+  const claude = (
+    id: string,
+    sessionPercent: number | null,
+    overrides: Partial<ServerProvider> = {},
+  ): ServerProvider => ({
+    instanceId: ProviderInstanceId.make(id),
+    driver: ProviderDriverKind.make("claudeAgent"),
+    displayName: id,
+    enabled: true,
+    installed: true,
+    version: null,
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-09-05T11:59:00Z",
+    models: [],
+    slashCommands: [],
+    skills: [],
+    ...(sessionPercent === null
+      ? {}
+      : {
+          usageLimits: {
+            checkedAt: "2026-09-05T11:59:00Z",
+            windows: [
+              {
+                id: "five_hour",
+                kind: "session",
+                label: "Session",
+                usedPercent: sessionPercent,
+                resetsAt: "2026-09-05T14:00:00Z",
+              },
+            ],
+          },
+        }),
+    ...overrides,
+  });
+
+  it("orders ok, low, unknown, then exhausted, keeping ties in their given order", () => {
+    const rows: ReadonlyArray<{ readonly id: string; readonly headroom: AgentUsageHeadroom }> = [
+      { id: "exhausted-1", headroom: "exhausted" },
+      { id: "unknown-1", headroom: "unknown" },
+      { id: "low-1", headroom: "low" },
+      { id: "ok-1", headroom: "ok" },
+      { id: "exhausted-2", headroom: "exhausted" },
+      { id: "ok-2", headroom: "ok" },
+      { id: "low-2", headroom: "low" },
+    ];
+    expect(sortByHeadroom(rows).map((row) => row.id)).toEqual([
+      "ok-1",
+      "ok-2",
+      "low-1",
+      "low-2",
+      "unknown-1",
+      "exhausted-1",
+      "exhausted-2",
+    ]);
+    expect(rows[0]?.id).toBe("exhausted-1");
+  });
+
+  it("lists the other usable instances of the current driver, best headroom first", () => {
+    const providers = [
+      claude("current", 100),
+      claude("full", 100),
+      claude("busy", 90),
+      claude("fresh", 10),
+      claude("flaky", null, {
+        usageLimits: {
+          checkedAt: "2026-09-05T11:59:00Z",
+          windows: [],
+          unavailable: { reason: "probeFailed" },
+        },
+      }),
+      claude("disabled", 0, { enabled: false }),
+      claude("missing", 0, { installed: false }),
+      claude("signed-out", 0, { auth: { status: "unauthenticated" } }),
+      claude("unavailable", 0, { availability: "unavailable" }),
+      claude("codex", 0, { driver: ProviderDriverKind.make("codex") }),
+    ];
+    const candidates = switchAccountCandidates(
+      providers,
+      ProviderInstanceId.make("current"),
+      thresholds,
+      now,
+    );
+    expect(candidates.map((row) => [row.instanceId, row.headroom])).toEqual([
+      ["fresh", "ok"],
+      ["busy", "low"],
+      ["flaky", "unknown"],
+      ["full", "exhausted"],
+    ]);
+    expect(candidates[0]?.windows).toEqual([
+      { kind: "session", label: "Session", usedPercent: 10, resetsAt: "2026-09-05T14:00:00Z" },
+    ]);
+  });
+
+  it("offers nothing when the current instance is unknown", () => {
+    expect(
+      switchAccountCandidates([claude("a", 10)], ProviderInstanceId.make("gone"), thresholds, now),
     ).toEqual([]);
   });
 });

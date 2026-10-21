@@ -42,6 +42,8 @@ import {
   ProviderOptionSelectionValue,
 } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { AgentUsageHeadroom } from "./providerUsageLimits.ts";
+import { AgentRolePresetRunsIn, ThreadRolePreset } from "./agentRole.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
   description: "Complete task or message text for the target agent.",
@@ -139,6 +141,17 @@ export const OrchestratorMcpTaskRole = Schema.Literals([
 ]);
 export type OrchestratorMcpTaskRole = typeof OrchestratorMcpTaskRole.Type;
 
+/**
+ * Lenient on purpose: the server lowercases it before lookup, and an unknown id
+ * fails with the list of known ids.
+ */
+export const OrchestratorMcpRolePreset = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+).annotate({
+  description:
+    "Role preset id from orchestrator_capabilities.rolePresets. Supplies the model, modes, isolation and role instructions; fields you pass explicitly win over the preset.",
+});
+
 export const OrchestratorMcpDelegatedTaskStatus = Schema.Literals([
   "queued",
   "running",
@@ -166,6 +179,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   target: Schema.optional(OrchestratorMcpTarget),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
+  preset: Schema.optional(OrchestratorMcpRolePreset),
   isolation: Schema.optional(
     Schema.Literals(["shared", "worktree"]).annotate({
       description:
@@ -254,6 +268,7 @@ export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
   prompt: Schema.optional(OrchestratorMcpPrompt),
   title: Schema.optional(OrchestratorMcpTitle),
   target: Schema.optional(OrchestratorMcpTarget),
+  preset: Schema.optional(OrchestratorMcpRolePreset),
   runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
   interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
 });
@@ -352,6 +367,8 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   /** Missing unless the thread was launched with supervise. */
   supervisorThreadId: Schema.optional(ThreadId),
+  /** Missing on older servers. */
+  rolePreset: Schema.optional(Schema.NullOr(ThreadRolePreset)),
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -402,6 +419,8 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   /** Missing unless the thread was launched with supervise. */
   supervisorThreadId: Schema.optional(ThreadId),
+  /** Missing on older servers. */
+  rolePreset: Schema.optional(Schema.NullOr(ThreadRolePreset)),
   runCount: NonNegativeInt,
   itemCount: NonNegativeInt,
   pendingRequestCount: NonNegativeInt,
@@ -523,8 +542,27 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
   canRunChildTask: Schema.Boolean,
   canRunCrossProviderChildTask: Schema.Boolean,
   constraints: Schema.Array(Schema.String),
+  /** Missing on older servers; see t3_usage_limits. */
+  headroom: Schema.optional(AgentUsageHeadroom),
 });
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
+
+/** Deliberately small: the full instructions stay on the server. */
+export const OrchestratorMcpRolePresetSummary = Schema.Struct({
+  id: Schema.String,
+  label: Schema.String,
+  target: Schema.Struct({
+    providerInstanceId: Schema.optional(ProviderInstanceId),
+    driverKind: Schema.optional(ProviderDriverKind),
+    model: Schema.String,
+  }),
+  runsIn: Schema.optional(AgentRolePresetRunsIn),
+  /** Advisory: the roles this one may delegate to. The server does not enforce it. */
+  allowedChildRoles: Schema.optional(Schema.Array(Schema.String)),
+  /** Set when no enabled instance can run the preset's target. */
+  unavailableReason: Schema.optional(Schema.String),
+});
+export type OrchestratorMcpRolePresetSummary = typeof OrchestratorMcpRolePresetSummary.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
@@ -533,6 +571,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   providers: Schema.Array(OrchestratorMcpProviderCapability),
+  /** Missing on older servers. */
+  rolePresets: Schema.optional(Schema.Array(OrchestratorMcpRolePresetSummary)),
   features: Schema.Struct({
     appOwnedSubagents: Schema.Boolean,
     asyncPolling: Schema.Boolean,
@@ -544,6 +584,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     /** Missing on older servers, which have neither supervised launches nor follow-up wakes. */
     supervisedWakes: Schema.optional(Schema.Boolean),
     maxBatchThreads: Schema.Number,
+    /** t3_usage_limits. Missing on older servers. */
+    usageLimits: Schema.optional(Schema.Boolean),
   }),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;

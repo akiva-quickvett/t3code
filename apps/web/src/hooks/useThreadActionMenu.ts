@@ -33,6 +33,8 @@ import {
   readThreadShell,
   useProjects,
 } from "../state/entities";
+import { readEnvironmentSupportsRolePresets } from "../state/agentRoles";
+import { useStartTicketThread } from "./useStartTicketThread";
 import { usePrimaryEnvironmentId } from "../state/environments";
 import { readLocalApi } from "../localApi";
 import {
@@ -88,6 +90,7 @@ export function useThreadActionMenu(input: {
     reportFailure: false,
   });
   const handleNewThread = useNewThreadHandler();
+  const startTicketThread = useStartTicketThread();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -125,6 +128,7 @@ export function useThreadActionMenu(input: {
         snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
         pinning: readEnvironmentSupportsPinning(threadRef.environmentId),
         titleRegeneration: readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
+        rolePresets: readEnvironmentSupportsRolePresets(threadRef.environmentId),
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat);
@@ -206,6 +210,9 @@ export function useThreadActionMenu(input: {
           }
           return;
         }
+        case "new-ticket":
+          await startTicketThread(scopeProjectRef(threadRef.environmentId, thread.projectId));
+          return;
         case "settle":
           await reportFailure("Failed to settle thread", () => settleThread(threadRef));
           return;

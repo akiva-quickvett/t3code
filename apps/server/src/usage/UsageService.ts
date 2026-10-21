@@ -1,9 +1,13 @@
 import * as NodeOS from "node:os";
 
 import {
+  type AgentUsageLimitsInput,
+  type AgentUsageLimitsResult,
+  DEFAULT_SERVER_SETTINGS,
   type ProviderInstanceConfig,
   ProviderInstanceId,
   USAGE_CONTRACT_VERSION,
+  type ServerProvider,
   type ServerSettings as ServerSettingsValue,
   type UsageProviderKind,
   type UsageSource,
@@ -11,7 +15,9 @@ import {
   type UsageSummary,
   type UsageSummaryInput,
   UsageReadError,
+  USAGE_LIMITS_MIN_REFRESH_INTERVAL_MS,
 } from "@t3tools/contracts";
+import { projectAgentUsageLimits } from "@t3tools/shared/usageLimits";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -32,6 +38,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { BUILT_IN_USAGE_DRIVERS, type BuiltInUsageReadersEnv } from "../provider/builtInDrivers.ts";
 import type { ProviderDriver } from "@t3tools/provider-core/server/driver";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
@@ -156,6 +163,13 @@ export class UsageService extends Context.Service<
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
     readonly refreshRates: Effect.Effect<UsagePricing>;
+    /**
+     * Reads the limit snapshots the Limits page shows; probes only on
+     * `refresh`, and only instances not checked within the minimum interval.
+     */
+    readonly readLimitsForAgent: (
+      scope: AgentUsageLimitsInput,
+    ) => Effect.Effect<AgentUsageLimitsResult>;
   }
 >()("t3/usage/UsageService") {}
 
@@ -166,7 +180,7 @@ const EMPTY_PRICING: UsagePricing = {
   knownModels: 0,
 };
 
-const layerTest = Layer.succeed(
+export const layerTest = Layer.succeed(
   UsageService,
   UsageService.of({
     readSummary: (input) =>
@@ -182,6 +196,7 @@ const layerTest = Layer.succeed(
         scanDurationMs: 0,
       }),
     refreshRates: Effect.succeed(EMPTY_PRICING),
+    readLimitsForAgent: () => Effect.succeed({ instances: [] }),
   }),
 );
 
@@ -191,6 +206,7 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
+  const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const hostEnvironment = yield* HostProcess.Environment;
   const readerContext = yield* Effect.context<BuiltInUsageReadersEnv>();
 
@@ -840,7 +856,53 @@ export const make = Effect.gen(function* () {
     return yield* Deferred.await(deferred);
   });
 
-  return { readSummary, refreshRates, awaitPersisted } as const;
+  // Keyed on the attempt, as the client's check is: a failed probe keeps the
+  // previous snapshot and its old checkedAt, which alone would allow a re-probe.
+  const limitProbeAttempts = new Map<ProviderInstanceId, number>();
+  const readLimitsForAgent = Effect.fn("UsageService.readLimitsForAgent")(function* (
+    scope: AgentUsageLimitsInput,
+  ) {
+    const inScope = (provider: ServerProvider) =>
+      provider.enabled &&
+      (scope.driver === undefined || provider.driver === scope.driver) &&
+      (scope.instanceId === undefined || provider.instanceId === scope.instanceId);
+    let providers = (yield* providerRegistry.getProviders).filter(inScope);
+    if (scope.refresh === true) {
+      const now = yield* Clock.currentTimeMillis;
+      const due = providers.filter(({ instanceId, usageLimits }) => {
+        if (usageLimits?.unavailable?.reason === "unsupported") return false;
+        const lastChecked = Math.max(
+          usageLimits === undefined ? 0 : Date.parse(usageLimits.checkedAt),
+          limitProbeAttempts.get(instanceId) ?? 0,
+        );
+        if (now - lastChecked < USAGE_LIMITS_MIN_REFRESH_INTERVAL_MS) return false;
+        // Claimed before probing so concurrent callers do not probe it too.
+        limitProbeAttempts.set(instanceId, now);
+        return true;
+      });
+      if (due.length > 0) {
+        yield* Effect.forEach(
+          due,
+          (provider) => providerRegistry.refreshInstance(provider.instanceId),
+          {
+            concurrency: 4,
+            discard: true,
+          },
+        );
+        providers = (yield* providerRegistry.getProviders).filter(inScope);
+      }
+    }
+    const thresholds = yield* settingsService.getSettings.pipe(
+      Effect.map((settings) => settings.usageHeadroom),
+      Effect.orElseSucceed(() => DEFAULT_SERVER_SETTINGS.usageHeadroom),
+    );
+    const now = yield* Clock.currentTimeMillis;
+    return {
+      instances: providers.map((provider) => projectAgentUsageLimits(provider, thresholds, now)),
+    };
+  });
+
+  return { readSummary, refreshRates, readLimitsForAgent, awaitPersisted } as const;
 });
 
 export const layer = Layer.effect(UsageService, make);

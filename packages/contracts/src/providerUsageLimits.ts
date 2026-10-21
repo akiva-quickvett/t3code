@@ -1,4 +1,6 @@
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import {
   ForwardCompatibleArray,
@@ -146,3 +148,90 @@ export const UsageLimitsReport = Schema.Struct({
   notices: Schema.Array(Schema.String),
 });
 export type UsageLimitsReport = typeof UsageLimitsReport.Type;
+
+/**
+ * The shortest gap between two limit checks anyone can ask for: a client's
+ * refresh and an agent's `refresh: true` both wait this long after the last one.
+ */
+export const USAGE_LIMITS_MIN_REFRESH_INTERVAL_MS = 5 * 60_000;
+
+export const HeadroomPercent = Schema.Number.check(Schema.isBetween({ minimum: 1, maximum: 100 }));
+
+/**
+ * When an account counts as `low`. Any window at 100 % makes it `exhausted`
+ * whatever these say. Monthly and other windows use the weekly threshold.
+ */
+// Users hand-edit these in settings.json, which decodes as one schema: a bad
+// value falls back to its default instead of discarding every other setting.
+const withFallback = <S extends Schema.Top>(schema: S, fallback: S["Encoded"]) => {
+  const decodeValue = Schema.decodeUnknownOption(schema as never);
+  return Schema.optionalKey(Schema.Unknown).pipe(
+    Schema.decodeTo(
+      schema,
+      SchemaTransformation.transformOptional<S["Encoded"], unknown>({
+        decode: (raw) =>
+          Option.some(
+            Option.isSome(raw) && Option.isSome(decodeValue(raw.value))
+              ? (raw.value as S["Encoded"])
+              : fallback,
+          ),
+        encode: (value) => value,
+      }),
+    ),
+  );
+};
+
+export const UsageHeadroomThresholds = Schema.Struct({
+  sessionLowPercent: withFallback(HeadroomPercent, 85),
+  weeklyLowPercent: withFallback(HeadroomPercent, 95),
+});
+/** The settings.json field: anything but an object decodes as the defaults. */
+export const UsageHeadroomSetting = withFallback(UsageHeadroomThresholds, {});
+export type UsageHeadroomThresholds = typeof UsageHeadroomThresholds.Type;
+
+/** `unknown` only when the last limit check failed. */
+export const AgentUsageHeadroom = Schema.Literals(["ok", "low", "unknown", "exhausted"]);
+export type AgentUsageHeadroom = typeof AgentUsageHeadroom.Type;
+
+export const AgentUsageLimitsStatus = Schema.Union([
+  Schema.Literals(["ok", "stale"]),
+  Schema.Struct({ unavailable: Schema.Literals(["unsupported", "probeFailed"]) }),
+]);
+export type AgentUsageLimitsStatus = typeof AgentUsageLimitsStatus.Type;
+
+/**
+ * What agents see of one provider instance's limits. Deliberately left out:
+ * account email, credential fingerprint, hub URLs and keys, and reset-credit
+ * ids. Keep it to a few hundred bytes; every orchestrator call carries it.
+ */
+export const AgentUsageLimits = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  driver: ProviderDriverKind,
+  label: TrimmedNonEmptyString,
+  plan: Schema.optional(TrimmedNonEmptyString),
+  checkedAt: IsoDateTime,
+  windows: Schema.Array(
+    Schema.Struct({
+      kind: ServerProviderUsageWindow.fields.kind,
+      label: ServerProviderUsageWindow.fields.label,
+      usedPercent: ServerProviderUsageWindow.fields.usedPercent,
+      resetsAt: ServerProviderUsageWindow.fields.resetsAt,
+    }),
+  ),
+  status: AgentUsageLimitsStatus,
+  headroom: AgentUsageHeadroom,
+});
+export type AgentUsageLimits = typeof AgentUsageLimits.Type;
+
+export const AgentUsageLimitsInput = Schema.Struct({
+  driver: Schema.optional(ProviderDriverKind),
+  instanceId: Schema.optional(ProviderInstanceId),
+  /** Probes instances whose last check is at least the minimum refresh interval old. */
+  refresh: Schema.optional(Schema.Boolean),
+});
+export type AgentUsageLimitsInput = typeof AgentUsageLimitsInput.Type;
+
+export const AgentUsageLimitsResult = Schema.Struct({
+  instances: Schema.Array(AgentUsageLimits),
+});
+export type AgentUsageLimitsResult = typeof AgentUsageLimitsResult.Type;

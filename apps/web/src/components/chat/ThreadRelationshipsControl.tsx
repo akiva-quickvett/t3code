@@ -73,6 +73,7 @@ import {
   THREAD_DETAILS_PANEL_ROW_CONTENT_CLASS,
   THREAD_DETAILS_PANEL_SPLIT_SEPARATOR_CLASS,
 } from "./threadDetailsPanelStyles";
+import { ThreadRoleBadge } from "../roles/RoleBadge";
 
 const THREAD_LINEAGE_INITIAL_COUNT = 6;
 const THREAD_LINEAGE_PAGE_COUNT = 12;
@@ -511,6 +512,15 @@ export function ThreadRelationshipsPanel(props: {
                       {threadTitle}
                     </span>
                   </span>
+                  {node?.thread ? (
+                    <ThreadRoleBadge
+                      thread={{
+                        environmentId: ref.environmentId,
+                        projectId: node.thread.projectId,
+                        rolePreset: node.thread.rolePreset,
+                      }}
+                    />
+                  ) : null}
                   {agent ? null : (
                     <ArrowRightIcon className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
                   )}

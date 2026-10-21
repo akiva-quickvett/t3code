@@ -128,6 +128,31 @@ or endpoint configurations do not report subscription limits.
 API-key accounts may not report subscription limits. This also applies to Claude connections
 using a proxy through `ANTHROPIC_AUTH_TOKEN`.
 
+When a thread stops at a usage limit on web or desktop, its banner lists the provider's other
+accounts with their limits, the ones with the most headroom first. Choose **Switch** to continue the
+thread on that account, as if you had picked it in the model picker.
+
+## Let agents check limits
+
+Agents with orchestration access can call the `t3_usage_limits` tool to read the limits of every
+provider account in their environment, so they can place work on an account that still has room.
+Agents see each window's used percentage and reset time, never the account's email. Each account
+also gets a headroom verdict, which `orchestrator_capabilities` reports too:
+
+- **ok**: room left.
+- **low**: the 5-hour session window is at 85% or more, or a weekly or monthly window is at 95% or
+  more.
+- **unknown**: the account's last limit check failed.
+- **exhausted**: a window is used up.
+
+The tool reads the same snapshot as **Usage → Limits**. An agent can ask for a fresh check, which
+runs only for accounts not checked in the last five minutes. Accounts that report no limits, such
+as API keys and Pi, are listed as unsupported with headroom ok.
+
+To change the thresholds, set `usageHeadroom` in the server's `settings.json` in its `userdata`
+directory, for example `"usageHeadroom": { "sessionLowPercent": 80, "weeklyLowPercent": 90 }`.
+Each value is a percentage from 1 to 100; an invalid value falls back to its default.
+
 ## Connect a CLIProxyAPI hub
 
 To see pooled accounts, open **Settings → Providers → Usage providers → Add hub**. Choose the
