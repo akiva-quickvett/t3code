@@ -458,6 +458,8 @@ export interface ResolvedAcpRegistryAgent {
   readonly agent?: AcpRegistryAgent;
   readonly distribution: AcpRegistryDistributionKind | "local";
   readonly spawn: AcpSessionRuntime.AcpSpawnInput;
+  /** The variables the registry entry itself sets, which `spawn.env` adds to the instance's; none for a local command. */
+  readonly distributionEnv?: Readonly<Record<string, string>>;
 }
 
 export type AcpRegistryInspection =
@@ -1874,6 +1876,7 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
           cwd,
           env: spawnEnvironment,
         },
+        distributionEnv: distribution.env,
       } satisfies ResolvedAcpRegistryAgent;
     });
 
@@ -1941,8 +1944,8 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
                 if ((yield* fileSystem.readDirectory(versionRoot)).length === 0)
                   yield* fileSystem.remove(versionRoot, { recursive: true });
               }
-              if ((yield* fileSystem.readDirectory(agentRoot)).length === 0)
-                yield* fileSystem.remove(agentRoot, { recursive: true });
+              // The agent's own directory stays, empty: a running pod binds it, and
+              // a reinstall must land in the directory that bind still shows.
             }).pipe(
               Effect.mapError(
                 (cause) =>

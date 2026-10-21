@@ -17,6 +17,7 @@ import {
   type PodPlan,
   podSafeEnv,
 } from "./PodContainerPlan.ts";
+import { isT3PodAgentImage, POD_AGENT_IMAGE_DOCKERFILE } from "./PodAgentImage.ts";
 import type { PodInternalOperation } from "./PodRuntimeLifecycle.ts";
 
 /** A pod operation stopped at a step; the message is shown on the pod as its last error. */
@@ -269,6 +270,36 @@ const trustProxyCa = (context: PodOperationContext, agentId: string) =>
     );
 
 /**
+ * The agent's home is a tmpfs, so each start begins with the host's copy;
+ * `-n` keeps a copy the running agent already changed. A missing copy only
+ * costs the provider its settings, so it never fails the pod.
+ */
+const copyHomeSeed = (
+  context: PodOperationContext,
+  agentId: string,
+  seed: PodPlan["homeSeeds"][number],
+) =>
+  context.host
+    .exec(agentId, { command: ["cp", "-n", seed.snapshot, seed.target], timeoutMs: 30_000 })
+    .pipe(
+      Effect.flatMap((result) =>
+        result.exitCode === 0
+          ? Effect.void
+          : Effect.logWarning("could not copy a provider config file into a pod", {
+              podId: context.podId,
+              file: seed.target,
+              output: result.outputTail,
+            }),
+      ),
+      Effect.catch((error) =>
+        Effect.logWarning("could not copy a provider config file into a pod", {
+          podId: context.podId,
+          operation: error.operation,
+        }),
+      ),
+    );
+
+/**
  * Creates whatever of the pod is missing and starts it; `fresh` also brings
  * the stack up, and `checkStack` first confirms a start finds the stack's
  * containers that its last stop recorded.
@@ -305,6 +336,14 @@ const bringUp = (
     yield* awaitDaemon(context, dindId);
     if (options.checkStack === true && found.dind?.status !== "paused")
       yield* checkStack(context, dindId);
+    if (found.agent === undefined && isT3PodAgentImage(context.plan.agent.image))
+      yield* context.host
+        .ensureImage({
+          tag: context.plan.agent.image,
+          dockerfile: POD_AGENT_IMAGE_DOCKERFILE,
+          labels: { "t3.managed": "true" },
+        })
+        .pipe(step("Building T3's pod agent image"));
     const agentId = yield* ensureContainer(
       context,
       found.agent,
@@ -312,6 +351,9 @@ const bringUp = (
       "Creating the agent container",
     );
     yield* startIfStopped(context, agentId, found.agent?.status, "Starting the agent container");
+    yield* Effect.forEach(context.plan.homeSeeds, (seed) => copyHomeSeed(context, agentId, seed), {
+      discard: true,
+    });
     if (context.plan.agent.mounts.some((mount) => mount.target === POD_PROXY_CA_PATH))
       yield* trustProxyCa(context, agentId);
     if (fresh) {

@@ -103,6 +103,7 @@ import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ContainerDriver from "./pod/ContainerDriver.ts";
 import * as PodHostnameRouter from "./pod/PodHostnameRouter.ts";
 import * as PodHostPorts from "./pod/PodHostPorts.ts";
+import * as PodPaths from "./pod/PodPaths.ts";
 import * as PodRuntimeService from "./pod/PodRuntimeService.ts";
 import * as PodRuntimeStore from "./pod/PodRuntimeStore.ts";
 import * as WorkspaceExecutionTarget from "./pod/WorkspaceExecutionTarget.ts";
@@ -429,6 +430,7 @@ const layerTerminal = TerminalManager.layer.pipe(
 
 const layerPodRuntime = PodRuntimeService.layer.pipe(
   Layer.provideMerge(layerWorkspaceExecutionTarget),
+  Layer.provide(PodPaths.layer),
   Layer.provide(layerTerminal),
   Layer.provide(layerPortScanner),
   Layer.provide(PodHostPorts.layer),
@@ -441,6 +443,7 @@ const layerPodRuntime = PodRuntimeService.layer.pipe(
 // One listener: the placement is the only consumer of the pod-facing MCP listener.
 const layerPodProviderPlacement = PodProviderSessionsLive.layerPlacement.pipe(
   Layer.provide(PodMcpListener.layer),
+  Layer.provide(PodPaths.layer),
   Layer.provide(layerPodRuntime),
 );
 
@@ -448,6 +451,7 @@ const layerPodProviderPlacement = PodProviderSessionsLive.layerPlacement.pipe(
 const layerProviderPodProcess = PodProviderSessionsLive.layerProcess.pipe(
   Layer.provide(layerWorkspaceExecutionTarget),
   Layer.provide(layerPersistence),
+  Layer.provide(PodPaths.layer),
 );
 
 const layerWorktreeLifecycle = WorktreeLifecycle.layer.pipe(

@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { ProviderInstanceId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -8,6 +8,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
@@ -16,6 +17,11 @@ import * as EffectAcpErrors from "effect-acp/errors";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import {
+  type PodProcessSpec,
+  type ProviderPod,
+  ProviderPodProcesses,
+} from "@t3tools/provider-core/server/podProcess";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import * as ServerSettings from "../../serverSettings.ts";
 import type {
@@ -469,5 +475,148 @@ describe("AcpRegistryAdapterV2", () => {
         description: null,
       });
     }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+});
+
+/** Every message down an error's cause chain, where the adapter wraps the runtime's own. */
+const errorChain = (error: unknown): string =>
+  error instanceof Error ? `${error.message} ${errorChain(error.cause)}` : String(error ?? "");
+
+describe("ACP Registry agents in a pod", () => {
+  const POD_ENDPOINT = "http://host.docker.internal:17773/mcp";
+  const MANAGED_COMMAND = "/home/dev/.t3/tools/fixture-agent/1.0.0/linux-x86_64/fixture-agent";
+
+  const openInPod = (input: {
+    readonly hostBinariesRun: boolean;
+    readonly distribution: "binary" | "local" | "uvx";
+  }) =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const instanceId = ProviderInstanceId.make("acp-registry-pod");
+      const threadId = ThreadId.make("thread-acp-registry-pod");
+      yield* (yield* McpProviderSessions.McpProviderSessions).set({
+        environmentId: EnvironmentId.make("environment-registry-pod"),
+        threadId,
+        providerSessionId: "mcp-session-registry-pod",
+        providerInstanceId: instanceId,
+        endpoint: POD_ENDPOINT,
+        hostEndpoint: "http://127.0.0.1:43123/mcp",
+        authorizationHeader: "Bearer registry-pod-token",
+        browserToolsAvailable: true,
+      });
+      const launches: Array<PodProcessSpec> = [];
+      let stops = 0;
+      let resolves = 0;
+      const pod: ProviderPod = {
+        podId: "pod-registry",
+        hostBinariesRun: input.hostBinariesRun,
+        launch: (spec) =>
+          Effect.sync(() => {
+            launches.push(spec);
+            return {
+              command: process.execPath,
+              args: [mockAgentPath],
+              env: { T3_ACP_SESSION_LIFECYCLE: "1" },
+              stop: Effect.sync(() => {
+                stops += 1;
+              }),
+            };
+          }),
+      };
+      const catalog = Layer.mock(AcpRegistrySupport.AcpRegistryCatalog)({
+        resolve: (_settings, cwd, environment) =>
+          Effect.sync(() => {
+            resolves += 1;
+          }).pipe(
+            Effect.as({
+              distribution: input.distribution,
+              spawn: {
+                command: MANAGED_COMMAND,
+                args: ["--acp"],
+                cwd,
+                env: { ...environment, AGENT_MODE: "registry" },
+              },
+              distributionEnv: { AGENT_MODE: "registry" },
+            }),
+          ),
+      });
+      const opened = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const adapter = yield* makeAcpRegistryAdapterV2({
+            selfInvocation: yield* resolveSelfInvocation(),
+            instanceId,
+            settings: yield* decodeAcpRegistryAdapterSettings(
+              input.distribution === "local"
+                ? { source: "local", commandPath: "fixture-agent" }
+                : { agentId: "fixture-agent" },
+            ),
+            environment: { HOST_ONLY: "server", INSTANCE_KEY: "instance" },
+            podEnvironment: { INSTANCE_KEY: "instance" },
+          }).pipe(
+            Effect.provide(catalog),
+            Effect.provideService(ProviderPodProcesses, {
+              forCwd: (cwd) => Effect.succeed(cwd === "/work/pod" ? pod : undefined),
+            }),
+          );
+          const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            cwd: "/work/pod",
+          });
+          const modelSelection = { instanceId, model: "default" };
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("provider-session-registry-pod"),
+            modelSelection,
+            runtimePolicy,
+          });
+          yield* runtime.ensureThread({ threadId, modelSelection, runtimePolicy });
+        }),
+      ).pipe(Effect.result);
+      return { opened, launches, stops: () => stops, resolves: () => resolves };
+    }).pipe(Effect.scoped, Effect.provide(layerTest));
+
+  it.effect("runs the managed install through the pod with the instance's and agent's env", () =>
+    Effect.gen(function* () {
+      const { opened, launches, stops } = yield* openInPod({
+        hostBinariesRun: true,
+        distribution: "binary",
+      });
+      assert.isTrue(Result.isSuccess(opened));
+      assert.lengthOf(launches, 1);
+      assert.equal(launches[0]?.command, MANAGED_COMMAND);
+      assert.deepEqual(launches[0]?.env, { INSTANCE_KEY: "instance", AGENT_MODE: "registry" });
+      assert.equal(stops(), 1);
+    }),
+  );
+
+  it.effect("refuses a managed install a macOS host cannot run in the pod", () =>
+    Effect.gen(function* () {
+      const managed = yield* openInPod({ hostBinariesRun: false, distribution: "binary" });
+      assert.isTrue(Result.isFailure(managed.opened));
+      if (Result.isFailure(managed.opened))
+        assert.include(errorChain(managed.opened.failure), "cannot run them in a pod");
+      assert.lengthOf(managed.launches, 0);
+      // Refused before the catalog downloads an install the pod could not use.
+      assert.equal(managed.resolves(), 0);
+      const local = yield* openInPod({ hostBinariesRun: false, distribution: "local" });
+      assert.isTrue(Result.isSuccess(local.opened));
+      assert.lengthOf(local.launches, 1);
+      // As configured, not the host PATH's hit: the pod looks the name up on its own PATH.
+      assert.equal(local.launches[0]?.command, "fixture-agent");
+    }),
+  );
+
+  it.effect("refuses a uv tool, which needs this host's Python", () =>
+    Effect.gen(function* () {
+      const uvx = yield* openInPod({ hostBinariesRun: true, distribution: "uvx" });
+      assert.isTrue(Result.isFailure(uvx.opened));
+      if (Result.isFailure(uvx.opened))
+        assert.include(errorChain(uvx.opened.failure), "host's Python");
+      assert.lengthOf(uvx.launches, 0);
+    }),
   );
 });

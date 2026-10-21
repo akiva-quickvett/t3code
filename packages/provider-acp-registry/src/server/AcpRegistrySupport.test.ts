@@ -1516,7 +1516,8 @@ describe("AcpRegistrySupport", () => {
         });
         const first = yield* resolver.uninstallManagedBinary({ agentId: "example-agent" });
         expect(first).toEqual({ agentId: "example-agent", removed: !referenced });
-        expect(yield* fileSystem.exists(agentRoot)).toBe(referenced);
+        // The agent's directory itself stays for pods that bind it; its versions go.
+        expect((yield* fileSystem.readDirectory(agentRoot)).length > 0).toBe(referenced);
         yield* hostSettings.set(DEFAULT_SERVER_SETTINGS);
         const second = yield* resolver.uninstallManagedBinary({ agentId: "example-agent" });
 
@@ -1525,7 +1526,7 @@ describe("AcpRegistrySupport", () => {
           agentId: "example-agent",
           removed: false,
         });
-        expect(yield* fileSystem.exists(agentRoot)).toBe(false);
+        expect(yield* fileSystem.readDirectory(agentRoot)).toEqual([]);
         expect(yield* fileSystem.exists(runnerCache)).toBe(true);
       }).pipe(
         Effect.scoped,

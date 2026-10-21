@@ -1,6 +1,7 @@
 import {
   PodRuntimeError,
   PodRuntimeId,
+  type PodRuntimeMcpListenerStatus,
   POD_RUNTIME_SHELL_STATES,
   type PodRuntimeOpenShellInput,
   type PodRuntimeOpenShellResult,
@@ -50,6 +51,7 @@ import {
   POD_LABEL,
   POD_PORTS_LABEL,
   planPod,
+  type PodPlan,
   podContainerNames,
   podEnvironmentStem,
   podNameStem,
@@ -64,6 +66,9 @@ import {
   PodStepError,
   probePodHostname,
 } from "./PodOperations.ts";
+import { podAgentImageTag } from "./PodAgentImage.ts";
+import { podMcpTransportFor, requirePodMcpTransport } from "./PodMcpTransport.ts";
+import { podFilesDir, PodPaths } from "./PodPaths.ts";
 import { resolvePodProviderMounts } from "./PodProviderMounts.ts";
 import {
   boundedPodMessage,
@@ -163,12 +168,24 @@ export class PodRuntimeService extends Context.Service<
      * it, so a host worktree made later at the same path runs its own teardown.
      */
     readonly releaseWorktree: (worktreePath: string) => Effect.Effect<void, PodRuntimeError>;
+    /**
+     * Records what a probe from the agent container found of T3's pod-facing
+     * MCP listener, for the pod started at `startedAt`; a later start or a
+     * change of state since then makes it moot, and nothing is recorded.
+     */
+    readonly noteMcpListener: (
+      podId: PodRuntimeId,
+      startedAt: string | null,
+      status: PodRuntimeMcpListenerStatus | null,
+    ) => Effect.Effect<void, PodRuntimeError>;
     /** Resolves once every queued Docker operation has finished. */
     readonly drain: Effect.Effect<void>;
   }
 >()("t3/pod/PodRuntimeService") {}
 
 const POD_SHELL_TERMINAL_ID = "pod-shell";
+/** Requests that make a new agent container, which then runs the default image of the time. */
+const MAKES_AGENT_CONTAINER = new Set<PodInternalOperation>(["recreate", "recreateAgentContainer"]);
 /** Docker's default endpoint or a socket on this machine. */
 const isLocalDockerHost = (dockerHost: string) =>
   dockerHost.length === 0 || dockerHost.startsWith("unix://");
@@ -210,6 +227,7 @@ const make = Effect.gen(function* () {
   const uid = yield* HostProcess.UserId;
   const gid = yield* HostProcess.GroupId;
   const services = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
+  const podPaths = yield* PodPaths;
 
   // Commands read and commit a pod's record under its state lock; its Docker
   // operations run one at a time under the operation lock, so a Remove asked
@@ -589,6 +607,19 @@ const make = Effect.gen(function* () {
           ? hostNetwork.resolvConf.pipe(Effect.map(PodHostPorts.upstreamNameservers))
           : Effect.succeed([]);
 
+  /** The host file as it is now, which the agent container copies into its own home when it starts. */
+  const snapshotHomeSeed = (seed: PodPlan["homeSeeds"][number]) =>
+    fileSystem.makeDirectory(path.dirname(seed.snapshot), { recursive: true }).pipe(
+      Effect.andThen(fileSystem.copyFile(seed.host, seed.snapshot)),
+      Effect.andThen(fileSystem.chmod(seed.snapshot, 0o600)),
+      Effect.catch((error) =>
+        Effect.logWarning("could not copy a provider config file for a pod", {
+          file: seed.host,
+          detail: error.message,
+        }),
+      ),
+    );
+
   /**
    * A pod in hostname mode resolves through the proxy's DNS server at the
    * address it had when the daemon was built; a server that moved since
@@ -621,6 +652,8 @@ const make = Effect.gen(function* () {
     operation: PodInternalOperation,
   ) {
     const { snapshot } = record;
+    const makesNoContainer =
+      operation === "stop" || operation === "freeze" || operation === "remove";
     const root = yield* projectRoot(snapshot.projectId);
     const { settings, podRuntime } = yield* settingsFor(snapshot.projectId);
     const config =
@@ -639,13 +672,35 @@ const make = Effect.gen(function* () {
         Effect.map((result) => result.stdout.trim()),
         Effect.orElseSucceed(() => path.join(root ?? snapshot.worktreePath, ".git")),
       );
-    const providerMounts = yield* resolvePodProviderMounts(settings, snapshot.projectId).pipe(
-      Effect.provide(services),
-    );
+    const providerMounts = yield* resolvePodProviderMounts(
+      settings,
+      snapshot.projectId,
+      podPaths,
+    ).pipe(Effect.provide(services));
+    const filesDir = podPaths === undefined ? null : podFilesDir(podPaths.filesRoot, snapshot.id);
+    // Docker refuses to bind a directory that does not exist; a registry agent
+    // installs into its own on its first session, after the container is made.
+    if (operation !== "remove")
+      yield* Effect.forEach(
+        [...(filesDir === null ? [] : [filesDir]), ...providerMounts.toolDirs],
+        (dir) => fileSystem.makeDirectory(dir, { recursive: true }),
+        { discard: true },
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new PodStepError({
+              step: "Creating the pod's directories",
+              exitCode: null,
+              timedOut: false,
+              daemonMessage: cause.message,
+              cause,
+            }),
+        ),
+      );
     const plan = planPod({
       podId: snapshot.id,
       environmentId,
-      image: snapshot.image,
+      image: podAgentImageTag(snapshot.image),
       network: podRuntime.network,
       worktreePath: snapshot.worktreePath,
       gitCommonDir,
@@ -663,7 +718,27 @@ const make = Effect.gen(function* () {
         podRuntime.dnsServers,
       ),
       proxyCaRoot: hostnameMode ? proxy.caRootPath : null,
+      filesDir,
+      // Stop, freeze and remove make no container, so they need no answer.
+      mcpTransport: yield* (
+        makesNoContainer
+          ? podMcpTransportFor(driver.forHost(record.dockerHost))
+          : requirePodMcpTransport(driver.forHost(record.dockerHost))
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new PodStepError({
+              step: "Asking Docker which engine it runs (`docker info`)",
+              exitCode: cause.exitCode,
+              timedOut: false,
+              daemonMessage: cause.daemonMessage ?? "Docker did not answer.",
+              cause,
+            }),
+        ),
+      ),
     });
+    if (!makesNoContainer)
+      yield* Effect.forEach(plan.homeSeeds, snapshotHomeSeed, { discard: true });
     return {
       podId: snapshot.id,
       environmentId,
@@ -722,6 +797,13 @@ const make = Effect.gen(function* () {
       Effect.flatMap((context) => runPodOperation(item.operation, context)),
       Effect.result,
     );
+    // The pod's files, a provider config copy among them, go with its record.
+    const removeFiles =
+      item.operation === "remove" && podPaths !== undefined
+        ? fileSystem
+            .remove(podFilesDir(podPaths.filesRoot, item.podId), { recursive: true, force: true })
+            .pipe(Effect.ignore)
+        : Effect.void;
     if (Result.isFailure(outcome)) {
       yield* Effect.logWarning("pod operation failed", {
         podId: item.podId,
@@ -729,14 +811,20 @@ const make = Effect.gen(function* () {
         error: outcome.failure._tag,
       });
       const routes = yield* syncRoutes(item.podId, null);
-      return yield* complete(item, outcome.failure.message, undefined, routes.event);
+      yield* complete(item, outcome.failure.message, undefined, routes.event);
+      // "Remove anyway" forgets the pod although Docker refused.
+      if (item.force) yield* removeFiles;
+      return;
     }
     const routes = yield* syncRoutes(item.podId, item.operation);
     // A wake must find the pod as it was, hostnames included; creation keeps
     // M12's rule that a route problem never fails the pod, only notes it.
     const unverified =
       item.operation === "start" ? yield* verifyHostnames(item.podId, routes.failed) : null;
-    if (unverified === null) return yield* complete(item, null, outcome.success, routes.event);
+    if (unverified === null) {
+      yield* complete(item, null, outcome.success, routes.event);
+      return yield* removeFiles;
+    }
     yield* Effect.logWarning("pod started without its hostnames", { podId: item.podId });
     // A failed start serves nothing, so its route goes; its containers keep
     // running for the shell, and Stop or Recreate is the user's call.
@@ -878,7 +966,14 @@ const make = Effect.gen(function* () {
       });
       if (Result.isFailure(planned)) return yield* planned.failure;
       if (planned.success.type === "none") return record.snapshot;
-      const { event } = planned.success;
+      const event =
+        planned.success.event.type === "pod.operation-requested" &&
+        MAKES_AGENT_CONTAINER.has(planned.success.event.operation)
+          ? {
+              ...planned.success.event,
+              image: (yield* settingsFor(record.snapshot.projectId)).podRuntime.defaultImage,
+            }
+          : planned.success.event;
       const next = yield* commit(podId, [event]);
       if (event.type === "pod.operation-requested")
         yield* enqueue({ podId, operation: event.operation, force: options.force === true });
@@ -1369,6 +1464,23 @@ const make = Effect.gen(function* () {
           );
         }
       }),
+    noteMcpListener: (podId, startedAt, status) =>
+      stateLocks.withLock(
+        podId,
+        Effect.gen(function* () {
+          const current = yield* store.get(podId);
+          if (
+            current === undefined ||
+            current.snapshot.state !== "running" ||
+            current.snapshot.startedAt !== startedAt ||
+            (current.snapshot.mcpListener ?? null) === status
+          )
+            return;
+          yield* commit(podId, [
+            { type: "pod.mcp-listener-probed", podId, occurredAt: yield* nowIso, status },
+          ]);
+        }),
+      ),
     drain: TxRef.get(outstanding).pipe(
       Effect.flatMap((count) => (count > 0 ? Effect.txRetry : Effect.void)),
       Effect.tx,

@@ -25,6 +25,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { podInstanceEnvironment } from "@t3tools/provider-core/server/podProcess";
 import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
 import {
   applyGrokAcpModelSelection,
@@ -110,10 +111,15 @@ export const GrokProviderCapabilitiesV2 = {
   },
 } satisfies OrchestrationV2ProviderCapabilities;
 
+/** Where Grok keeps its login and sessions instead of `~/.grok`. */
+const GROK_HOME_ENV = "GROK_HOME";
+
 export interface GrokAdapterV2Options {
   readonly instanceId: Parameters<typeof makeAcpAdapterV2>[0]["instanceId"];
   readonly settings: GrokSettings;
   readonly environment: NodeJS.ProcessEnv;
+  /** The instance's own variables: all Grok inherits in a pod, where the server's env stays out. */
+  readonly podEnvironment?: NodeJS.ProcessEnv;
   readonly hostPlatform: NodeJS.Platform;
   readonly selfInvocation: SelfInvocation;
   readonly nativeLogging?: Parameters<typeof makeAcpAdapterV2>[0]["nativeLogging"];
@@ -279,6 +285,7 @@ export function makeGrokAcpAdapterFlavor(
           mapError: (cause) => cause,
         });
       }),
+    runsInPods: true,
     makeRuntime:
       options.makeRuntime ??
       (({ runtimePolicy, ...input }) =>
@@ -286,7 +293,8 @@ export function makeGrokAcpAdapterFlavor(
           ...input,
           interruptPromptOnCancel: input.interruptPromptOnCancel ?? false,
           grokSettings: options.settings,
-          environment: options.environment,
+          environment:
+            input.pod === undefined ? options.environment : (options.podEnvironment ?? {}),
           runtimeMode: grokLaunchRuntimeMode(runtimePolicy),
         })),
     // In its Auto mode Grok decides routine actions itself and only asks about
@@ -369,10 +377,19 @@ export const GrokAdapterV2Driver: ProviderAdapterDriver<GrokSettings, GrokAdapte
       const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
       const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
       const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
+      const environment = yield* mergeProviderInstanceEnvironment(
+        input.environment,
+        hostEnvironment,
+      );
       return yield* makeGrokAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment,
+        podEnvironment: podInstanceEnvironment(
+          yield* mergeProviderInstanceEnvironment(input.environment, {}),
+          environment,
+          [GROK_HOME_ENV],
+        ),
         hostPlatform,
         selfInvocation,
         continuationRequests,
@@ -423,6 +440,7 @@ const layer: Layer.Layer<
       instanceId: GROK_DEFAULT_INSTANCE_ID,
       settings: DEFAULT_GROK_SETTINGS,
       environment: hostEnvironment,
+      podEnvironment: podInstanceEnvironment({}, hostEnvironment, [GROK_HOME_ENV]),
       hostPlatform,
       selfInvocation,
       continuationRequests,

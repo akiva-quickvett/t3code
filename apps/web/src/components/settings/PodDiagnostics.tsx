@@ -1,5 +1,6 @@
 import {
   type PodRuntimeAction,
+  podMcpListenerProblem,
   podRuntimeActions,
   podRuntimeStatePresentation,
   podServiceLinks,
@@ -72,6 +73,7 @@ function PodRow(props: {
   readonly allowed: (action: PodRuntimeAction) => boolean;
 }) {
   const presentation = podRuntimeStatePresentation(props.pod.state);
+  const listenerProblem = podMcpListenerProblem(props.pod);
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 sm:px-5">
       <div className="min-w-0 flex-1">
@@ -87,6 +89,9 @@ function PodRow(props: {
         </div>
         {props.pod.hostnameProblem === undefined ? null : (
           <div className="text-warning text-xs">{props.pod.hostnameProblem}</div>
+        )}
+        {listenerProblem === undefined ? null : (
+          <div className="text-warning text-xs">{listenerProblem}</div>
         )}
         <PodServices environmentId={props.environmentId} pod={props.pod} />
       </div>

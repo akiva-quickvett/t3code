@@ -30,6 +30,7 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { AgentScope, AgentScopeThreadId, RAISE_OOM_SCORE_LINE } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
+import { definedEnvironment, type ProviderPod } from "@t3tools/provider-core/server/podProcess";
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
 import { appendAcpStderrTail, sanitizeAcpStderrExcerpt } from "./stderr.ts";
 import {
@@ -93,6 +94,11 @@ export interface AcpSpawnInput {
 
 export interface AcpSessionRuntimeOptions {
   readonly spawn: AcpSpawnInput;
+  /**
+   * The pod to run the agent in, through `docker exec`; `spawn.env` is then
+   * the whole environment it gets, none of the server's.
+   */
+  readonly pod?: ProviderPod;
   readonly cwd: string;
   readonly resumeSessionId?: string;
   readonly resumeMethod?: "load" | "resume";
@@ -1255,14 +1261,40 @@ interface AcpActivePrompt {
   readonly completed: Deferred.Deferred<void>;
 }
 
+/**
+ * The MCP servers a session gets: MCP over ACP when the agent takes it, else
+ * the transports it advertises. Stdio is every agent's; ACP lets a client send
+ * http or sse only to an agent that says it takes them.
+ */
+export const selectSessionMcpServers = (
+  initializeResult: EffectAcpSchema.InitializeResponse,
+  mcpServers: ReadonlyArray<EffectAcpSchema.McpServer>,
+  acpServers: ReadonlyArray<EffectAcpSchema.McpServer>,
+): ReadonlyArray<EffectAcpSchema.McpServer> => {
+  const capabilities = initializeResult.agentCapabilities?.mcpCapabilities;
+  if (capabilities?.acp === true && acpServers.length > 0) return acpServers;
+  return mcpServers.filter((server) =>
+    "type" in server && server.type === "http"
+      ? capabilities?.http === true
+      : "type" in server && server.type === "sse"
+        ? capabilities?.sse === true
+        : true,
+  );
+};
+
 export const make = (
-  options: AcpSessionRuntimeOptions,
+  runtimeOptions: AcpSessionRuntimeOptions,
 ): Effect.Effect<
   AcpSessionRuntime["Service"],
   EffectAcpErrors.AcpError,
   ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
 > =>
   Effect.gen(function* () {
+    // The host only runs a pod's docker CLI, whose descendants are not the agent's.
+    const options: AcpSessionRuntimeOptions =
+      runtimeOptions.pod === undefined
+        ? runtimeOptions
+        : { ...runtimeOptions, ownDescendantProcessGroups: false, linuxCgroupController: null };
     const crypto = yield* Crypto.Crypto;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.fork(yield* Scope.Scope);
@@ -1394,13 +1426,27 @@ export const make = (
         ),
       );
 
-    const spawnCommand =
-      options.spawn.shell === false
-        ? { command: options.spawn.command, args: options.spawn.args, shell: false }
-        : yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
-            ...(options.spawn.env ? { env: options.spawn.env } : {}),
-            extendEnv: options.spawn.extendEnv ?? true,
+    // The docker CLI forwards no signal, so the launch's own stop ends the
+    // agent and its children in the container, after the CLI is gone.
+    const podLaunch =
+      options.pod === undefined
+        ? undefined
+        : yield* options.pod.launch({
+            command: options.spawn.command,
+            args: options.spawn.args,
+            cwd: options.spawn.cwd ?? options.cwd,
+            env: definedEnvironment(options.spawn.env),
           });
+    if (podLaunch !== undefined) yield* Scope.addFinalizer(runtimeScope, podLaunch.stop);
+    const spawnCommand =
+      podLaunch !== undefined
+        ? { command: podLaunch.command, args: podLaunch.args, shell: false }
+        : options.spawn.shell === false
+          ? { command: options.spawn.command, args: options.spawn.args, shell: false }
+          : yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
+              ...(options.spawn.env ? { env: options.spawn.env } : {}),
+              extendEnv: options.spawn.extendEnv ?? true,
+            });
     const linuxCgroupLease =
       options.ownDescendantProcessGroups === true && options.processGroupPlatform === "linux"
         ? yield* Effect.sync(() => {
@@ -1438,7 +1484,7 @@ export const make = (
             });
           });
     const scopedSpawnCommand =
-      linuxCgroupLease !== undefined || spawnCommand.shell
+      linuxCgroupLease !== undefined || spawnCommand.shell || podLaunch !== undefined
         ? spawnCommand
         : {
             ...(yield* (yield* AgentScope).wrap({
@@ -1462,17 +1508,19 @@ export const make = (
             shell: false,
           };
     const spawnEnvironment =
-      linuxCgroupLease === undefined
-        ? options.spawn.env
-        : {
-            ...options.spawn.env,
-            ELECTRON_RUN_AS_NODE: "1",
-            T3_ACP_CGROUP_WRAPPER: "1",
-          };
+      podLaunch !== undefined
+        ? { ...process.env, ...podLaunch.env }
+        : linuxCgroupLease === undefined
+          ? options.spawn.env
+          : {
+              ...options.spawn.env,
+              ELECTRON_RUN_AS_NODE: "1",
+              T3_ACP_CGROUP_WRAPPER: "1",
+            };
     const child = yield* spawner
       .spawn(
         ChildProcess.make(containedSpawnCommand.command, containedSpawnCommand.args, {
-          ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
+          ...(options.spawn.cwd && podLaunch === undefined ? { cwd: options.spawn.cwd } : {}),
           ...(spawnEnvironment ? { env: spawnEnvironment } : {}),
           extendEnv: options.spawn.extendEnv ?? true,
           ...(options.ownDetachedProcessGroup === undefined
@@ -2109,16 +2157,12 @@ export const make = (
     const sessionMcpServers = (
       initializeResult: EffectAcpSchema.InitializeResponse,
       activationOptions?: AcpSessionActivationOptions,
-    ): ReadonlyArray<EffectAcpSchema.McpServer> => {
-      const acpServers = activationOptions?.acpMcpServers ?? options.acpMcpServers ?? [];
-      if (
-        initializeResult.agentCapabilities?.mcpCapabilities?.acp === true &&
-        acpServers.length > 0
-      ) {
-        return acpServers;
-      }
-      return activationOptions?.mcpServers ?? options.mcpServers ?? [];
-    };
+    ): ReadonlyArray<EffectAcpSchema.McpServer> =>
+      selectSessionMcpServers(
+        initializeResult,
+        activationOptions?.mcpServers ?? options.mcpServers ?? [],
+        activationOptions?.acpMcpServers ?? options.acpMcpServers ?? [],
+      );
 
     const startOnce = Effect.gen(function* () {
       const initializeResult = yield* initialize;

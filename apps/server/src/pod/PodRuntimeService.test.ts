@@ -2,12 +2,14 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  DEFAULT_POD_RUNTIME_IMAGE,
   EnvironmentId,
   PodRuntimeId,
   ProjectId,
   type T3ProjectFile,
   ThreadId,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -29,7 +31,9 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ContainerDriver from "./ContainerDriver.ts";
 import * as PodHostnameRouter from "./PodHostnameRouter.ts";
+import { podAgentImageTag } from "./PodAgentImage.ts";
 import * as PodHostPorts from "./PodHostPorts.ts";
+import * as PodPaths from "./PodPaths.ts";
 import * as PodRuntimeService from "./PodRuntimeService.ts";
 import * as PodRuntimeStore from "./PodRuntimeStore.ts";
 import {
@@ -68,6 +72,9 @@ const harness = (options: {
   readonly network?: FakeHostNetwork;
   readonly router?: FakePodHostnameRouter;
   readonly projects?: ReadonlyArray<{ readonly id: ProjectId; readonly workspaceRoot: string }>;
+  readonly defaultImage?: string;
+  readonly filesRoot?: string;
+  readonly homeDirectory?: string;
   readonly snoozeAction?: "stop" | "freeze";
 }) => {
   const opened: Array<string> = [];
@@ -86,9 +93,28 @@ const harness = (options: {
         publishOnTailnet: options.publishOnTailnet ?? false,
         ...(options.dnsServers === undefined ? {} : { dnsServers: options.dnsServers }),
         ...(options.dockerHost === undefined ? {} : { dockerHost: options.dockerHost }),
+        ...(options.defaultImage === undefined ? {} : { defaultImage: options.defaultImage }),
         ...(options.snoozeAction === undefined ? {} : { snoozeAction: options.snoozeAction }),
       },
     }),
+    ...(options.homeDirectory === undefined
+      ? []
+      : [
+          Layer.succeed(HostProcess.HomeDirectory, options.homeDirectory),
+          // Not this process's own, which may point Claude at another config dir.
+          Layer.succeed(HostProcess.Environment, {}),
+        ]),
+    Layer.succeed(
+      PodPaths.PodPaths,
+      options.filesRoot === undefined
+        ? undefined
+        : {
+            t3Home: `${options.filesRoot}/home`,
+            providerHomesDir: `${options.filesRoot}/home/userdata/providers`,
+            filesRoot: options.filesRoot,
+            toolsDir: `${options.filesRoot}/tools`,
+          },
+    ),
     Layer.mock(ProjectService.ProjectService)({
       getById: () => Effect.succeed(Option.some({ workspaceRoot: "/work/repo" } as never)),
       listShells: () => Effect.succeed((options.projects ?? []) as never),
@@ -138,13 +164,16 @@ const harness = (options: {
 
 const withPods = <A, E>(
   driver: FakeContainerDriver,
-  body: (pods: PodRuntimeService.PodRuntimeService["Service"]) => Effect.Effect<A, E, never>,
+  body: (
+    pods: PodRuntimeService.PodRuntimeService["Service"],
+    settings: ServerSettings.ServerSettingsService["Service"],
+  ) => Effect.Effect<A, E, never>,
   options: Omit<Parameters<typeof harness>[0], "driver"> = {},
 ) =>
   Effect.gen(function* () {
     const pods = yield* PodRuntimeService.PodRuntimeService;
     yield* pods.drain;
-    return yield* body(pods);
+    return yield* body(pods, yield* ServerSettings.ServerSettingsService);
   }).pipe(
     Effect.provide(
       PodRuntimeService.layer.pipe(Layer.provideMerge(harness({ driver, ...options }).base)),
@@ -185,6 +214,189 @@ describe("PodRuntimeService", () => {
           { concurrency: "unbounded" },
         );
         expect(second.id).toBe(first.id);
+      }),
+    );
+  });
+
+  it.effect("builds T3's default agent image before the first agent container only", () => {
+    const driver = makeFakeContainerDriver();
+    return withPods(driver, (pods) =>
+      Effect.gen(function* () {
+        const { id } = yield* pods.create({ projectId, worktreePath });
+        yield* pods.drain;
+        const steps = operations(driver);
+        const build = steps.indexOf(`image ${podAgentImageTag(DEFAULT_POD_RUNTIME_IMAGE)}`);
+        expect(build).toBeGreaterThan(-1);
+        expect(build).toBeLessThan(steps.indexOf(`createContainer t3-envtest-${id}-agent`));
+        driver.calls.length = 0;
+        yield* pods.stop(id);
+        yield* pods.drain;
+        yield* pods.start(id);
+        yield* pods.drain;
+        expect(operations(driver).filter((step) => step.startsWith("image"))).toEqual([]);
+      }),
+    );
+  });
+
+  it.effect("makes a recreated agent container from the default image of the time", () => {
+    const driver = makeFakeContainerDriver();
+    return withPods(
+      driver,
+      (pods, settings) =>
+        Effect.gen(function* () {
+          const { id } = yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          yield* settings.updateSettings({
+            podRuntime: { defaultImage: DEFAULT_POD_RUNTIME_IMAGE },
+          });
+          yield* pods.recreateAgentContainer(id);
+          yield* pods.drain;
+          expect((yield* pods.awaitSettled(id)).image).toBe(DEFAULT_POD_RUNTIME_IMAGE);
+          const agent = driver.containers().find((container) => container.name.endsWith("-agent"));
+          expect(agent?.spec?.image).toBe(podAgentImageTag(DEFAULT_POD_RUNTIME_IMAGE));
+        }),
+      { defaultImage: "docker:27-cli" },
+    );
+  });
+
+  it.effect(
+    "fails a start on Linux when Docker cannot say which engine it is, rather than guess",
+    () => {
+      const driver = makeFakeContainerDriver();
+      driver.setEngineOperatingSystem(null);
+      return withPods(driver, (pods) =>
+        Effect.gen(function* () {
+          const { id } = yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          const failed = yield* pods.awaitSettled(id);
+          expect(failed.state).toBe("start_failed");
+          expect(failed.lastError?.message).toContain("docker info");
+          expect(operations(driver).some((step) => step.startsWith("createContainer"))).toBe(false);
+        }),
+      ).pipe(Effect.provideService(HostProcess.Platform, "linux"));
+    },
+  );
+
+  it.effect("leaves a configured agent image to Docker", () => {
+    const driver = makeFakeContainerDriver();
+    return withPods(
+      driver,
+      (pods) =>
+        Effect.gen(function* () {
+          yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          expect(operations(driver).filter((step) => step.startsWith("image"))).toEqual([]);
+        }),
+      { defaultImage: "registry.example/agent:2" },
+    );
+  });
+
+  it.effect("mounts the pod's own files dir read-only and removes it with the pod", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const filesRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-pod-files-" });
+      const driver = makeFakeContainerDriver();
+      yield* withPods(
+        driver,
+        (pods) =>
+          Effect.gen(function* () {
+            const { id } = yield* pods.create({ projectId, worktreePath });
+            yield* pods.drain;
+            const filesDir = `${filesRoot}/${id}`;
+            expect(yield* fileSystem.exists(filesDir)).toBe(true);
+            const agent = driver
+              .containers()
+              .find((container) => container.name.endsWith("-agent"));
+            expect(agent?.spec?.mounts).toContainEqual({
+              type: "bind",
+              source: filesDir,
+              target: filesDir,
+              readOnly: true,
+            });
+            yield* pods.remove({ podId: id });
+            yield* pods.drain;
+            expect(yield* fileSystem.exists(filesDir)).toBe(false);
+          }),
+        { filesRoot },
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "copies the default Claude layout's .claude.json into the agent's home on each start",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-pod-home-" });
+        const filesRoot = `${home}/.t3/caches/pods`;
+        yield* fileSystem.writeFileString(`${home}/.claude.json`, '{"numStartups":1}');
+        const driver = makeFakeContainerDriver();
+        yield* withPods(
+          driver,
+          (pods) =>
+            Effect.gen(function* () {
+              const { id } = yield* pods.create({ projectId, worktreePath });
+              yield* pods.drain;
+              const snapshot = `${filesRoot}/${id}/home/.claude.json`;
+              expect(yield* fileSystem.readFileString(snapshot)).toBe('{"numStartups":1}');
+              const copies = () =>
+                operations(driver).filter((step) => step.includes(`cp -n ${snapshot}`));
+              expect(copies()).toEqual([
+                `exec t3-envtest-${id}-agent cp -n ${snapshot} ${home}/.claude.json`,
+              ]);
+              // A later start takes the host's file as it is then.
+              yield* fileSystem.writeFileString(`${home}/.claude.json`, '{"numStartups":2}');
+              driver.calls.length = 0;
+              yield* pods.stop(id);
+              yield* pods.drain;
+              yield* pods.start(id);
+              yield* pods.drain;
+              expect(copies()).toHaveLength(1);
+              expect(yield* fileSystem.readFileString(snapshot)).toBe('{"numStartups":2}');
+            }),
+          { filesRoot, homeDirectory: home },
+        );
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("removes the pod's files dir when Remove anyway forgets a pod Docker kept", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const filesRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-pod-files-" });
+      const driver = makeFakeContainerDriver();
+      yield* withPods(
+        driver,
+        (pods) =>
+          Effect.gen(function* () {
+            const { id } = yield* pods.create({ projectId, worktreePath });
+            yield* pods.drain;
+            driver.failWhen((call) => call.operation === "removeContainer");
+            yield* pods.remove({ podId: id, force: true });
+            yield* pods.drain;
+            expect((yield* pods.awaitSettled(id)).state).toBe("removed");
+            expect(yield* fileSystem.exists(`${filesRoot}/${id}`)).toBe(false);
+          }),
+        { filesRoot },
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("records the listener probe for the current start only, and forgets it on stop", () => {
+    const driver = makeFakeContainerDriver();
+    return withPods(driver, (pods) =>
+      Effect.gen(function* () {
+        const { id } = yield* pods.create({ projectId, worktreePath });
+        yield* pods.drain;
+        const running = yield* pods.awaitSettled(id);
+        yield* pods.noteMcpListener(id, "1999-01-01T00:00:00.000Z", "blocked");
+        expect(yield* pods.awaitSettled(id)).not.toHaveProperty("mcpListener");
+        yield* pods.noteMcpListener(id, running.startedAt, "blocked");
+        expect((yield* pods.awaitSettled(id)).mcpListener).toBe("blocked");
+        yield* pods.noteMcpListener(id, running.startedAt, "reachable");
+        expect((yield* pods.awaitSettled(id)).mcpListener).toBe("reachable");
+        yield* pods.stop(id);
+        yield* pods.drain;
+        expect(yield* pods.awaitSettled(id)).not.toHaveProperty("mcpListener");
       }),
     );
   });

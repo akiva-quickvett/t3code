@@ -14,7 +14,7 @@ import { POD_HOST_ALIAS } from "../pod/PodContainerPlan.ts";
 import type * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 
 /** Drivers whose sessions are a process T3 spawns, which `docker exec` can put in a pod. */
-const POD_DRIVERS = new Set<string>(["claudeAgent", "codex"]);
+const POD_DRIVERS = new Set<string>(["claudeAgent", "codex", "pi", "grok", "acpRegistry"]);
 
 const POD_REFUSALS: Record<string, string> = {
   cursor: "Cursor runs inside the T3 server process, so its sessions cannot run in a pod.",
@@ -22,6 +22,7 @@ const POD_REFUSALS: Record<string, string> = {
     "OpenCode serves every directory from one server per instance, so its sessions cannot run in a pod.",
   antigravity:
     "Antigravity's profile isolation and installer are bound to the host, so its sessions cannot run in a pod.",
+  muse: "T3 does not know where Muse keeps its login to mount it, Muse's own tool sandbox is untested in a container, and its device tools come from a host directory, so its sessions cannot run in a pod.",
 };
 
 /**
@@ -31,17 +32,11 @@ const POD_REFUSALS: Record<string, string> = {
 export const podRefusalReason = (driver: ProviderDriverKind): string | undefined =>
   POD_DRIVERS.has(driver)
     ? undefined
-    : (POD_REFUSALS[driver] ?? "Only Claude and Codex sessions run in a pod for now.");
+    : (POD_REFUSALS[driver] ??
+      "Only Claude, Codex, Pi, Grok and ACP Registry sessions run in a pod.");
 
 /** The set variables of a process environment, as `docker exec` passes them by name. */
-export const podEnvironmentValues = (
-  environment: NodeJS.ProcessEnv | undefined,
-): Record<string, string> =>
-  Object.fromEntries(
-    Object.entries(environment ?? {}).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  );
+export { definedEnvironment as podEnvironmentValues } from "@t3tools/provider-core/server/podProcess";
 
 /** Whether an MCP URL is the pod-facing listener's rather than the server's own. */
 export const isPodMcpEndpoint = (endpoint: string) =>
@@ -138,7 +133,7 @@ export const ProviderPodProcess = Context.Reference<{
    */
   readonly launch: (
     target: WorkspaceExecutionTarget.PodExecutionTarget,
-    spec: Omit<ContainerDriver.PodExecSpec, "user">,
+    spec: Omit<ContainerDriver.PodExecSpec, "user"> & { readonly instanceCredentials?: true },
   ) => PodProviderLaunch;
 }>("t3/provider/PodProviderSessions/ProviderPodProcess", {
   defaultValue: () => ({

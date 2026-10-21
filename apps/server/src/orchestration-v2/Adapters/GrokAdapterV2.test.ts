@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  EnvironmentId,
   ProjectId,
   MessageId,
   NodeId,
@@ -37,6 +38,11 @@ import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "../../provider/ProviderInstanceRegistry.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import {
+  type PodProcessSpec,
+  type ProviderPod,
+  ProviderPodProcesses,
+} from "@t3tools/provider-core/server/podProcess";
 import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import { handoffBudget } from "@t3tools/provider-core/server/handoffBudget";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -793,6 +799,124 @@ describe("Grok native questions", () => {
         answers: { changes: ["Tests", "Docs"] },
       });
       yield* Deferred.await(terminal);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+});
+
+describe("Grok in a pod", () => {
+  const layerHost = TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer));
+  const layerTest = Layer.mergeAll(
+    NodeServices.layer,
+    IdAllocator.layer,
+    McpProviderSessions.layer,
+    layerHost,
+  );
+  const POD_ENDPOINT = "http://host.docker.internal:17773/mcp";
+
+  it.effect.each([
+    { takesHttp: true, label: "an agent that takes HTTP MCP gets the pod listener" },
+    { takesHttp: false, label: "an agent without HTTP MCP gets no server it cannot use" },
+  ])("spawns through the pod with the instance's env; $label", ({ takesHttp }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-grok-pod-" });
+      const requestLog = path.join(dir, "requests.ndjson");
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const instanceId = ProviderInstanceId.make("grok-pod-test");
+      const threadId = ThreadId.make("grok-pod-test");
+      yield* (yield* McpProviderSessions.McpProviderSessions).set({
+        environmentId: EnvironmentId.make("environment-grok-pod"),
+        threadId,
+        providerSessionId: "mcp-session-grok-pod",
+        providerInstanceId: instanceId,
+        endpoint: POD_ENDPOINT,
+        hostEndpoint: "http://127.0.0.1:43123/mcp",
+        authorizationHeader: "Bearer grok-pod-token",
+        browserToolsAvailable: true,
+      });
+      const launches: Array<PodProcessSpec> = [];
+      let stops = 0;
+      // The "pod" runs the mock agent on this machine, as docker exec would in the container.
+      const pod: ProviderPod = {
+        podId: "pod-grok",
+        hostBinariesRun: true,
+        launch: (spec) =>
+          Effect.sync(() => {
+            launches.push(spec);
+            return {
+              command: process.execPath,
+              args: [mockAgentPath],
+              env: {
+                T3_ACP_SESSION_LIFECYCLE: "1",
+                T3_ACP_REQUEST_LOG_PATH: requestLog,
+                ...(takesHttp ? { T3_ACP_MCP_HTTP: "1" } : {}),
+              },
+              stop: Effect.sync(() => {
+                stops += 1;
+              }),
+            };
+          }),
+      };
+      const modelSelection = { instanceId, model: "grok-build" };
+      const policy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: "/work/pod",
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const adapter = yield* makeGrokAdapterV2({
+            instanceId,
+            settings: LAUNCH_TEST_GROK_SETTINGS,
+            environment: { HOST_ONLY: "server", INSTANCE_KEY: "instance" },
+            podEnvironment: { INSTANCE_KEY: "instance" },
+            hostPlatform: "linux",
+            selfInvocation: yield* resolveSelfInvocation(),
+          }).pipe(
+            Effect.provideService(ProviderPodProcesses, {
+              forCwd: (cwd) => Effect.succeed(cwd === "/work/pod" ? pod : undefined),
+            }),
+          );
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("grok-pod-test"),
+            modelSelection,
+            runtimePolicy: policy,
+          });
+          yield* runtime.ensureThread({ threadId, modelSelection, runtimePolicy: policy });
+        }),
+      );
+
+      assert.lengthOf(launches, 1);
+      const launch = launches[0]!;
+      assert.equal(launch.command, "grok-launch-test");
+      assert.include(launch.args, "stdio");
+      assert.equal(launch.cwd, "/work/pod");
+      assert.equal(launch.env.INSTANCE_KEY, "instance");
+      assert.isUndefined(launch.env.HOST_ONLY);
+      assert.isFalse(Object.keys(launch.env).some((name) => name.startsWith("T3_")));
+      const sessionNew = (yield* fileSystem.readFileString(requestLog))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { method?: string; params?: { mcpServers?: unknown } })
+        .find((request) => request.method === "session/new");
+      assert.deepEqual(
+        sessionNew?.params?.mcpServers,
+        takesHttp
+          ? [
+              {
+                type: "http",
+                name: "t3-code",
+                url: POD_ENDPOINT,
+                headers: [{ name: "Authorization", value: "Bearer grok-pod-token" }],
+              },
+            ]
+          : [],
+      );
+      assert.equal(stops, 1);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });

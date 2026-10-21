@@ -91,6 +91,18 @@ export function podRuntimeWarningMessage(warning: PodRuntimeWarning): string {
   return WARNING_MESSAGES[warning];
 }
 
+/**
+ * Why a running pod's agents work without T3's tools: they cannot reach its
+ * pod-facing MCP listener, usually a host firewall on Linux or the engine's
+ * name resolution in a VM. Undefined while nothing says so, including on
+ * servers that do not probe.
+ */
+export function podMcpListenerProblem(pod: PodRuntimeSnapshot): string | undefined {
+  return pod.state === "running" && pod.mcpListener === "blocked"
+    ? "Agents in this pod cannot reach T3 Code's pod listener, so they run without its tools. See the Pods guide (Host firewall, or macOS and Docker Desktop), then start a new session."
+    : undefined;
+}
+
 export type PodRuntimeTone = "running" | "busy" | "idle" | "failed";
 
 const STATE_PRESENTATION: Readonly<
@@ -112,10 +124,11 @@ export function podRuntimeStatePresentation(state: PodRuntimeState) {
   return STATE_PRESENTATION[state];
 }
 
-/** The pod's state in a sentence, with why it failed or why it is stopped. */
+/** The pod's state in a sentence, with why it failed, why its agents lack T3's tools, or why it is stopped. */
 export function podRuntimeTitle(pod: PodRuntimeSnapshot): string {
   const { label } = podRuntimeStatePresentation(pod.state);
-  if (pod.lastError !== null) return `Pod ${label}: ${pod.lastError.message}`;
+  const detail = pod.lastError?.message ?? podMcpListenerProblem(pod);
+  if (detail !== undefined) return `Pod ${label}: ${detail}`;
   return pod.parked === true
     ? `Pod ${label} while its threads are snoozed or settled; it starts when one wakes`
     : `Pod ${label}`;

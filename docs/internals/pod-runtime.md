@@ -3,7 +3,7 @@
 A pod belongs to a worktree path, not to the thread that created it. Every thread, terminal and
 script on that path runs in the pod, so anything that runs a command in a workspace asks
 [`WorkspaceExecutionTarget`](../../apps/server/src/pod/WorkspaceExecutionTarget.ts) where to run
-it: the terminal manager, the setup-script runner, and the Claude and Codex spawns.
+it: the terminal manager, the setup-script runner, and the spawns of every provider that runs in pods.
 A caller that spawns on the host without asking runs the command against the wrong Docker daemon
 and the wrong filesystem view.
 
@@ -102,11 +102,19 @@ scope middleware.
 ## Provider sessions
 
 [`PodProviderPlacement`](../../apps/server/src/provider/PodProviderSessionsLive.ts) decides, when
-a provider session opens, where it runs. On a pod's worktree Claude and Codex run in the pod.
-Other drivers (Cursor runs in the server process, OpenCode serves every directory from one server,
-Antigravity is bound to the host) run on the host only when the thread's role preset says
+a provider session opens, where it runs. On a pod's worktree Claude, Codex, Pi, Grok and ACP
+Registry agents run in the pod. Other drivers (Cursor runs in the server process, OpenCode serves
+every directory from one server, Antigravity is bound to the host, and Muse's login and its own
+tool sandbox are unaccounted for) run on the host only when the thread's role preset says
 `runsIn: host`, and are refused otherwise: a session on the host would reach the host's Docker
 while the worktree's stack lives in the pod. `orchestrator_capabilities` lists each refusal.
+
+Provider packages cannot see the pod runtime, so they spawn through
+[`ProviderPodProcesses`](../../packages/provider-core/src/server/podProcess.ts), a provider-core
+reference the server implements over the same launch and stop as Claude and Codex. Only drivers
+that run in pods ask it, so a host-only driver never lands in a pod by accident: the shared ACP
+adapter does so only for flavors that set `runsInPods`. Adapters read it when they are built, as
+Codex does, because sessions open from the session manager's context, which does not carry it.
 
 A provider that serves many threads from one process (Codex, OpenCode) gets one shared session
 per place. The orchestrator names the shared session when it queues a run, which for a new
@@ -136,12 +144,26 @@ instance's own variables, its config-dir variable and the role's context window;
 `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are stripped even from those. The process also
 has the agent container's own environment, as its terminals do: the project's `t3.json` pod `env`
 and, in hostname mode, `NODE_EXTRA_CA_CERTS`. The MCP token is
-not in that environment either: Claude takes it over its control channel and Codex in its thread
-config, so commands the agent runs never see it. A `settings.json` `env` block in the mounted
-config dir still overrides the role's context window, as it does on the host.
+not in that environment either: Claude takes it over its control channel, Codex in its thread
+config, and ACP agents in the `http` MCP server of `session/new`, so commands the agent runs never
+see it. Pi is the exception, since its T3 extension reads `T3_MCP_URL` and `T3_MCP_BEARER_TOKEN`:
+they are in that one launch's `docker exec` environment, never the container's. These drivers'
+environments are the instance's own, so a provider key set there passes, unlike the credentials
+stripped from Claude's. ACP agents get an `http` server, which some adapters (codex-acp, pi-acp)
+ignore; those run in a pod without T3's tools unless they take MCP over ACP. ACP's stdio MCP
+bridge is T3's own host binary, which a pod cannot run; T3's MCP-over-ACP bridge runs on the host
+and calls the server's own endpoint (`hostEndpoint`), not the pod listener's. A `settings.json`
+`env` block in the mounted config dir still overrides the role's context window, as it does on the
+host.
 
-The agent container mounts the config dirs (and a Claude shared config dir) of the project's
-enabled Claude and Codex instances when it is made. A session whose instance's dirs are missing
+The agent container mounts the config dirs of the project's enabled instances when it is made:
+Claude's (with a shared config dir, and in the default layout `~/.claude.json`, which Claude keeps
+beside `~/.claude` rather than in it), Codex's homes, Pi's agent dir and Grok's home. Of the T3
+home it mounts only two directories, read-only: each configured ACP Registry agent's managed
+install under `tools/` (at its own path, created before the agent installs, since an install
+refers to itself by absolute path), and the pod's own `caches/pods/<pod>`, where T3 writes files its agents
+read, such as Pi's extension. A macOS host's provider binaries cannot run in a Linux container, so
+there none are mounted and the image's CLIs run by name. A session whose instance's dirs are missing
 recreates the agent container from current settings; the daemon, its volume and the stack stay,
 and the pod's other sessions are released so their next turn resumes in the new container. It is
 refused instead when the new container would still lack the dirs (the instance is not enabled for
@@ -165,13 +187,32 @@ server exposes:
 
 Containers reach it as `host.docker.internal`, which the daemon container maps to the network's
 gateway address and the agent container shares through its network namespace. Docker's
-`host-gateway` is the default bridge's address, where the listener does not bind. Docker Desktop
-for macOS gives containers no route to such an address; a unix-socket listener for it is not built.
+`host-gateway` is the default bridge's address, where the listener does not bind.
+
+An engine in a VM (Docker Desktop anywhere, any engine on macOS;
+[`selectPodMcpTransport`](../../apps/server/src/pod/PodMcpTransport.ts) decides from the host
+platform and `docker info`) keeps the gateway inside the VM, out of the host's reach. There the
+engine's own `host.docker.internal` is dialed from the host itself, so one listener binds
+127.0.0.1, the daemon container sets no alias of its own (the gateway is inside the VM) unless it
+uses resolvers of its own, which replace the engine's answer for that name, and then maps it to
+Docker's `host-gateway`, and the
+subnet check gives way to the token: every peer is loopback, so any local process can connect. The
+listener then also requires the `host.docker.internal` Host header, which a browser page that
+rebinds its own name to 127.0.0.1 cannot send. A unix socket bind-mounted from the host was the
+alternative; it does not reliably cross Docker Desktop's VM, and provider MCP clients take only a
+URL, so each session would need a relay in the pod.
+
+A host firewall that drops the pod network is invisible otherwise: agents just run without T3's
+tools. So once per start of a pod's containers, and again when a session is placed while the last
+result was blocked, the placement probes the listener from the agent container and records the
+result on the pod's snapshot (`mcpListener`, optional, so stock clients and servers skip it). Nothing
+polls.
 
 The listener keys on the network the pod's daemon joined when it was made, recorded in its
 `t3.network` label, since the host alias points at that network's gateway whatever settings now
 name. Pods made before these sessions existed lack the alias, the label and the provider-binary
 layout, and need a full recreate.
 
-Still open: the default image `docker:27-cli` is Alpine, so glibc-linked provider binaries do not
-run in it. Claude's `~/.claude.json` lives outside its config dir and is not mounted.
+The default agent image is [built by T3](../../apps/server/src/pod/PodAgentImage.ts) on the Docker
+host rather than pulled, under a `.invalid` name, which never resolves (RFC 2606), so a missing
+build can never pull someone else's image in its place.

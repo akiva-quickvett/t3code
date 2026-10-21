@@ -3,6 +3,7 @@ import {
   POD_RUNTIME_ERROR_MESSAGE_MAX_LENGTH,
   PodRuntimeError,
   PodRuntimeId,
+  PodRuntimeMcpListenerStatus,
   PodRuntimeOperation,
   POD_RUNTIME_REQUESTS,
   type PodRuntimeRequest,
@@ -72,6 +73,8 @@ export const PodRuntimeEvent = Schema.Union([
     podId: PodRuntimeId,
     occurredAt: IsoDateTime,
     operation: PodInternalOperation,
+    /** The agent image a recreate makes its container from: the default when it was asked. */
+    image: Schema.optional(TrimmedNonEmptyString),
     /** Asked for because every thread on the worktree was parked; a wake starts it again. */
     parked: Schema.optional(Schema.Boolean),
   }),
@@ -116,6 +119,13 @@ export const PodRuntimeEvent = Schema.Union([
     occurredAt: IsoDateTime,
     routed: Schema.Boolean,
     problem: Schema.NullOr(Schema.String),
+  }),
+  /** A probe from the agent container of T3's pod-facing MCP listener; null when it could not tell. */
+  Schema.Struct({
+    type: Schema.Literal("pod.mcp-listener-probed"),
+    podId: PodRuntimeId,
+    occurredAt: IsoDateTime,
+    status: Schema.NullOr(PodRuntimeMcpListenerStatus),
   }),
   /** A removed pod's worktree checkout was removed, freeing the path for a host worktree. */
   Schema.Struct({
@@ -506,16 +516,34 @@ const reducePodEvent = (
         },
       };
     }
+    case "pod.mcp-listener-probed": {
+      const { mcpListener: _previous, ...unprobed } = snapshot;
+      return {
+        ...record,
+        snapshot: {
+          ...unprobed,
+          ...(event.status === null ? {} : { mcpListener: event.status }),
+          updatedAt,
+        },
+      };
+    }
     case "pod.operation-requested": {
       // Any other request is someone's own decision, which a wake must not undo.
-      const { parked: _parked, ...unparked } = snapshot;
+      // The next start probes again; until then the last result may be stale.
+      // A new agent container shares the daemon's network, so it reaches the
+      // listener as the old one did, and keeps the start the probe was for.
+      const { parked: _parked, mcpListener, ...cleared } = snapshot;
       const starts = POD_OPERATION_RULES[event.operation].success === "running";
       return {
         ...record,
         ...(starts ? { startRequestedAt: event.occurredAt } : {}),
         snapshot: {
-          ...unparked,
+          ...cleared,
+          ...(event.operation === "recreateAgentContainer" && mcpListener !== undefined
+            ? { mcpListener }
+            : {}),
           ...(event.parked === true ? { parked: true as const } : {}),
+          ...(event.image === undefined ? {} : { image: event.image }),
           state: POD_OPERATION_RULES[event.operation].pending,
           updatedAt,
         },
