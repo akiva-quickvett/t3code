@@ -1231,3 +1231,51 @@ describe("server model preferences", () => {
     });
   });
 });
+
+describe("ServerSettings usage headroom", () => {
+  it("fills missing thresholds with the defaults", () => {
+    expect(decodeServerSettings({}).usageHeadroom).toEqual({
+      sessionLowPercent: 85,
+      weeklyLowPercent: 95,
+    });
+    expect(
+      decodeServerSettings({ usageHeadroom: { sessionLowPercent: 70 } }).usageHeadroom,
+    ).toEqual({ sessionLowPercent: 70, weeklyLowPercent: 95 });
+  });
+
+  it("accepts a partial patch and rejects patch thresholds outside 1-100", () => {
+    expect(decodeServerSettingsPatch({ usageHeadroom: { weeklyLowPercent: 90 } })).toEqual({
+      usageHeadroom: { weeklyLowPercent: 90 },
+    });
+    expect(() => decodeServerSettingsPatch({ usageHeadroom: { weeklyLowPercent: 101 } })).toThrow();
+    expect(() => decodeServerSettingsPatch({ usageHeadroom: { sessionLowPercent: 0 } })).toThrow();
+  });
+
+  it("round-trips thresholds through a settings write", () => {
+    const decoded = decodeServerSettings({ usageHeadroom: { sessionLowPercent: 70 } });
+    const encoded = encodeServerSettings(decoded);
+    expect(encoded.usageHeadroom).toEqual({ sessionLowPercent: 70, weeklyLowPercent: 95 });
+    expect(decodeServerSettings(encoded).usageHeadroom).toEqual(decoded.usageHeadroom);
+  });
+
+  it("falls back per threshold when a hand-edited settings file holds a bad value", () => {
+    const decoded = decodeServerSettings({
+      usageHeadroom: { sessionLowPercent: 0, weeklyLowPercent: 90 },
+      responseStreamingMode: "turn",
+    });
+    expect(decoded.usageHeadroom).toEqual({ sessionLowPercent: 85, weeklyLowPercent: 90 });
+    expect(decoded.responseStreamingMode).toBe("turn");
+    expect(
+      decodeServerSettings({ usageHeadroom: { sessionLowPercent: 70, weeklyLowPercent: 120 } })
+        .usageHeadroom,
+    ).toEqual({ sessionLowPercent: 70, weeklyLowPercent: 95 });
+    expect(
+      decodeServerSettings({ usageHeadroom: { sessionLowPercent: "85", weeklyLowPercent: 90 } })
+        .usageHeadroom,
+    ).toEqual({ sessionLowPercent: 85, weeklyLowPercent: 90 });
+    expect(decodeServerSettings({ usageHeadroom: "high" }).usageHeadroom).toEqual({
+      sessionLowPercent: 85,
+      weeklyLowPercent: 95,
+    });
+  });
+});

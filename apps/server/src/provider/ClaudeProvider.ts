@@ -144,8 +144,15 @@ function formatClaudeSubscriptionAuthLabel(subscriptionType: string): string {
 function claudeAuthMetadata(input: {
   readonly subscriptionType: string | undefined;
   readonly authMethod: string | undefined;
+  readonly apiKeySource: string | undefined;
 }): { readonly type: string; readonly label: string } | undefined {
-  if (normalizeClaudeAuthMethod(input.authMethod) === "apiKey") {
+  // An `ANTHROPIC_API_KEY` install reports no token source, only its key source.
+  const apiKeyOnly =
+    !input.subscriptionType &&
+    (input.authMethod === undefined || input.authMethod === "none") &&
+    Boolean(input.apiKeySource) &&
+    input.apiKeySource !== "none";
+  if (normalizeClaudeAuthMethod(input.authMethod) === "apiKey" || apiKeyOnly) {
     return {
       type: "apiKey",
       label: "Claude API Key",
@@ -643,15 +650,21 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     claudeAuthMetadata({
       subscriptionType: capabilities.subscriptionType,
       authMethod: capabilities.tokenSource,
+      apiKeySource: capabilities.apiKeySource,
     }) ?? apiProviderAuthMetadata(capabilities.apiProvider);
-  const usageLimits = !capabilities.usage
-    ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
-    : scopedLimitNames
-      ? yield* recordClaudeUsageResponse(scopedLimitNames, {
-          response: capabilities.usage,
-          checkedAt,
-        })
-      : claudeUsageResponseToLimits({ response: capabilities.usage, checkedAt }).limits;
+  // API keys, ANTHROPIC_AUTH_TOKEN proxies and Bedrock bill per token; a usage
+  // read that timed out must not make them look like a failed subscription.
+  const usageLimits =
+    authMetadata?.type === "apiKey" || authMetadata?.type === "bedrock"
+      ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })
+      : !capabilities.usage
+        ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
+        : scopedLimitNames
+          ? yield* recordClaudeUsageResponse(scopedLimitNames, {
+              response: capabilities.usage,
+              checkedAt,
+            })
+          : claudeUsageResponseToLimits({ response: capabilities.usage, checkedAt }).limits;
   const resetCredits =
     resolveResetCredits &&
     capabilities.subscriptionType &&

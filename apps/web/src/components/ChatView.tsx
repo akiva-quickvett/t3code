@@ -5359,6 +5359,69 @@ export default function ChatView(props: ChatViewProps) {
     });
     return item ? [item] : [];
   });
+  const onProviderModelSelect = (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: { focusComposer?: boolean },
+  ) => {
+    if (!activeThread) return;
+    const entry = providerInstanceEntries.find((candidate) => candidate.instanceId === instanceId);
+    if (
+      !supportsProviderSwitchingViaHandoff &&
+      entry !== undefined &&
+      !isProviderInstanceAllowedByLock(providerLock, entry)
+    ) {
+      if (options?.focusComposer !== false) scheduleComposerFocus();
+      return;
+    }
+    const resolvedModel = resolveAppModelSelectionForInstance(
+      instanceId,
+      settings,
+      providerStatuses,
+      model,
+    );
+    if (!resolvedModel) {
+      if (options?.focusComposer !== false) scheduleComposerFocus();
+      return;
+    }
+    const rememberedOptions =
+      useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[resolvedModel];
+    const nextModelSelection: ModelSelection =
+      rememberedOptions !== undefined && rememberedOptions.length > 0
+        ? { instanceId, model: resolvedModel, options: [...rememberedOptions] }
+        : { instanceId, model: resolvedModel };
+    const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
+      providers: providerStatuses,
+      hasStartedSession: activeRuntime !== null,
+      supportsProviderSwitchingViaHandoff,
+      currentModelSelection: activeThread.modelSelection,
+      currentProviderInstanceId: activeRuntime?.providerInstanceId ?? null,
+      nextModelSelection,
+    });
+    if (modelChangeBlockReason) {
+      toastManager.add({
+        type: "warning",
+        title: modelChangeBlockReason.title,
+        description: modelChangeBlockReason.description,
+      });
+      if (options?.focusComposer !== false) scheduleComposerFocus();
+      return;
+    }
+    setComposerDraftModelSelection(
+      scopeThreadRef(activeThread.environmentId, activeThread.id),
+      nextModelSelection,
+      { explicit: true, replaceOptions: true },
+    );
+    setStickyComposerModelSelection(nextModelSelection);
+    if (options?.focusComposer !== false) scheduleComposerFocus();
+  };
+  const onProviderModelSelectStable = useStableCallback(onProviderModelSelect);
+  // Same switch as picking the instance in the model picker, keeping the model.
+  const switchLimitedThreadAccount = useStableCallback((instanceId: ProviderInstanceId) => {
+    if (activeThread) onProviderModelSelectStable(instanceId, activeThread.modelSelection.model);
+  });
+  const limitedInstanceId =
+    activeRuntime?.providerInstanceId ?? activeThread?.modelSelection.instanceId ?? null;
   const limitRecoveryBanner =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -5376,6 +5439,15 @@ export default function ChatView(props: ChatViewProps) {
             });
             if (result._tag === "Failure") throw squashAtomCommandFailure(result);
           },
+          switchAccount:
+            limitedInstanceId === null
+              ? null
+              : {
+                  providers: providerStatuses,
+                  currentInstanceId: limitedInstanceId,
+                  thresholds: settings.usageHeadroom,
+                  onSwitch: switchLimitedThreadAccount,
+                },
         })
       : null;
   const composerBannerItems = (() => {
@@ -7457,63 +7529,6 @@ export default function ChatView(props: ChatViewProps) {
       : null,
   );
 
-  const onProviderModelSelect = (
-    instanceId: ProviderInstanceId,
-    model: string,
-    options?: { focusComposer?: boolean },
-  ) => {
-    if (!activeThread) return;
-    const entry = providerInstanceEntries.find((candidate) => candidate.instanceId === instanceId);
-    if (
-      !supportsProviderSwitchingViaHandoff &&
-      entry !== undefined &&
-      !isProviderInstanceAllowedByLock(providerLock, entry)
-    ) {
-      if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
-    }
-    const resolvedModel = resolveAppModelSelectionForInstance(
-      instanceId,
-      settings,
-      providerStatuses,
-      model,
-    );
-    if (!resolvedModel) {
-      if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
-    }
-    const rememberedOptions =
-      useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[resolvedModel];
-    const nextModelSelection: ModelSelection =
-      rememberedOptions !== undefined && rememberedOptions.length > 0
-        ? { instanceId, model: resolvedModel, options: [...rememberedOptions] }
-        : { instanceId, model: resolvedModel };
-    const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
-      providers: providerStatuses,
-      hasStartedSession: activeRuntime !== null,
-      supportsProviderSwitchingViaHandoff,
-      currentModelSelection: activeThread.modelSelection,
-      currentProviderInstanceId: activeRuntime?.providerInstanceId ?? null,
-      nextModelSelection,
-    });
-    if (modelChangeBlockReason) {
-      toastManager.add({
-        type: "warning",
-        title: modelChangeBlockReason.title,
-        description: modelChangeBlockReason.description,
-      });
-      if (options?.focusComposer !== false) scheduleComposerFocus();
-      return;
-    }
-    setComposerDraftModelSelection(
-      scopeThreadRef(activeThread.environmentId, activeThread.id),
-      nextModelSelection,
-      { explicit: true, replaceOptions: true },
-    );
-    setStickyComposerModelSelection(nextModelSelection);
-    if (options?.focusComposer !== false) scheduleComposerFocus();
-  };
-  const onProviderModelSelectStable = useStableCallback(onProviderModelSelect);
   const supportsRolePresets = useEnvironmentSupportsRolePresets(environmentId);
   const rolePresetProjectId =
     supportsRolePresets && isLocalDraftThread && draftThread ? draftThread.projectId : null;

@@ -46,6 +46,7 @@ import {
   ProviderDriverKind,
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
+import { HeadroomPercent, UsageHeadroomSetting } from "./providerUsageLimits.ts";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
 export type TimestampFormat = typeof TimestampFormat.Type;
@@ -1265,6 +1266,7 @@ export const ServerSettings = Schema.Struct({
   cursorKeychainUsageEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+  usageHeadroom: UsageHeadroomSetting,
 
   usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1537,6 +1539,12 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Record(UsageLimitSourceId, Schema.NullOr(UsageLimitSourceConfig)),
   ),
   cursorKeychainUsageEnabled: Schema.optionalKey(Schema.Boolean),
+  usageHeadroom: Schema.optionalKey(
+    Schema.Struct({
+      sessionLowPercent: Schema.optionalKey(HeadroomPercent),
+      weeklyLowPercent: Schema.optionalKey(HeadroomPercent),
+    }),
+  ),
 
   usagePriceOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(UsageModelPriceOverride)),
