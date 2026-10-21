@@ -25,6 +25,10 @@ export interface PodContainerSpec {
     | { readonly mode: "container"; readonly container: string };
   readonly mounts: ReadonlyArray<PodContainerMount>;
   readonly env: Readonly<Record<string, string>>;
+  /** TCP ports published on the host, as `docker create -p`. */
+  readonly publish?: ReadonlyArray<PodPublishedPort>;
+  /** Resolvers in place of Docker's own, as `docker create --dns`. */
+  readonly dns?: ReadonlyArray<string>;
   /** `uid:gid`; the image's user when absent. */
   readonly user?: string;
   readonly workdir?: string;
@@ -41,6 +45,13 @@ export interface PodNetworkInfo {
   readonly subnet: string;
   /** The host's address on the network. */
   readonly gateway: string;
+}
+
+export interface PodPublishedPort {
+  /** An IPv4 address of the host; never a wildcard. */
+  readonly hostIp: string;
+  readonly hostPort: number;
+  readonly containerPort: number;
 }
 
 export type PodContainerStatus =
@@ -74,6 +85,16 @@ export interface PodExecSpec {
 export interface PodExecResult {
   readonly exitCode: number | null;
   readonly timedOut: boolean;
+  /** The command's last lines of output, stdout then stderr, on one line. */
+  readonly outputTail: string;
+}
+
+/** What `docker container inspect` says of a container this server does not own, such as a proxy. */
+export interface ContainerInspection {
+  readonly status: PodContainerStatus;
+  /** Its address on each network it is attached to. */
+  readonly networks: Readonly<Record<string, string>>;
+  readonly mounts: ReadonlyArray<{ readonly source: string; readonly destination: string }>;
 }
 
 /** A host command that runs `spec` in the container, for callers that own the process, like a PTY. */
@@ -97,6 +118,9 @@ export const ContainerDriverOperation = Schema.Literals([
   "removeContainer",
   "exec",
   "stats",
+  "logs",
+  "inspect",
+  "connect",
 ]);
 export type ContainerDriverOperation = typeof ContainerDriverOperation.Type;
 
@@ -146,6 +170,17 @@ export interface ContainerHost {
     spec: PodExecSpec & { readonly timeoutMs: number },
   ) => Effect.Effect<PodExecResult, ContainerDriverError>;
   readonly execLaunch: (id: string, spec: PodExecSpec & { readonly tty: boolean }) => PodExecLaunch;
+  /** Null when no container has that name or id. */
+  readonly inspect: (
+    nameOrId: string,
+  ) => Effect.Effect<ContainerInspection | null, ContainerDriverError>;
+  /** Attaches the container to one more network; already attached is not an error. */
+  readonly connectNetwork: (
+    network: string,
+    containerId: string,
+  ) => Effect.Effect<void, ContainerDriverError>;
+  /** The container's last `lines` lines of output, stdout then stderr. */
+  readonly logs: (id: string, lines: number) => Effect.Effect<string, ContainerDriverError>;
   /** Memory in bytes per container id; ids Docker did not report are absent. */
   readonly memoryUsage: (
     ids: ReadonlyArray<string>,
@@ -172,6 +207,22 @@ const firstLine = (text: string) =>
     ?.slice(0, DAEMON_MESSAGE_MAX_LENGTH) ?? null;
 
 const isMissingObject = (stderr: string) => /no such (container|volume|object)/i.test(stderr);
+
+const OUTPUT_TAIL_LINES = 8;
+const OUTPUT_TAIL_LENGTH = 300;
+
+/** A failure message's worth of what a command printed last, on one line. */
+export const outputTail = (output: string) =>
+  output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(-OUTPUT_TAIL_LINES)
+    .join(" | ")
+    .slice(-OUTPUT_TAIL_LENGTH);
+
+const toContainerStatus = (status: string) =>
+  (CONTAINER_STATUSES.has(status) ? status : "dead") as PodContainerStatus;
 
 const MEMORY_UNITS: Record<string, number> = {
   b: 1,
@@ -228,6 +279,20 @@ const decodeNetworks = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Array(DockerInspectNetwork)),
 );
 const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+const DockerInspectDetail = Schema.Struct({
+  State: Schema.Struct({ Status: Schema.String }),
+  NetworkSettings: Schema.Struct({
+    Networks: Schema.NullOr(
+      Schema.Record(Schema.String, Schema.Struct({ IPAddress: Schema.optional(Schema.String) })),
+    ),
+  }),
+  Mounts: Schema.NullOr(
+    Schema.Array(Schema.Struct({ Source: Schema.String, Destination: Schema.String })),
+  ),
+});
+const decodeDetail = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(DockerInspectDetail)),
+);
 const decodeContainers = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Array(DockerInspectContainer)),
 );
@@ -382,9 +447,7 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
           id: container.Id,
           name: container.Name.replace(/^\//, ""),
           labels: container.Config.Labels ?? {},
-          status: (CONTAINER_STATUSES.has(container.State.Status)
-            ? container.State.Status
-            : "dead") as PodContainerStatus,
+          status: toContainerStatus(container.State.Status),
         })),
         volumes: volumes.map((volume) => ({ name: volume.Name, labels: volume.Labels ?? {} })),
       };
@@ -464,6 +527,11 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
         "--network",
         spec.network.mode === "bridge" ? spec.network.name : `container:${spec.network.container}`,
         ...spec.mounts.flatMap((mount) => ["--mount", mountArgument(mount)]),
+        ...(spec.publish ?? []).flatMap((port) => [
+          "--publish",
+          `${port.hostIp}:${port.hostPort}:${port.containerPort}/tcp`,
+        ]),
+        ...(spec.dns ?? []).flatMap((server) => ["--dns", server]),
         ...hostAlias,
         ...env.args,
         ...(spec.user === undefined ? [] : ["--user", spec.user]),
@@ -532,6 +600,7 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
           Effect.map((output) => ({
             exitCode: output.timedOut ? null : output.code,
             timedOut: output.timedOut,
+            outputTail: outputTail(`${output.stdout}\n${output.stderr}`),
           })),
           Effect.mapError(
             (cause) =>
@@ -544,6 +613,64 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
           ),
         );
     },
+    inspect: (nameOrId) =>
+      run("inspect", ["container", "inspect", nameOrId], { allowMissing: true }).pipe(
+        Effect.flatMap((json) =>
+          json.trim().length === 0 ? Effect.succeed([]) : decodeDetail(json),
+        ),
+        Effect.mapError((error) =>
+          error._tag === "ContainerDriverError" ? error : decodeFailure("inspect")(error),
+        ),
+        Effect.map((found) => {
+          const detail = found[0];
+          if (detail === undefined) return null;
+          return {
+            status: toContainerStatus(detail.State.Status),
+            networks: Object.fromEntries(
+              Object.entries(detail.NetworkSettings.Networks ?? {}).map(([name, network]) => [
+                name,
+                network.IPAddress ?? "",
+              ]),
+            ),
+            mounts: (detail.Mounts ?? []).map((mount) => ({
+              source: mount.Source,
+              destination: mount.Destination,
+            })),
+          } satisfies ContainerInspection;
+        }),
+      ),
+    connectNetwork: (network, containerId) =>
+      run("connect", ["network", "connect", network, containerId]).pipe(
+        Effect.asVoid,
+        Effect.catch((error) =>
+          /already exists|already attached/i.test(error.daemonMessage ?? "")
+            ? Effect.void
+            : Effect.fail(error),
+        ),
+      ),
+    logs: (id, count) =>
+      runner
+        .run({
+          command: "docker",
+          args: ["logs", "--tail", String(count), id],
+          env: hostEnv,
+          timeout: DOCKER_TIMEOUT_MS,
+          maxOutputBytes: DOCKER_OUTPUT_BYTES,
+          outputMode: "truncate",
+          timeoutBehavior: "timedOutResult",
+        })
+        .pipe(
+          Effect.map((output) => `${output.stdout}\n${output.stderr}`),
+          Effect.mapError(
+            (cause) =>
+              new ContainerDriverError({
+                operation: "logs",
+                exitCode: null,
+                daemonMessage: null,
+                cause,
+              }),
+          ),
+        ),
     execLaunch: (id, spec) => {
       const exec = execArguments(spec);
       return {

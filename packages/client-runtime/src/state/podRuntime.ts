@@ -1,11 +1,15 @@
 import {
+  type EnvironmentId,
   POD_RUNTIME_REQUESTS,
   podRuntimeRetryRequest,
   type PodRuntimeRequest,
   type PodRuntimeSnapshot,
   type PodRuntimeState,
   type PodRuntimeStreamEvent,
+  type PodRuntimeWarning,
 } from "@t3tools/contracts";
+
+import type { EnvironmentThreadShell } from "./models.ts";
 
 export interface PodRuntimeLiveState {
   readonly enabled: boolean;
@@ -37,6 +41,53 @@ export function podForWorktree(
   if (worktreePath == null) return undefined;
   const target = trimTrailingSeparators(worktreePath);
   return pods.find((pod) => trimTrailingSeparators(pod.worktreePath) === target);
+}
+
+export interface PodServiceLink {
+  readonly name: string;
+  /**
+   * The service's hostname in hostname mode, else its port on the environment
+   * host's loopback; either way for that host's server-side browser.
+   */
+  readonly url: string;
+  /** The same service on the host's tailnet address, when the environment publishes there. */
+  readonly tailnetUrl?: string;
+}
+
+/** The pod's services that can be opened now: published only while the pod runs. */
+export function podServiceLinks(pod: PodRuntimeSnapshot): ReadonlyArray<PodServiceLink> {
+  return pod.services.flatMap(({ name, url, tailnetUrl }) =>
+    url === null ? [] : [{ name, url, ...(tailnetUrl === undefined ? {} : { tailnetUrl }) }],
+  );
+}
+
+/**
+ * The thread a pod's service opens in when asked from outside any thread: the
+ * most recently active one, not archived, on the pod's worktree.
+ */
+export function podBrowsingThread(
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+  environmentId: EnvironmentId,
+  pod: PodRuntimeSnapshot,
+): EnvironmentThreadShell | undefined {
+  const target = trimTrailingSeparators(pod.worktreePath);
+  let latest: EnvironmentThreadShell | undefined;
+  for (const thread of threads) {
+    if (thread.environmentId !== environmentId || thread.archivedAt !== null) continue;
+    if (thread.worktreePath === null || trimTrailingSeparators(thread.worktreePath) !== target)
+      continue;
+    if (latest === undefined || thread.updatedAt > latest.updatedAt) latest = thread;
+  }
+  return latest;
+}
+
+const WARNING_MESSAGES: Readonly<Record<PodRuntimeWarning, string>> = {
+  "tailscale-serve-443":
+    "A project serves its pods on hostnames, which need port 443 of this machine's tailnet address, and T3 Code was started with Tailscale Serve on that port too, so other devices cannot open the pods. Serve T3 Code on another port, such as 8443 (--tailscale-serve-port 8443).",
+};
+
+export function podRuntimeWarningMessage(warning: PodRuntimeWarning): string {
+  return WARNING_MESSAGES[warning];
 }
 
 export type PodRuntimeTone = "running" | "busy" | "idle" | "failed";

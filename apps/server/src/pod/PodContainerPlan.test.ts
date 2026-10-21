@@ -25,6 +25,9 @@ const input: PodPlanInput = {
     ANTHROPIC_API_KEY: "sk-ant",
     CLAUDE_CODE_OAUTH_TOKEN: "oauth",
   },
+  dns: [],
+  proxyCaRoot: null,
+  publish: [],
 };
 
 const mountList = (
@@ -53,6 +56,16 @@ describe("pod container plan", () => {
       "bind /home/dev/.gitconfig:/home/dev/.gitconfig ro",
       "bind /home/dev/.config/gh:/home/dev/.config/gh ro",
       "bind /home/dev/pods/seeds/repo:/seeds/repo ro",
+    ]);
+  });
+
+  it("runs dockerd itself, so the image adds no listener open to the pods network", () => {
+    // A first argument that is a flag makes docker:dind's entrypoint add
+    // --host=tcp://0.0.0.0:2375, which clashes with the loopback listener.
+    expect(planPod(input).dind.command).toEqual([
+      "dockerd",
+      "--host=unix:///var/run/docker.sock",
+      "--host=tcp://127.0.0.1:2375",
     ]);
   });
 
@@ -88,7 +101,11 @@ describe("pod container plan", () => {
   });
 
   it("records on the daemon the network the pod was made on", () => {
-    expect(planPod(input).dind.labels).toMatchObject({ "t3.network": "t3-pods" });
+    const { dind } = planPod(input);
+    expect(dind.labels).toMatchObject({ "t3.network": "t3-pods" });
+    // Beside the daemon's own command, which keeps dockerd first.
+    expect(dind.command[0]).toBe("dockerd");
+    expect(dind.hostAlias).toBe("host.docker.internal");
   });
 
   it("labels everything with the pod and the environment that owns it", () => {
@@ -96,5 +113,24 @@ describe("pod container plan", () => {
     for (const labels of [plan.dind.labels, plan.agent.labels, plan.volume.labels]) {
       expect(labels).toMatchObject({ "t3.pod": "pod-abc123", "t3.environment": "env-1" });
     }
+  });
+
+  it("resolves through the given servers and trusts the proxy CA only when given one", () => {
+    expect(planPod(input).dind).not.toHaveProperty("dns");
+    expect(planPod(input).agent.env).not.toHaveProperty("NODE_EXTRA_CA_CERTS");
+    const plan = planPod({
+      ...input,
+      dns: ["172.21.0.2", "192.168.1.1"],
+      proxyCaRoot: "/home/dev/.local/state/herdr-orch/caddy/root.crt",
+    });
+    expect(plan.dind.dns).toEqual(["172.21.0.2", "192.168.1.1"]);
+    // The daemon passes them on to the stack's containers.
+    expect(plan.dind.command.slice(3)).toEqual(["--dns", "172.21.0.2", "--dns", "192.168.1.1"]);
+    expect(mountList(plan.agent.mounts)).toContain(
+      "bind /home/dev/.local/state/herdr-orch/caddy/root.crt:/usr/local/share/ca-certificates/t3-pods-proxy.crt ro",
+    );
+    expect(plan.agent.env.NODE_EXTRA_CA_CERTS).toBe(
+      "/usr/local/share/ca-certificates/t3-pods-proxy.crt",
+    );
   });
 });

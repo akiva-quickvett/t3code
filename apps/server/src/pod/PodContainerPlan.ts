@@ -1,18 +1,31 @@
 import type { PodRuntimeId } from "@t3tools/contracts";
 
-import type { PodContainerMount, PodContainerSpec } from "./ContainerDriver.ts";
+import type { PodContainerMount, PodContainerSpec, PodPublishedPort } from "./ContainerDriver.ts";
 
 export const POD_LABEL = "t3.pod";
 export const POD_ENVIRONMENT_LABEL = "t3.environment";
 export const POD_ROLE_LABEL = "t3.role";
 /** On the daemon container: the network the pod was made on, which settings may since name differently. */
 export const POD_NETWORK_LABEL = "t3.network";
+/**
+ * The host ports a pod's daemon publishes, comma-separated. Every T3 server on
+ * the Docker host reads it, so pods of different servers never share a port.
+ */
+export const POD_PORTS_LABEL = "t3.ports";
+
+export const parsePodPortsLabel = (value: string | undefined): ReadonlyArray<number> =>
+  (value ?? "")
+    .split(",")
+    .map(Number)
+    .filter((port) => Number.isInteger(port) && port > 0);
 
 export const DIND_IMAGE = "docker:27-dind";
 /** Inside the shared network namespace only; nothing outside the pod reaches it. */
 export const POD_DOCKER_HOST = "tcp://127.0.0.1:2375";
 const DIND_DATA_DIR = "/var/lib/docker";
 const SEEDS_ROOT = "/seeds";
+/** Where Debian's and Alpine's `update-ca-certificates` pick up a local CA. */
+export const POD_PROXY_CA_PATH = "/usr/local/share/ca-certificates/t3-pods-proxy.crt";
 const PROVIDER_BIN_ROOT = "/opt/t3/provider-bin";
 /** Docker Desktop's own name for the host, so a URL that names it means the same everywhere. */
 export const POD_HOST_ALIAS = "host.docker.internal";
@@ -43,6 +56,8 @@ export interface PodPlanInput {
   readonly environmentId: string;
   readonly image: string;
   readonly network: string;
+  /** The daemon publishes the pod's services on host ports; the stack serves them on its network. */
+  readonly publish: ReadonlyArray<PodPublishedPort>;
   readonly worktreePath: string;
   /** The source checkout's `.git`, which a linked worktree's objects and refs live in. */
   readonly gitCommonDir: string;
@@ -55,6 +70,10 @@ export interface PodPlanInput {
   readonly seeds: { readonly dir: string; readonly name: string } | null;
   /** `env` from the project's t3.json pod block. */
   readonly podEnv: Readonly<Record<string, string>>;
+  /** Resolvers for the daemon and the stack it runs; empty keeps Docker's own. */
+  readonly dns: ReadonlyArray<string>;
+  /** The hostname proxy's CA root on the host, which the agent container then trusts. */
+  readonly proxyCaRoot: string | null;
 }
 
 export interface PodPlan {
@@ -68,11 +87,18 @@ export interface PodPlan {
  * server's database (a dev copy of real data) can never address this server's
  * containers by name.
  */
-export const podContainerNames = (podId: PodRuntimeId, environmentId: string) => {
-  const stem = `t3-${environmentId
+export const podEnvironmentStem = (environmentId: string) =>
+  `t3-${environmentId
     .replace(/[^A-Za-z0-9]/g, "")
     .slice(0, 8)
-    .toLowerCase()}-${podId}`;
+    .toLowerCase()}-`;
+
+/** Also names the pod's proxy route file and hostnames, as orch's `<pod>` does. */
+export const podNameStem = (podId: PodRuntimeId, environmentId: string) =>
+  `${podEnvironmentStem(environmentId)}${podId}`;
+
+export const podContainerNames = (podId: PodRuntimeId, environmentId: string) => {
+  const stem = podNameStem(podId, environmentId);
   return { dind: `${stem}-dind`, agent: `${stem}-agent`, volume: `${stem}-dockerlib` };
 };
 
@@ -118,7 +144,15 @@ export const planPod = (input: PodPlanInput): PodPlan => {
   const dind: PodContainerSpec = {
     name: names.dind,
     image: DIND_IMAGE,
-    labels: { ...labels("dind"), [POD_NETWORK_LABEL]: input.network },
+    labels: {
+      ...labels("dind"),
+      [POD_NETWORK_LABEL]: input.network,
+      ...(input.publish.length === 0
+        ? {}
+        : {
+            [POD_PORTS_LABEL]: [...new Set(input.publish.map((port) => port.hostPort))].join(","),
+          }),
+    },
     init: true,
     // Docker-in-Docker cannot run its daemon otherwise.
     privileged: true,
@@ -130,7 +164,18 @@ export const planPod = (input: PodPlanInput): PodPlan => {
       ...seeds,
     ],
     env: { DOCKER_TLS_CERTDIR: "" },
-    command: ["--host=unix:///var/run/docker.sock", `--host=${POD_DOCKER_HOST}`],
+    publish: input.publish,
+    ...(input.dns.length === 0 ? {} : { dns: input.dns }),
+    // Naming dockerd keeps the image's entrypoint from adding its own
+    // `--host=tcp://0.0.0.0:2375`, which would clash with this listener and
+    // open the daemon to every container on the pods network.
+    command: [
+      "dockerd",
+      "--host=unix:///var/run/docker.sock",
+      `--host=${POD_DOCKER_HOST}`,
+      // The stack's containers resolve through the daemon, not the container.
+      ...input.dns.flatMap((server) => ["--dns", server]),
+    ],
     // The agent container shares this network namespace and its hosts file;
     // the alias is how its agents reach T3's pod-facing MCP listener.
     hostAlias: POD_HOST_ALIAS,
@@ -168,6 +213,16 @@ export const planPod = (input: PodPlanInput): PodPlan => {
       })),
       ...(input.gitConfigPath === null ? [] : [bind(input.gitConfigPath, true)]),
       ...(input.ghConfigDir === null ? [] : [bind(input.ghConfigDir, true)]),
+      ...(input.proxyCaRoot === null
+        ? []
+        : [
+            {
+              type: "bind",
+              source: input.proxyCaRoot,
+              target: POD_PROXY_CA_PATH,
+              readOnly: true,
+            } satisfies PodContainerMount,
+          ]),
       ...seeds,
     ],
     env: podSafeEnv({
@@ -176,6 +231,8 @@ export const planPod = (input: PodPlanInput): PodPlan => {
       PATH: binPath,
       DOCKER_HOST: POD_DOCKER_HOST,
       LANG: "C.UTF-8",
+      // Node reads only its own bundle, so the system store alone misses it.
+      ...(input.proxyCaRoot === null ? {} : { NODE_EXTRA_CA_CERTS: POD_PROXY_CA_PATH }),
     }),
     ...(user === undefined ? {} : { user }),
     workdir: input.worktreePath,

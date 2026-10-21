@@ -19,6 +19,7 @@ import {
   enumerateCommandPaletteItems,
   filterPinnedBrowseEntries,
   buildPodActionItems,
+  buildPodServiceItems,
   filterCommandPaletteGroups,
   findHighlightedCommandPaletteItem,
   reduceCommandPaletteUiState,
@@ -947,5 +948,50 @@ describe("buildPodActionItems", () => {
 
   it("leaves removal to the chip and Diagnostics", () => {
     expect(titlesFor("running", "remove")).toEqual([]);
+  });
+});
+
+describe("buildPodServiceItems", () => {
+  const running: PodRuntimeSnapshot = {
+    id: PodRuntimeId.make("pod-one"),
+    projectId: PROJECT_ID,
+    worktreePath: "/work/trees/feature",
+    state: "running",
+    services: [
+      { name: "web", port: 3000, url: "http://127.0.0.1:20000" },
+      { name: "api", port: 8000, url: null },
+    ],
+    image: "image",
+    startedAt: null,
+    lastError: null,
+    containerIds: [],
+    volumeIds: [],
+    updatedAt: "t",
+  };
+
+  it("offers only services with a URL, and opens the one picked", async () => {
+    const open = vi.fn(async () => undefined);
+    const items = buildPodServiceItems({ pod: running, icon: null, allowed: true, open });
+    const titles = filterCommandPaletteGroups({
+      activeGroups: [{ value: "actions", label: "Actions", items }],
+      query: "open pod service",
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [],
+    }).flatMap((group) => group.items.map((item) => item.title));
+    expect(titles).toEqual(["Open pod service: web"]);
+    await items[0]?.run();
+    expect(open).toHaveBeenCalledWith({ name: "web", url: "http://127.0.0.1:20000" });
+  });
+
+  it("offers nothing once the pod stops, and disables items without permission", () => {
+    const stopped = { ...running, state: "stopped" as const, services: [] };
+    expect(
+      buildPodServiceItems({ pod: stopped, icon: null, allowed: true, open: vi.fn() }),
+    ).toEqual([]);
+    expect(
+      buildPodServiceItems({ pod: running, icon: null, allowed: false, open: vi.fn() })[0]
+        ?.disabled,
+    ).toBe(true);
   });
 });

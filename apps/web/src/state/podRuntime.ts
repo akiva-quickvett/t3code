@@ -3,7 +3,12 @@ import {
   type PodRuntimeLiveState,
   podForWorktree,
 } from "@t3tools/client-runtime/state/pod-runtime";
-import type { EnvironmentId, PodRuntimeSnapshot, ProjectId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  PodRuntimeSnapshot,
+  PodRuntimeWarning,
+  ProjectId,
+} from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -81,4 +86,19 @@ export function useProjectOffersPods(
       : null,
   );
   return status.data?.enabled === true && status.data.projectConfigured === true;
+}
+
+const NO_WARNINGS: ReadonlyArray<PodRuntimeWarning> = [];
+
+/** What the server warns about its pods' setup; asks it without touching Docker. */
+export function usePodRuntimeWarnings(
+  environmentId: EnvironmentId | null,
+): ReadonlyArray<PodRuntimeWarning> {
+  const supported = useEnvironmentSupportsPodRuntime(environmentId);
+  const status = useEnvironmentQuery(
+    supported && environmentId !== null
+      ? serverEnvironment.podRuntimeProjectStatus({ environmentId, input: {} })
+      : null,
+  );
+  return status.data?.warnings ?? NO_WARNINGS;
 }

@@ -85,7 +85,9 @@ for marks the current server did not make.
 
 A session in a pod never inherits the server's environment. `docker exec` names only the
 instance's own variables, its config-dir variable and the role's context window; inherited
-`ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are stripped even from those. The MCP token is
+`ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are stripped even from those. The process also
+has the agent container's own environment, as its terminals do: the project's `t3.json` pod `env`
+and, in hostname mode, `NODE_EXTRA_CA_CERTS`. The MCP token is
 not in that environment either: Claude takes it over its control channel and Codex in its thread
 config, so commands the agent runs never see it. A `settings.json` `env` block in the mounted
 config dir still overrides the role's context window, as it does on the host.

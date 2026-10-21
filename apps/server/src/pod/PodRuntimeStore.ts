@@ -17,6 +17,11 @@ const StoredRecord = Schema.Struct({
   snapshot: PodRuntimeSnapshot,
   dockerHost: Schema.String,
   worktreeReleased: Schema.optionalKey(Schema.Boolean),
+  hostPorts: Schema.optionalKey(Schema.Record(Schema.String, Schema.Int)),
+  tailnetAddress: Schema.optionalKey(Schema.String),
+  hostnames: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  dnsAddress: Schema.optionalKey(Schema.String),
+  routed: Schema.optionalKey(Schema.Boolean),
 });
 const decodeRecord = Schema.decodeUnknownEffect(Schema.fromJsonString(StoredRecord));
 const encodeRecord = Schema.encodeEffect(Schema.fromJsonString(StoredRecord));
