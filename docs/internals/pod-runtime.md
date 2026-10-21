@@ -74,7 +74,11 @@ environment with `T3_POD_SESSION` and records its pid, and its end signals every
 carrying the mark or descending from that pid (TERM, then KILL): the host's process-group kill,
 extended to children that left the group (they keep the mark) and to children started with a
 cleaned environment, such as Codex's stdio MCP servers (they descend from the launch). A pid
-namespace per launch would be tighter, but the agent container is unprivileged and cannot make one. Closing a session waits for the stop, so server shutdown leaves nothing
+namespace per launch would be tighter, but the agent container is unprivileged and cannot make one.
+The stop catches what a session leaves behind, not a session that evades it: one that rewrites its
+pid file or its own mark, or double-forks a child with a cleaned environment, can outlive its stop.
+It runs as the user, in that pod's agent container only, and ends with the pod's stop or an
+agent-container recreate. Closing a session waits for the stop, so server shutdown leaves nothing
 behind. A server that crashed never ran its stops, so each running pod is swept once per start of
 its containers for marks the current server did not make.
 
