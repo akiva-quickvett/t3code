@@ -1085,6 +1085,11 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:scheduled-tasks:live",
       tag: WS_METHODS.scheduledTasksSubscribe,
     }),
+    // Merged by the server; clients render this list and never layer presets themselves.
+    agentRolePresetsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:agent-roles:live",
+      tag: WS_METHODS.agentRolesSubscribe,
+    }),
     // A cold transcript scan is measured in seconds, so keep the result around
     // long enough that switching windows or re-rendering does not rescan.
     usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {
@@ -1276,6 +1281,24 @@ export function createServerEnvironmentAtoms<R, E>(
     signalProcess: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:signal-process",
       tag: WS_METHODS.serverSignalProcess,
+    }),
+    saveAgentRolePreset: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:agent-roles:save",
+      tag: WS_METHODS.agentRolesSave,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    removeAgentRolePreset: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:agent-roles:remove",
+      tag: WS_METHODS.agentRolesRemove,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    resetAgentRolePresets: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:agent-roles:reset",
+      tag: WS_METHODS.agentRolesReset,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
     }),
     upsertScheduledTask: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:scheduled-task:upsert",

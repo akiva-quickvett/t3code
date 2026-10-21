@@ -23,6 +23,7 @@ const baseState: ThreadActionMenuState = {
     snooze: true,
     pinning: true,
     titleRegeneration: true,
+    rolePresets: false,
   },
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
@@ -40,6 +41,17 @@ function allIds(state: ThreadActionMenuState): string[] {
 }
 
 describe("buildThreadActionMenuItems", () => {
+  it("offers New ticket only where the server has role presets, even without operate", () => {
+    expect(ids(baseState)).not.toContain("new-ticket");
+    const items = buildThreadActionMenuItems({
+      ...baseState,
+      canOperate: false,
+      supports: { ...baseState.supports, rolePresets: true },
+    });
+    expect(items.find((item) => item.id === "new-ticket")).toMatchObject({ label: "New ticket" });
+    expect(items.find((item) => item.id === "new-ticket")?.disabled).toBeFalsy();
+  });
+
   it.each([false, true])(
     "disables both lifecycle directions without permission (reversed: %s)",
     (reversed) => {
@@ -101,6 +113,7 @@ describe("buildThreadActionMenuItems", () => {
           snooze: false,
           pinning: false,
           titleRegeneration: false,
+          rolePresets: false,
         },
       }),
     ).toEqual(["rename", "mark-unread", "copy", "project-settings", "archive", "delete"]);
@@ -210,6 +223,7 @@ describe("buildThreadActionMenuItems", () => {
           snooze: false,
           pinning: false,
           titleRegeneration: false,
+          rolePresets: false,
         },
       }),
     ).toContain("archive");

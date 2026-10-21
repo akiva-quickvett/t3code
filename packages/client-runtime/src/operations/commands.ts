@@ -1,6 +1,7 @@
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import {
   type ThreadLinkedPullRequest,
+  type ThreadRolePreset,
   CommandId,
   CheckpointId,
   CheckpointScopeId,
@@ -76,6 +77,7 @@ export interface CreateThreadInput extends CommandMetadata {
   readonly interactionMode: ProviderInteractionMode;
   readonly branch: string | null;
   readonly worktreePath: string | null;
+  readonly rolePreset?: ThreadRolePreset;
 }
 
 export interface ThreadCommandInput extends CommandMetadata {
@@ -127,6 +129,8 @@ export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly regenerateTitle?: boolean;
   readonly linkedPullRequest?: ThreadLinkedPullRequest | null;
   readonly expectedEmpty?: boolean;
+  /** Set (object) or clear (null) the thread's role. */
+  readonly rolePreset?: ThreadRolePreset | null;
 }
 
 export interface SetThreadRuntimeModeInput extends ThreadCommandInput {
@@ -147,6 +151,7 @@ interface StartThreadBootstrap {
     readonly branch: string | null;
     readonly worktreePath: string | null;
     readonly createdAt: string;
+    readonly rolePreset?: ThreadRolePreset;
   };
   readonly prepareWorktree?: {
     readonly requireWorktree?: boolean;
@@ -399,6 +404,7 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
     interactionMode: input.interactionMode,
     branch: input.branch,
     worktreePath: input.worktreePath,
+    ...(input.rolePreset === undefined ? {} : { rolePreset: input.rolePreset }),
   });
 });
 
@@ -560,7 +566,8 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
       input.worktreePath !== undefined ||
       input.regenerateTitle !== undefined ||
       input.linkedPullRequest !== undefined ||
-      input.limitRecovery !== undefined
+      input.limitRecovery !== undefined ||
+      input.rolePreset !== undefined
     ) {
       result = yield* dispatch({
         type: "thread.metadata.update",
@@ -575,6 +582,7 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
         ...(input.linkedPullRequest === undefined
           ? {}
           : { linkedPullRequest: input.linkedPullRequest }),
+        ...(input.rolePreset === undefined ? {} : { rolePreset: input.rolePreset }),
       });
     }
     if (input.modelSelection !== undefined) {
@@ -671,6 +679,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       workspaceStrategy,
+      ...(bootstrap?.rolePreset === undefined ? {} : { rolePreset: bootstrap.rolePreset }),
       initialMessage: {
         messageId: input.message.messageId,
         text: input.message.text,

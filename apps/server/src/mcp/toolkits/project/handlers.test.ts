@@ -6,6 +6,8 @@ import {
   ThreadId,
   type OrchestrationV2ThreadShell,
   type Project as ProjectRecord,
+  ProviderDriverKind,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -20,6 +22,7 @@ import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
@@ -49,6 +52,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
     let launchedSender: ThreadId | undefined;
     const layerDependencies = Layer.mergeAll(
       ServerSettings.layerTest(),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
       NodeCrypto.layer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
@@ -121,6 +125,7 @@ it.effect("launches a scratch thread into the Scratch project", () =>
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const layerDependencies = Layer.mergeAll(
       ServerSettings.layerTest(),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
       NodeCrypto.layer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
@@ -219,6 +224,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
     };
     const layerDependencies = Layer.mergeAll(
       ServerSettings.layerTest(),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
       NodeCrypto.layer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
@@ -304,6 +310,8 @@ const clientLaunchHarness = (input: {
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
+  readonly providers?: ReadonlyArray<ServerProvider>;
+  readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -311,7 +319,10 @@ const clientLaunchHarness = (input: {
     model: "claude-opus",
   };
   const layerDependencies = Layer.mergeAll(
-    ServerSettings.layerTest(),
+    ServerSettings.layerTest(input.settings),
+    Layer.mock(ProviderRegistry.ProviderRegistry)({
+      getProviders: Effect.succeed(input.providers ?? []),
+    }),
     NodeCrypto.layer,
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: EnvironmentId.make("environment"),
@@ -501,6 +512,111 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
     expect(launched).toHaveLength(0);
 
     expect((yield* launchFrom("main")).at(-1)?.result).toMatchObject({ projectId });
+    expect(launched).toHaveLength(1);
+  }),
+);
+
+const launchClaude: ServerProvider = {
+  instanceId: ProviderInstanceId.make("claudeAgent"),
+  driver: ProviderDriverKind.make("claudeAgent"),
+  enabled: true,
+  installed: true,
+  version: "test",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-10-20T00:00:00.000Z",
+  models: [{ slug: "claude-opus-5-5", name: "Opus", isCustom: false, capabilities: null }],
+  slashCommands: [],
+  skills: [],
+};
+
+it.effect("a launch with a preset takes its model and records its role", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const toolkitFor = (providers: ReadonlyArray<ServerProvider>) =>
+      Effect.gen(function* () {
+        const { projectId, dependencies } = clientLaunchHarness({
+          runtimeModeCeiling: "auto",
+          launched,
+          providers,
+        });
+        const toolkit = yield* ProjectToolkit.pipe(
+          Effect.provide(
+            McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+              Layer.provide(dependencies),
+            ),
+          ),
+        );
+        const handle = (preset: string) =>
+          toolkit
+            .handle("t3_thread_launch", { title: "File a ticket", projectId, preset })
+            .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies))
+            .pipe(Effect.map((results) => results.at(-1)?.result));
+        return handle;
+      });
+    const withClaude = yield* toolkitFor([launchClaude]);
+    const withoutProviders = yield* toolkitFor([]);
+
+    yield* withClaude("Ticket");
+    expect(launched[0]).toMatchObject({
+      modelSelection: {
+        instanceId: "claudeAgent",
+        model: "claude-opus-5-5",
+        options: [{ id: "effort", value: "high" }],
+      },
+      runtimeMode: "auto",
+      rolePreset: { id: "ticket", label: "Ticket agent" },
+    });
+
+    expect(yield* withoutProviders("ticket")).toMatchObject({ code: "provider_unavailable" });
+    expect(yield* withClaude("tickets")).toMatchObject({ code: "invalid_request" });
+    expect(launched).toHaveLength(1);
+  }),
+);
+
+it.effect("a preset's broader modes stay under the launch ceiling; explicit ones are refused", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched,
+      providers: [launchClaude],
+      settings: {
+        agentRolePresets: {
+          environment: {
+            overrides: {
+              wide: {
+                id: "wide",
+                label: "Wide",
+                target: {
+                  driverKind: ProviderDriverKind.make("claudeAgent"),
+                  model: "claude-opus-5-5",
+                },
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                instructions: "",
+              },
+            },
+          },
+        },
+      },
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const handle = (params: Parameters<typeof toolkit.handle<"t3_thread_launch">>[1]) =>
+      toolkit
+        .handle("t3_thread_launch", params)
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies))
+        .pipe(Effect.map((results) => results.at(-1)?.result));
+
+    yield* handle({ title: "Wide", projectId, preset: "wide" });
+    expect(launched[0]).toMatchObject({ runtimeMode: "auto", interactionMode: "default" });
+    expect(
+      yield* handle({ title: "Wide", projectId, preset: "wide", runtimeMode: "full-access" }),
+    ).toMatchObject({ code: "runtime_mode_escalation_denied" });
     expect(launched).toHaveLength(1);
   }),
 );

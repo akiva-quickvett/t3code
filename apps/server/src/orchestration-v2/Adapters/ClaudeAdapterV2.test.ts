@@ -216,6 +216,56 @@ function makeClaudeTestTurnInput(input: {
   };
 }
 
+describe("ClaudeAdapterV2 role presets", () => {
+  const role = {
+    presetId: "review-t1",
+    label: "Reviewer",
+    instructions: "Never edit code.",
+  };
+  const options = (input: {
+    readonly role?: ClaudeAdapterV2RoleInput;
+    readonly environment?: NodeJS.ProcessEnv;
+  }) =>
+    ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "role-thread",
+      resume: false,
+      cwd: "/workspace",
+      environment: input.environment ?? { HOME: "/home/test" },
+      ...(input.role === undefined ? {} : { role: input.role }),
+    });
+  type ClaudeAdapterV2RoleInput = NonNullable<
+    Parameters<typeof ClaudeAdapterV2.makeClaudeQueryOptions>[0]["role"]
+  >;
+  const appended = (value: ReturnType<typeof options>) =>
+    typeof value.systemPrompt === "object" && "append" in value.systemPrompt
+      ? (value.systemPrompt.append ?? "")
+      : "";
+
+  it("appends the role to the system prompt, not the conversation", () => {
+    assert.include(
+      appended(options({ role })),
+      '<t3_role_instructions role="review-t1">\nNever edit code.\n</t3_role_instructions>',
+    );
+    assert.notInclude(appended(options({})), "t3_role_instructions");
+  });
+
+  it("caps the context window at 200k through the environment", () => {
+    assert.deepEqual(options({ role: { ...role, contextWindow: "200k" } }).env, {
+      HOME: "/home/test",
+      CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
+    });
+    assert.deepEqual(
+      options({
+        role: { ...role, contextWindow: "1m" },
+        environment: { HOME: "/home/test", CLAUDE_CODE_DISABLE_1M_CONTEXT: "1" },
+      }).env,
+      { HOME: "/home/test" },
+    );
+    assert.deepEqual(options({ role }).env, { HOME: "/home/test" });
+  });
+});
+
 describe("ClaudeAdapterV2 runtime query policy", () => {
   it.each([false, true])("requests thinking summaries with resume=%s", (resume) => {
     const options = ClaudeAdapterV2.makeClaudeQueryOptions({

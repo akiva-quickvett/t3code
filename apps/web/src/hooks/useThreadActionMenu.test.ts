@@ -113,6 +113,10 @@ vi.mock("./useCopyToClipboard", () => ({
 vi.mock("./useHandleNewThread", () => ({
   useNewThreadHandler: () => async () => recordEffect("draft"),
 }));
+vi.mock("../state/agentRoles", () => ({ readEnvironmentSupportsRolePresets: () => false }));
+vi.mock("./useStartTicketThread", () => ({
+  useStartTicketThread: () => async () => recordEffect("ticket"),
+}));
 vi.mock("./useSettings", () => ({
   useClientSettings: (select: (settings: unknown) => unknown) =>
     select({
