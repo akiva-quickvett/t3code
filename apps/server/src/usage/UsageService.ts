@@ -14,6 +14,10 @@ import {
   type UsagePricing,
   type UsageSummary,
   type UsageSummaryInput,
+  type ThreadId,
+  type UsageThreadTree,
+  type UsageThreadTreeInput,
+  UsageDay,
   UsageReadError,
   USAGE_LIMITS_MIN_REFRESH_INTERVAL_MS,
 } from "@t3tools/contracts";
@@ -33,6 +37,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as SqlClient from "effect/sql/SqlClient";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
@@ -47,7 +52,11 @@ import type {
   TranscriptUsageFormat,
   UsageRecord,
 } from "@t3tools/provider-core/server/usage";
-import { resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
+import {
+  resolveModelAliases,
+  UsageAggregator,
+  type AttributedUsageBucket,
+} from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
@@ -57,13 +66,18 @@ import {
 import {
   decodeScanCache,
   dedupeWithinFile,
-  LEGACY_SCAN_CACHE_FILE_NAME,
+  PREVIOUS_SCAN_CACHE_FILE_NAMES,
   makeScanCacheWriter,
   pruneScanCache,
   SCAN_CACHE_FILE_NAME,
   type CachedFile,
   type ScanCache,
 } from "./usageScanCache.ts";
+import {
+  buildUsageThreadScope,
+  readUsageThreadScopeRows,
+  summarizeUsageThreadTree,
+} from "./usageThreadTree.ts";
 
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -92,6 +106,16 @@ const transcriptReaders = BUILT_IN_USAGE_DRIVERS.flatMap((driver) =>
 const scanReaders = BUILT_IN_USAGE_DRIVERS.flatMap((driver) =>
   driver.usage?.kind === "scan" ? [{ driver, reader: driver.usage }] : [],
 );
+
+const usageProviderByDriver: ReadonlyMap<string, UsageProviderKind> = new Map(
+  BUILT_IN_USAGE_DRIVERS.flatMap((driver) =>
+    driver.usage === undefined ? [] : [[driver.driverKind, driver.usage.provider] as const],
+  ),
+);
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const utcDay = (timestampMs: number) =>
+  UsageDay.make(DateTime.formatIsoDateUtc(DateTime.makeUnsafe(timestampMs)));
 
 const transcriptFormats = new Map(
   transcriptReaders.map(({ reader }) => [reader.provider, reader.format] as const),
@@ -170,6 +194,13 @@ export class UsageService extends Context.Service<
     readonly readLimitsForAgent: (
       scope: AgentUsageLimitsInput,
     ) => Effect.Effect<AgentUsageLimitsResult>;
+    /**
+     * Estimated usage of a thread and every thread it launched or delegated to, from the same
+     * history and prices as the summary. Attributes a record through its provider session.
+     */
+    readonly readThreadTree: (
+      input: UsageThreadTreeInput,
+    ) => Effect.Effect<UsageThreadTree, UsageReadError>;
   }
 >()("t3/usage/UsageService") {}
 
@@ -197,6 +228,13 @@ export const layerTest = Layer.succeed(
       }),
     refreshRates: Effect.succeed(EMPTY_PRICING),
     readLimitsForAgent: () => Effect.succeed({ instances: [] }),
+    readThreadTree: (input) =>
+      Effect.fail(
+        new UsageReadError({
+          reason: "threadNotFound",
+          detail: `Thread ${input.threadId} was not found.`,
+        }),
+      ),
   }),
 );
 
@@ -209,6 +247,7 @@ export const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const hostEnvironment = yield* HostProcess.Environment;
   const readerContext = yield* Effect.context<BuiltInUsageReadersEnv>();
+  const sql = yield* SqlClient.SqlClient;
 
   const fileCache: ScanCache = new Map();
   const sourceCache = new Map<string, typeof CachedSource.Type>();
@@ -220,7 +259,9 @@ export const make = Effect.gen(function* () {
 
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
   const scanCachePath = path.join(config.stateDir, SCAN_CACHE_FILE_NAME);
-  const legacyScanCachePath = path.join(config.stateDir, LEGACY_SCAN_CACHE_FILE_NAME);
+  const previousScanCachePaths = PREVIOUS_SCAN_CACHE_FILE_NAMES.map((name) =>
+    path.join(config.stateDir, name),
+  );
   const writeCacheFile = (filePath: string, contents: string) =>
     writeFileStringAtomically({ filePath, contents }).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -408,8 +449,9 @@ export const make = Effect.gen(function* () {
           Effect.catchCause(() => Effect.succeed(null)),
         );
       let document = yield* readDocument(scanCachePath);
-      if (document === null) {
-        document = yield* readDocument(legacyScanCachePath);
+      for (const previousPath of previousScanCachePaths) {
+        if (document !== null) break;
+        document = yield* readDocument(previousPath);
         cacheDirty = document !== null;
       }
       if (document === null) return;
@@ -646,6 +688,7 @@ export const make = Effect.gen(function* () {
   const scanSummary = Effect.fn("UsageService.scanSummary")(function* (
     input: UsageSummaryInput,
     settings: ServerSettingsValue,
+    attribute?: (record: UsageRecord) => ThreadId | undefined,
   ) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
@@ -711,6 +754,7 @@ export const make = Effect.gen(function* () {
       rates,
       priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
       modelAliases: resolveModelAliases(settings.usageModelAliases),
+      ...(attribute === undefined ? {} : { attribute }),
     });
 
     const sources: UsageSource[] = [];
@@ -798,7 +842,7 @@ export const make = Effect.gen(function* () {
     const readAt = yield* DateTime.now;
     const finishedAtMs = yield* Clock.currentTimeMillis;
 
-    return {
+    const summary: UsageSummary & { readonly buckets: readonly AttributedUsageBucket[] } = {
       contractVersion: USAGE_CONTRACT_VERSION,
       readAt: DateTime.formatIso(readAt),
       timeZone: input.timeZone,
@@ -808,7 +852,8 @@ export const make = Effect.gen(function* () {
       sources,
       pricing: pricing(),
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
-    } satisfies UsageSummary;
+    };
+    return summary;
   });
 
   const inflightScans = new Map<string, Deferred.Deferred<UsageSummary, UsageReadError>>();
@@ -902,7 +947,51 @@ export const make = Effect.gen(function* () {
     };
   });
 
-  return { readSummary, refreshRates, readLimitsForAgent, awaitPersisted } as const;
+  // Not shared through `inflightScans`: an attributed scan answers only its own tree.
+  const readThreadTree = Effect.fn("UsageService.readThreadTree")(function* (
+    input: UsageThreadTreeInput,
+  ) {
+    const rows = yield* readUsageThreadScopeRows(input.threadId).pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+      Effect.mapError(
+        (cause) =>
+          new UsageReadError({
+            reason: "scanFailed",
+            detail: "The thread tree could not be read.",
+            cause,
+          }),
+      ),
+    );
+    if (rows === null) {
+      return yield* new UsageReadError({
+        reason: "threadNotFound",
+        detail: `Thread ${input.threadId} was not found.`,
+      });
+    }
+    const scope = buildUsageThreadScope(input.threadId, rows, usageProviderByDriver);
+    const settings = yield* readSettings;
+    const nowMs = yield* Clock.currentTimeMillis;
+    const createdAtMs = Date.parse(scope.oldestCreatedAt);
+    const retentionStartMs = nowMs - CACHE_RETENTION_DAYS * DAY_MS;
+    const sinceDay = utcDay(
+      Number.isFinite(createdAtMs) ? Math.max(createdAtMs, retentionStartMs) : retentionStartMs,
+    );
+    const summary = yield* scanSummary(
+      { sinceDay, untilDay: utcDay(nowMs), timeZone: "UTC" },
+      settings,
+      scope.attribute,
+    );
+    yield* schedulePersist;
+    return summarizeUsageThreadTree(scope, summary.buckets, sinceDay);
+  });
+
+  return {
+    readSummary,
+    refreshRates,
+    readLimitsForAgent,
+    readThreadTree,
+    awaitPersisted,
+  } as const;
 });
 
 export const layer = Layer.effect(UsageService, make);

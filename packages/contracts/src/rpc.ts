@@ -336,7 +336,14 @@ import {
   ProviderConsumeResetCreditInput,
   ProviderConsumeResetCreditResult,
 } from "./providerUsageLimits.ts";
-import { UsagePricing, UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
+import {
+  UsagePricing,
+  UsageReadError,
+  UsageSummary,
+  UsageSummaryInput,
+  UsageThreadTree,
+  UsageThreadTreeInput,
+} from "./usage.ts";
 import {
   AgentRolePresetError,
   AgentRolePresetList,
@@ -529,6 +536,7 @@ export const WS_METHODS = {
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
+  serverGetUsageThreadTree: "server.getUsageThreadTree",
 
   agentRolesSubscribe: "agentRoles.subscribe",
   agentRolesSave: "agentRoles.save",
@@ -932,6 +940,12 @@ const WsServerCheckOtlpEndpointRpc = Rpc.make(WS_METHODS.serverCheckOtlpEndpoint
 const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSummary, {
   payload: UsageSummaryInput,
   success: UsageSummary,
+  error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
+});
+
+const WsServerGetUsageThreadTreeRpc = Rpc.make(WS_METHODS.serverGetUsageThreadTree, {
+  payload: UsageThreadTreeInput,
+  success: UsageThreadTree,
   error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
 });
 
@@ -2005,6 +2019,13 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 ) {}
 
 /** Part of WsRpcGroup, with its own server handler layer, as ChatChannelRpcGroup. */
+export const UsageRpcGroup = RpcGroup.make(
+  WsServerGetUsageSummaryRpc,
+  WsServerRefreshUsageRatesRpc,
+  WsServerGetUsageThreadTreeRpc,
+);
+
+/** Part of WsRpcGroup, with its own server handler layer, as ChatChannelRpcGroup. */
 export const PodRuntimeRpcGroup = RpcGroup.make(
   WsPodRuntimeSubscribeRpc,
   WsPodRuntimeStatusRpc,
@@ -2067,6 +2088,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerCheckOtlpEndpointRpc,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
+  WsServerGetUsageThreadTreeRpc,
   WsServerSignalProcessRpc,
   WsAgentRolesSubscribeRpc,
   WsAgentRolesSaveRpc,
@@ -2228,4 +2250,3 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeThreadRpc,
   WsOrchestrationV2SubscribeCommandOutputRpc,
 ).middleware(RpcScopeAuthorization);
-

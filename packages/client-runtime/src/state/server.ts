@@ -1144,6 +1144,12 @@ export function createServerEnvironmentAtoms<R, E>(
           ),
         ),
     }),
+    // Read when its dialog opens; the scan behind it is the summary's, so cache it the same.
+    usageThreadTree: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:usage-thread-tree",
+      tag: WS_METHODS.serverGetUsageThreadTree,
+      staleTimeMs: 60_000,
+    }),
     resourceTelemetry: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:resource-telemetry",
       tag: WS_METHODS.subscribeResourceTelemetry,

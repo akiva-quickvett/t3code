@@ -211,8 +211,8 @@ Returns:
   `runsIn`, the roles it may delegate to (advisory), and why one cannot start
   here. Instructions stay on the server; and
 - feature flags for polling, cancellation, batch thread creation,
-  `t3_usage_limits`, and supervised wakes (`supervisedWakes`, missing on older
-  servers).
+  `t3_usage_limits`, `t3_usage_thread_tree` (`usageThreadTree`), and supervised
+  wakes (`supervisedWakes`), the last two missing on older servers.
 
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
@@ -228,6 +228,24 @@ as Usage → Limits and never carries email, credential fingerprints, hub
 details, or reset-credit ids. It starts no probe unless `refresh: true`, which
 re-checks only instances not checked or attempted in the last five minutes. Headroom thresholds
 come from the server's `usageHeadroom` setting.
+
+### `t3_usage_thread_tree`
+
+Read-only. Takes `threadId` and returns the estimated tokens and cost of that
+thread and every thread it launched or delegated to, transitively: supervised
+threads through `lineage.supervisorThreadId` and subagents through their parent;
+forks are separate trees. It returns totals, `rootThreadId` (the top of the
+tree the thread belongs to), `sinceDay`, and one row per thread, depth-first
+from the requested one: `threadId`, `parentThreadId`, `depth`, `title`,
+`preset`, `tokens`, `costUsd`, and `unpricedRecords`, capped at 200 rows with
+`omittedThreads` counting the rest (totals include them). Costs reuse the Usage
+summary's prices and overrides; unpriced usage is counted and left out of
+`costUsd`. A record is matched to the thread whose provider thread first opened
+its native session, so it counts once; a Claude fork's copy of its source's
+history stays with the source session. Usage whose history names no session or
+another session id than the thread's (possible for Cursor and Antigravity) is
+not included. An unknown or deleted thread fails with
+`thread_not_found`. It carries no account, credential, or hub details.
 
 ### `delegate_task`
 

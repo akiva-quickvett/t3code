@@ -15,6 +15,8 @@ import {
   RunId,
   ThreadId,
   TurnItemId,
+  UsageDay,
+  UsageReadError,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
@@ -1068,6 +1070,95 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
     ),
   ),
 );
+
+it.effect("t3_usage_thread_tree reads a tree for orchestration callers only", () => {
+  const reads: Array<unknown> = [];
+  const row = {
+    threadId: ThreadId.make("slice"),
+    parentThreadId: null,
+    depth: 0,
+    title: "Slice",
+    preset: "slice",
+    tokens: 120,
+    costUsd: 0.002,
+    unpricedRecords: 1,
+  };
+  const tree = {
+    threadId: ThreadId.make("slice"),
+    rootThreadId: ThreadId.make("meta"),
+    sinceDay: UsageDay.make("2026-08-01"),
+    tokens: 120,
+    costUsd: 0.002,
+    unpricedRecords: 1,
+    threads: [row],
+  };
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const call = (args: Record<string, unknown>, invocation = scope) =>
+      server
+        .callTool({ name: "t3_usage_thread_tree", arguments: args })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+
+    const denied = yield* call(
+      { threadId: "slice" },
+      { ...scope, capabilities: new Set(["worktree"]) },
+    );
+    expect(declaredFailure(denied)).toMatchObject({ code: "capability_denied" });
+    expect(reads).toEqual([]);
+
+    const read = yield* call({ threadId: "slice" });
+    expect(read.isError).toBe(false);
+    // Only the contract's fields reach the agent, whatever else the service carried.
+    expect(read.structuredContent).toEqual(tree);
+    expect(JSON.stringify(read)).not.toContain("example.com");
+    expect(reads).toEqual([{ threadId: "slice" }]);
+
+    const forClient = yield* call({ threadId: "slice" }, clientScope("auto"));
+    expect(forClient.isError).toBe(false);
+
+    expect(declaredFailure(yield* call({ threadId: "missing" }))).toMatchObject({
+      code: "thread_not_found",
+    });
+    expect(declaredFailure(yield* call({ threadId: "broken" }))).toMatchObject({
+      code: "orchestration_error",
+    });
+  }).pipe(
+    Effect.provide(
+      layerOrchestratorToolkitWithUsage(
+        Layer.mock(UsageService.UsageService)({
+          readThreadTree: (input) =>
+            Effect.gen(function* () {
+              reads.push(input);
+              if (input.threadId === "missing" || input.threadId === "broken") {
+                return yield* new UsageReadError({
+                  reason: input.threadId === "missing" ? "threadNotFound" : "scanFailed",
+                  detail: "Usage could not be read.",
+                });
+              }
+              return {
+                ...tree,
+                accountEmail: "me@example.com",
+                threads: [{ ...row, sourcePath: "/home/me@example.com/.claude/projects/x.jsonl" }],
+              };
+            }),
+        }),
+      ).pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+        Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+        Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+        Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+        Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+      ),
+    ),
+  );
+});
 
 it.effect("t3_usage_limits reads limits for orchestration callers only", () => {
   const reads: Array<unknown> = [];

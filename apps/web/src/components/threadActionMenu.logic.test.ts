@@ -24,6 +24,7 @@ const baseState: ThreadActionMenuState = {
     pinning: true,
     titleRegeneration: true,
     rolePresets: false,
+    threadUsage: false,
   },
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
@@ -114,6 +115,7 @@ describe("buildThreadActionMenuItems", () => {
           pinning: false,
           titleRegeneration: false,
           rolePresets: false,
+          threadUsage: false,
         },
       }),
     ).toEqual(["rename", "mark-unread", "copy", "project-settings", "archive", "delete"]);
@@ -224,6 +226,7 @@ describe("buildThreadActionMenuItems", () => {
           pinning: false,
           titleRegeneration: false,
           rolePresets: false,
+          threadUsage: false,
         },
       }),
     ).toContain("archive");

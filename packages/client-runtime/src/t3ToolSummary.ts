@@ -448,6 +448,9 @@ export function summarizeT3ToolCalls(
     case "usage-limits":
       label = phrase("Checked", "check", `usage limits ${times}`);
       break;
+    case "usage-thread-tree":
+      label = phrase("Checked", "check", `thread tree usage ${times}`);
+      break;
   }
   return { label, failedCount };
 }
