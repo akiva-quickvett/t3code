@@ -1,10 +1,11 @@
 import {
   podRuntimeActions,
   podRuntimeStatePresentation,
+  podServiceLinks,
   type PodRuntimeTone,
 } from "@t3tools/client-runtime/state/pod-runtime";
 import type { EnvironmentId, PodRuntimeSnapshot, ThreadId } from "@t3tools/contracts";
-import { BoxIcon } from "lucide-react";
+import { BoxIcon, GlobeIcon } from "lucide-react";
 
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 
@@ -14,6 +15,7 @@ import { Badge } from "../ui/badge";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { usePodActions } from "./usePodActions";
+import { useOpenPodService } from "./useOpenPodService";
 
 const TONE_VARIANT: Readonly<Record<PodRuntimeTone, "success" | "info" | "secondary" | "error">> = {
   running: "success",
@@ -33,6 +35,8 @@ function PodChipMenu(props: {
   readonly pod: PodRuntimeSnapshot;
 }) {
   const { run, allowed } = usePodActions(props.environmentId);
+  const services = useOpenPodService(props.environmentId);
+  const links = podServiceLinks(props.pod);
   const presentation = podRuntimeStatePresentation(props.pod.state);
   const actions = podRuntimeActions(props.pod).filter(
     (action) => action.kind !== "openShell" || props.threadId !== null,
@@ -62,6 +66,17 @@ function PodChipMenu(props: {
             <MenuSeparator />
           </>
         )}
+        {links.map((link) => (
+          <MenuItem
+            key={`service:${link.name}`}
+            disabled={!services.allowed}
+            onClick={() => void services.open(props.pod, link, props.threadId)}
+          >
+            <GlobeIcon />
+            Open {link.name}
+          </MenuItem>
+        ))}
+        {links.length > 0 && actions.length > 0 ? <MenuSeparator /> : null}
         {actions.map((action) => (
           <MenuItem
             key={`${action.kind}:${action.label}`}

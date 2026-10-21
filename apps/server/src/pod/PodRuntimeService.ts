@@ -30,10 +30,12 @@ import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as TxRef from "effect/TxRef";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as PortScanner from "../preview/PortScanner.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -41,17 +43,28 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ContainerDriver from "./ContainerDriver.ts";
-import { POD_ENVIRONMENT_LABEL, POD_LABEL, planPod } from "./PodContainerPlan.ts";
+import {
+  parsePodPortsLabel,
+  POD_ENVIRONMENT_LABEL,
+  POD_LABEL,
+  POD_PORTS_LABEL,
+  planPod,
+} from "./PodContainerPlan.ts";
+import { renderPodEnv, writePodDotEnv } from "./PodEnv.ts";
+import * as PodHostPorts from "./PodHostPorts.ts";
 import {
   runPodOperation,
   type PodOperationContext,
   type PodOperationResult,
+  PodStepError,
 } from "./PodOperations.ts";
 import { resolvePodProviderMounts } from "./PodProviderMounts.ts";
 import {
   isPodTransitional,
+  POD_LOOPBACK_ADDRESS,
   type PodObservation,
   planPodCompletion,
+  podServiceUrl,
   planPodObservation,
   planPodRequest,
   type PodRuntimeEvent,
@@ -129,6 +142,8 @@ const STARTS_CONTAINERS = new Set<PodRuntimeOperation>([
   "recreate",
   "recreateAgentContainer",
 ]);
+/** These create the pod's daemon afresh, so its ports and `.env` are decided again. */
+const BUILDS_FRESH = new Set<PodRuntimeOperation>(["create", "recreate"]);
 
 interface QueuedOperation {
   readonly podId: PodRuntimeId;
@@ -144,6 +159,8 @@ const make = Effect.gen(function* () {
   const projectFiles = yield* T3ProjectFileLoader.T3ProjectFileLoader;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const terminals = yield* TerminalManager.TerminalManager;
+  const portDiscovery = yield* PortScanner.PortDiscovery;
+  const hostNetwork = yield* PodHostPorts.PodHostNetwork;
   const environmentId = yield* (yield* ServerEnvironment.ServerEnvironmentIdentity)
     .getEnvironmentId;
   const crypto = yield* Crypto.Crypto;
@@ -159,6 +176,9 @@ const make = Effect.gen(function* () {
   // for mid-start is recorded at once and runs when the start returns.
   const stateLocks = yield* KeyedLock.make<PodRuntimeId>();
   const operationLocks = yield* KeyedLock.make<PodRuntimeId>();
+  // Host ports are shared by every pod: one allocation at a time, so two pods
+  // starting together never pick the same port.
+  const allocationLock = yield* Semaphore.make(1);
   const workerScope = yield* Effect.scope;
   const outstanding = yield* TxRef.make(0);
   // Kept per Docker host, so a host that cannot answer keeps its last known orphans.
@@ -175,8 +195,20 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  /** The preview's server list shows a pod's services exactly while their URLs do. */
+  const publishToDiscovery = (record: PodRuntimeRecord) => {
+    const owner = `pod:${record.snapshot.id}`;
+    const urls = record.snapshot.services.flatMap((service) =>
+      service.url === null ? [] : [service.url],
+    );
+    return portDiscovery.registerConfiguredUrls({ owner, urls });
+  };
+
   const commit = (podId: PodRuntimeId, events: ReadonlyArray<PodRuntimeEvent>) =>
-    store.commit(podId, events).pipe(Effect.catch(unavailable(podId)));
+    store.commit(podId, events).pipe(
+      Effect.tap((record) => (record === undefined ? Effect.void : publishToDiscovery(record))),
+      Effect.catch(unavailable(podId)),
+    );
 
   const requireRecord = (podId: PodRuntimeId) =>
     store
@@ -230,8 +262,169 @@ const make = Effect.gen(function* () {
     );
   };
 
+  /**
+   * Ports other servers' pods, and orphans, hold on the same daemon, stopped
+   * ones included, where a bind probe would see nothing.
+   */
+  const portsOnDaemon = (podId: PodRuntimeId, dockerHost: string) =>
+    driver
+      .forHost(dockerHost)
+      .list(POD_LABEL)
+      .pipe(
+        Effect.map(({ containers }) =>
+          containers.flatMap((container) =>
+            container.labels[POD_LABEL] === podId &&
+            container.labels[POD_ENVIRONMENT_LABEL] === environmentId
+              ? []
+              : parsePodPortsLabel(container.labels[POD_PORTS_LABEL]),
+          ),
+        ),
+        Effect.catch((error) =>
+          Effect.logWarning("could not list pod ports on the Docker host", {
+            operation: error.operation,
+          }).pipe(Effect.as([])),
+        ),
+      );
+
+  /**
+   * Keeps each service's host port and gives new services free ones, under the
+   * allocation lock so the ports other pods hold are read and claimed in one step.
+   */
+  const allocatePorts = (podId: PodRuntimeId, services: Readonly<Record<string, number>>) =>
+    allocationLock.withPermits(1)(
+      Effect.gen(function* () {
+        // Docker is asked outside the pod's state lock, so a slow daemon never
+        // holds up this pod's Stop or Remove; the driver's own timeout bounds it.
+        const dockerHost = (yield* requireRecord(podId)).dockerHost;
+        const daemonTaken = yield* portsOnDaemon(podId, dockerHost);
+        return yield* stateLocks.withLock(
+          podId,
+          Effect.gen(function* () {
+            const current = yield* requireRecord(podId);
+            const taken = new Set<number>(daemonTaken);
+            for (const other of yield* store.list)
+              if (other.snapshot.id !== podId && other.snapshot.state !== "removed")
+                for (const port of Object.values(other.hostPorts ?? {})) taken.add(port);
+            const { podRuntime } = yield* settingsFor(current.snapshot.projectId);
+            const tailnetAddress = podRuntime.publishOnTailnet
+              ? yield* hostNetwork.tailnetAddress
+              : null;
+            if (podRuntime.publishOnTailnet && tailnetAddress === null)
+              yield* Effect.logWarning(
+                "no tailnet address; pod services are published on loopback only",
+                {
+                  podId,
+                },
+              );
+            const allocated = yield* PodHostPorts.allocatePodHostPorts({
+              services,
+              previous: current.hostPorts ?? {},
+              taken,
+              addresses: [
+                POD_LOOPBACK_ADDRESS,
+                ...(tailnetAddress === null ? [] : [tailnetAddress]),
+              ],
+            }).pipe(Effect.provideService(PodHostPorts.PodHostNetwork, hostNetwork));
+            const next = yield* commit(podId, [
+              {
+                type: "pod.ports-allocated",
+                podId,
+                occurredAt: yield* nowIso,
+                services: allocated,
+                tailnetAddress,
+              },
+            ]);
+            return next ?? current;
+          }),
+        );
+      }),
+    );
+
+  /**
+   * The services' side of an operation. A fresh daemon gets its ports and its
+   * `.env` decided again; every operation gets the rendered env, what the
+   * daemon publishes, and the check that its ports are still free.
+   */
+  const prepareServices = Effect.fn("PodRuntimeService.prepareServices")(function* (
+    queued: PodRuntimeRecord,
+    operation: PodRuntimeOperation,
+    config: T3ProjectFilePod,
+  ) {
+    // Changes to the t3.json services take effect when the daemon is created
+    // again. A retried create reuses a daemon its failed attempt left, with that
+    // attempt's ports; Recreate applies service changes made in between.
+    const record = BUILDS_FRESH.has(operation)
+      ? yield* allocatePorts(queued.snapshot.id, config.services)
+      : queued;
+    const published = record.snapshot.services.flatMap(({ name, port }) => {
+      const hostPort = record.hostPorts?.[name];
+      return hostPort === undefined ? [] : [{ name, port, hostPort }];
+    });
+    const addresses = [
+      POD_LOOPBACK_ADDRESS,
+      ...(record.tailnetAddress === undefined ? [] : [record.tailnetAddress]),
+    ];
+    const rendered = renderPodEnv(
+      config.env ?? {},
+      published.map((service) => ({
+        ...service,
+        url: podServiceUrl(POD_LOOPBACK_ADDRESS, service.hostPort),
+      })),
+      new Set(
+        Object.keys(config.services).filter((name) => record.hostPorts?.[name] === undefined),
+      ),
+    );
+    // Taking the stack down never waits on a t3.json edit: its compose runs
+    // with the raw values when they no longer render.
+    const env =
+      operation === "stop" || operation === "remove"
+        ? yield* rendered.pipe(Effect.orElseSucceed(() => config.env ?? {}))
+        : yield* rendered;
+    if (BUILDS_FRESH.has(operation))
+      yield* writePodDotEnv(record.snapshot.worktreePath, env).pipe(
+        Effect.provide(services),
+        Effect.mapError(
+          (cause) =>
+            new PodStepError({
+              step: "Writing the pod's .env",
+              exitCode: null,
+              timedOut: false,
+              daemonMessage: cause._tag === "PodEnvError" ? cause.message : null,
+              cause,
+            }),
+        ),
+      );
+    const checkHostPorts = PodHostPorts.findPodPortClash(published, addresses).pipe(
+      Effect.provideService(PodHostPorts.PodHostNetwork, hostNetwork),
+      Effect.flatMap((clash) =>
+        clash === null
+          ? Effect.void
+          : Effect.fail(
+              new PodStepError({
+                step: "Publishing the pod's services",
+                exitCode: null,
+                timedOut: false,
+                daemonMessage: clash,
+              }),
+            ),
+      ),
+    );
+    return {
+      env,
+      publish: addresses.flatMap((hostIp) =>
+        published.map((service) => ({
+          hostIp,
+          hostPort: service.hostPort,
+          containerPort: service.port,
+        })),
+      ),
+      checkHostPorts,
+    };
+  });
+
   const operationContext = Effect.fn("PodRuntimeService.operationContext")(function* (
     record: PodRuntimeRecord,
+    operation: PodRuntimeOperation,
   ) {
     const { snapshot } = record;
     const root = yield* projectRoot(snapshot.projectId);
@@ -239,6 +432,7 @@ const make = Effect.gen(function* () {
     const config =
       (yield* loadPodConfig(snapshot.worktreePath, ...(root === undefined ? [] : [root]))) ??
       EMPTY_POD_CONFIG;
+    const podServices = yield* prepareServices(record, operation, config);
     const gitCommonDir = yield* git
       .execute({
         operation: "PodRuntimeService.gitCommonDir",
@@ -265,7 +459,8 @@ const make = Effect.gen(function* () {
       gitConfigPath: yield* existingPath(path.join(homeDirectory, ".gitconfig")),
       ghConfigDir: yield* existingPath(path.join(homeDirectory, ".config", "gh")),
       seeds: yield* seedsFor(root),
-      podEnv: config.env ?? {},
+      podEnv: podServices.env,
+      publish: podServices.publish,
     });
     return {
       podId: snapshot.id,
@@ -273,8 +468,9 @@ const make = Effect.gen(function* () {
       host: driver.forHost(record.dockerHost),
       plan,
       network: podRuntime.network,
-      config,
+      config: { ...config, env: podServices.env },
       worktreePath: snapshot.worktreePath,
+      checkHostPorts: podServices.checkHostPorts,
     } satisfies PodOperationContext;
   });
 
@@ -310,7 +506,7 @@ const make = Effect.gen(function* () {
     const record = yield* store.get(item.podId);
     // A later request moved the pod on; this operation no longer applies.
     if (record === undefined || isStale(record, item.operation)) return;
-    const outcome = yield* operationContext(record).pipe(
+    const outcome = yield* operationContext(record, item.operation).pipe(
       Effect.flatMap((context) => runPodOperation(item.operation, context)),
       Effect.result,
     );
@@ -714,6 +910,9 @@ const make = Effect.gen(function* () {
         .pipe(Effect.catch(unavailable(input.podId)));
       return { threadId: input.threadId, terminalId: POD_SHELL_TERMINAL_ID };
     });
+
+  // What the last run recorded as running; reconcile corrects it through `commit`.
+  yield* Effect.forEach(startupRecords, publishToDiscovery, { discard: true });
 
   yield* TxRef.update(outstanding, (count) => count + 1).pipe(Effect.tx);
   yield* reconcile.pipe(

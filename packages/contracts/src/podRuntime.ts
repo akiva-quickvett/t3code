@@ -91,11 +91,16 @@ export type PodRuntimeFailure = typeof PodRuntimeFailure.Type;
 export const podRuntimeRetryRequest = (failure: PodRuntimeFailure): PodRuntimeRequest =>
   failure.operation === "stop" || failure.operation === "remove" ? failure.operation : "start";
 
-/** `url` stays null until services are published on host ports. */
+/**
+ * `port` is the service's port inside the pod. `url` is its loopback address on
+ * the server's host while the pod runs, null otherwise; `tailnetUrl` is the same
+ * service on the host's tailnet address, when the environment publishes there.
+ */
 export const PodRuntimeServiceEndpoint = Schema.Struct({
   name: TrimmedNonEmptyString,
   port: PositiveInt,
   url: Schema.NullOr(Schema.String),
+  tailnetUrl: Schema.optionalKey(Schema.String),
 });
 export type PodRuntimeServiceEndpoint = typeof PodRuntimeServiceEndpoint.Type;
 
@@ -266,6 +271,11 @@ export const PodRuntimeSettings = Schema.Struct({
   snoozeAction: PodRuntimeSnoozeAction.pipe(
     Schema.withDecodingDefault(Effect.succeed("stop" as const)),
   ),
+  /**
+   * Also publish pod services on this host's tailnet address, so other tailnet
+   * devices reach them directly. Applies to pods created or recreated after.
+   */
+  publishOnTailnet: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type PodRuntimeSettings = typeof PodRuntimeSettings.Type;
 
@@ -275,6 +285,7 @@ export const PodRuntimeSettingsPatch = Schema.Struct({
   defaultImage: Schema.optionalKey(TrimmedNonEmptyString),
   network: Schema.optionalKey(PodRuntimeSettings.fields.network),
   snoozeAction: Schema.optionalKey(PodRuntimeSnoozeAction),
+  publishOnTailnet: Schema.optionalKey(Schema.Boolean),
 });
 
 /** Where a new thread's worktree runs its agents, terminals and scripts. */
