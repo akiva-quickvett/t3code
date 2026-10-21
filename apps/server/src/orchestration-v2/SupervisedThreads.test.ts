@@ -11,6 +11,7 @@ import {
   type RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -452,6 +453,9 @@ it.effect("with supervisedWakes off, auto from the supervisor steers as before",
     // queueing, the other choice, would have added a run.
     const sent = yield* Effect.exit(supervisorAutoSend(launcherId, childId));
     assert.isTrue(Exit.isFailure(sent));
+    const error = Exit.isFailure(sent) ? Cause.squash(sent.cause) : undefined;
+    assert.include(error, { _tag: "OrchestratorDispatchError", commandType: "message.dispatch" });
+    assert.match(String((error as { cause?: unknown }).cause), /Provider session .* is not active/);
     assert.lengthOf((yield* orchestrator.getThreadProjection(childId)).runs, 1);
   }).pipe(Effect.provide(makeLayerTest(false))),
 );
