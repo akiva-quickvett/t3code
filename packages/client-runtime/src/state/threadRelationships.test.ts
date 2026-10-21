@@ -561,7 +561,7 @@ describe("agent tree", () => {
     return {
       environmentId,
       id: ThreadId.make(id),
-      createdAt: createdAt ?? new Date(Date.UTC(2026, 9, 1, 0, 0, clock)).toISOString(),
+      createdAt: createdAt ?? `2026-10-01T00:00:${String(clock).padStart(2, "0")}.000Z`,
       lineage: {
         parentThreadId: parentThreadId === null ? null : ThreadId.make(parentThreadId),
         relationshipToParent:

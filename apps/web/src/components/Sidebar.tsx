@@ -2042,21 +2042,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       "bg-sidebar bg-linear-to-b from-sidebar-row-active to-sidebar-row-active text-sidebar-foreground opacity-100 shadow-lg",
   );
   const sortable = props.sortable;
-  const sortableRootProps = sortable
+  const sortableStyle = sortable
     ? {
-        ref: sortable.setNodeRef,
-        style: {
-          transform: CSS.Translate.toString(sortable.transform),
-          transition: sortable.transition,
-          // A zero-height boundary also makes dnd-kit scale the source to
-          // zero. Only projected peers use scaleY as a visibility sentinel.
-          visibility:
-            !sortable.isDragging && sortable.transform?.scaleY === 0
-              ? ("hidden" as const)
-              : undefined,
-        },
-        ...sortable.listeners,
+        transform: CSS.Translate.toString(sortable.transform),
+        transition: sortable.transition,
+        // A zero-height boundary also makes dnd-kit scale the source to
+        // zero. Only projected peers use scaleY as a visibility sentinel.
+        visibility:
+          !sortable.isDragging && sortable.transform?.scaleY === 0
+            ? ("hidden" as const)
+            : undefined,
       }
+    : undefined;
+  const sortableRootProps = sortable
+    ? { ref: sortable.setNodeRef, style: sortableStyle, ...sortable.listeners }
     : {};
   const treeIndentStyle =
     props.treeDepth !== null && props.treeDepth > 0
@@ -2064,7 +2063,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           paddingInlineStart: `${Math.min(props.treeDepth, AGENT_TREE_MAX_INDENT_DEPTH) * 0.75}rem`,
         }
       : undefined;
-  const sortableStyle = "style" in sortableRootProps ? sortableRootProps.style : undefined;
   const rootStyle =
     treeIndentStyle === undefined ? sortableStyle : { ...sortableStyle, ...treeIndentStyle };
   const treeDisclosure =

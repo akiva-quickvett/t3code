@@ -251,7 +251,11 @@ describe("v2 thread shell lists", () => {
     const metaShell = threads.threadShellAtom({ environmentId, threadId: meta.id });
     const sliceShell = threads.threadShellAtom({ environmentId, threadId: slice.id });
     const metaInputs = threads.childThreadInputsAtom({ environmentId, threadId: meta.id });
-    const disposers = [metaShell, sliceShell, metaInputs].map((atom) => registry.mount(atom));
+    const disposers = [
+      registry.mount(metaShell),
+      registry.mount(sliceShell),
+      registry.mount(metaInputs),
+    ];
 
     registry.set(snapshotAtom(environmentId), {
       ...v2ShellSnapshot,

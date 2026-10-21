@@ -168,7 +168,7 @@ export function SidebarHeaderIconButton({
             type="button"
             aria-label={label}
             aria-pressed={pressed}
-            isActive={pressed}
+            isActive={pressed === true}
             {...rest}
             className={cn("relative size-7 shrink-0", className)}
           />
