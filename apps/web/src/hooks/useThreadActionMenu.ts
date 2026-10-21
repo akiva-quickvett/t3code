@@ -18,7 +18,9 @@ import { useRouter } from "@tanstack/react-router";
 import { resolveSnoozePresets } from "../components/Sidebar.snooze";
 import {
   buildThreadActionMenuItems,
+  snoozeMenuChoice,
   threadActionRequiresOperate,
+  threadSnoozeTreeMenuState,
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -30,8 +32,10 @@ import {
   readEnvironmentSupportsPinning,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
+  readEnvironmentSupportsSnoozeTree,
   readEnvironmentSupportsTitleRegeneration,
   readThreadShell,
+  readThreadShells,
   useProjects,
 } from "../state/entities";
 import { readEnvironmentSupportsRolePresets } from "../state/agentRoles";
@@ -134,6 +138,9 @@ export function useThreadActionMenu(input: {
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat);
+      const snoozeTree = readEnvironmentSupportsSnoozeTree(threadRef.environmentId)
+        ? threadSnoozeTreeMenuState(thread, readThreadShells(), now.toISOString())
+        : undefined;
       const items = buildThreadActionMenuItems({
         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
         branch: thread.branch ?? null,
@@ -147,6 +154,7 @@ export function useThreadActionMenu(input: {
         isRunning: !threadRuntimeCanArchive(thread.runtime),
         supports,
         snoozePresets,
+        ...(snoozeTree === undefined ? {} : { snoozeTree }),
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
       if (clicked._tag === "Failure" || clicked.value === null) return;
@@ -161,13 +169,17 @@ export function useThreadActionMenu(input: {
         );
         return;
       }
-      if (action.startsWith("snooze:")) {
+      const snoozeChoice = snoozeMenuChoice(action, snoozeTree);
+      if (snoozeChoice !== null) {
         const preset =
-          action === "snooze:custom"
+          snoozeChoice.presetId === "custom"
             ? await requestCustomSnooze()
-            : snoozePresets.find((candidate) => `snooze:${candidate.id}` === action);
+            : snoozePresets.find((candidate) => candidate.id === snoozeChoice.presetId);
         if (!preset) return;
-        const result = await snoozeThread(threadRef, preset.snoozedUntil);
+        const result = await snoozeThread(threadRef, preset.snoozedUntil, {
+          scope: snoozeChoice.scope,
+          whenIdle: snoozeChoice.whenIdle,
+        });
         if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
           failureToast("Failed to snooze thread", squashAtomCommandFailure(result));
         }
@@ -223,6 +235,11 @@ export function useThreadActionMenu(input: {
           return;
         case "unsnooze":
           await reportFailure("Failed to wake thread", () => unsnoozeThread(threadRef));
+          return;
+        case "cancel-snooze-when-idle":
+          await reportFailure("Failed to cancel the snooze", () =>
+            unsnoozeThread(threadRef, { scope: "thread" }),
+          );
           return;
         case "pin":
           await reportFailure("Failed to pin thread", () => pinThread(threadRef));

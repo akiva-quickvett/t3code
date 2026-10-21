@@ -8,6 +8,8 @@ import * as StorageCleanup from "./storageCleanup.ts";
 import * as PullRequestLabelReactor from "./orchestration-v2/PullRequestLabelReactor.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
+import * as PodParkingReactor from "./orchestration-v2/PodParkingReactor.ts";
+import * as SnoozeWhenIdleReactor from "./orchestration-v2/SnoozeWhenIdleReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
@@ -654,6 +656,15 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       yield* service.start();
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      yield* (yield* SnoozeWhenIdleReactor.SnoozeWhenIdleReactor).start();
+      yield* (yield* PodParkingReactor.PodParkingReactor).start();
+    }),
+  ).pipe(
+    Layer.provide(Layer.merge(SnoozeWhenIdleReactor.layer, PodParkingReactor.layer)),
+    Layer.provide(ProjectionStoreV2.layer),
+  ),
   ProviderUsageLimitsIngestion.layer,
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,

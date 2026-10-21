@@ -187,6 +187,17 @@ export interface ProviderSessionManagerV2Shape {
     readonly detail?: string;
     readonly revokeMcpCredential?: boolean;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
+  /**
+   * Closes sessions running in the pod, as a stop rather than a failure: all
+   * of them before the pod stops under them, or with `openedBefore` only
+   * those its latest start outlived. Their threads open new ones on their
+   * next turn.
+   */
+  readonly releasePod: (input: {
+    readonly podId: PodRuntimeId;
+    readonly detail: string;
+    readonly openedBefore?: number;
+  }) => Effect.Effect<void>;
 }
 
 export class ProviderSessionManagerV2 extends Context.Service<
@@ -205,7 +216,14 @@ interface LiveSessionEntry {
    */
   readonly mcpCredentialIdByThread: ReadonlyMap<ThreadId, string>;
   /** Set when the session runs in a pod: its threads reach MCP through the pod listener. */
-  readonly pod: { readonly podId: PodRuntimeId; readonly mcpEndpoint: string } | undefined;
+  readonly pod:
+    | {
+        readonly podId: PodRuntimeId;
+        readonly mcpEndpoint: string;
+        /** A session opened before the pod's latest start died with the stop before it. */
+        readonly openedAtMs: number;
+      }
+    | undefined;
   readonly supportsMultipleProviderThreads: boolean;
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
@@ -1135,14 +1153,19 @@ export const layerWithOptions = (
        * A replaced agent container took its pod's provider processes with it.
        * Releasing their sessions lets each thread's next turn resume in the new one.
        */
-      const releasePodSessions = (podId: PodRuntimeId) =>
+      const releasePodSessions = (
+        podId: PodRuntimeId,
+        reason: ProviderSessionReleaseReason,
+        detail: string,
+        openedBefore = Number.POSITIVE_INFINITY,
+      ) =>
         Effect.gen(function* () {
           for (const entry of (yield* Ref.get(sessions)).values()) {
-            if (entry.pod?.podId !== podId) continue;
+            if (entry.pod?.podId !== podId || entry.pod.openedAtMs >= openedBefore) continue;
             yield* releaseEntry({
               providerSessionId: entry.runtime.providerSessionId,
-              reason: "runtime_error",
-              detail: "The pod's agent container was recreated for another provider account.",
+              reason,
+              detail,
             }).pipe(logReleaseFailure(entry.runtime.providerSessionId));
           }
         });
@@ -2228,7 +2251,11 @@ export const layerWithOptions = (
                   ),
                 );
               if (placement.type === "pod" && placement.agentRecreated) {
-                yield* releasePodSessions(placement.podId);
+                yield* releasePodSessions(
+                  placement.podId,
+                  "runtime_error",
+                  "The pod's agent container was recreated for another provider account.",
+                );
               }
               const prepared = yield* prepareMcpSession(
                 input.threadId,
@@ -2312,7 +2339,11 @@ export const layerWithOptions = (
                     : new Map([[input.threadId, mcpCredentialId]]),
                 pod:
                   placement.type === "pod"
-                    ? { podId: placement.podId, mcpEndpoint: placement.mcpEndpoint }
+                    ? {
+                        podId: placement.podId,
+                        mcpEndpoint: placement.mcpEndpoint,
+                        openedAtMs: now,
+                      }
                     : undefined,
                 supportsMultipleProviderThreads:
                   runtime.providerSession.capabilities.sessions
@@ -2429,6 +2460,8 @@ export const layerWithOptions = (
             ),
           ),
         release: releaseEntry,
+        releasePod: (input) =>
+          releasePodSessions(input.podId, "manual_shutdown", input.detail, input.openedBefore),
         detach: (input) =>
           Effect.gen(function* () {
             const key = sessionKey(input.providerSessionId);

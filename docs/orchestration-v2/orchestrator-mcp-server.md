@@ -482,6 +482,10 @@ List and read results report a thread's `rolePreset` when it has one, and
 `t3_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
 client's `effectiveSnoozed`, so agents and the sidebar agree: a snoozed thread
 wakes early when it has a pending request, fails, or completes after the snooze.
+`t3_thread_list` also gives the `pod` a thread's worktree runs in, with its
+state and whether its threads' snooze stopped it. `t3_thread_organize` snoozes
+and wakes the whole agent tree unless `scope` is `thread`, as the sidebar's
+Snooze does; it is the same `thread.snooze` command with `scope: "tree"`.
 
 ### `t3_thread_update`
 

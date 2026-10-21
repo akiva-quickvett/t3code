@@ -45,6 +45,7 @@ import {
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { AgentUsageHeadroom } from "./providerUsageLimits.ts";
 import { AgentRolePresetRunsIn, ThreadRolePreset } from "./agentRole.ts";
+import { PodRuntimeId, PodRuntimeState } from "./podRuntime.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
   description: "Complete task or message text for the target agent.",
@@ -381,6 +382,15 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   supervisorThreadId: Schema.optional(ThreadId),
   /** Missing on older servers. */
   rolePreset: Schema.optional(Schema.NullOr(ThreadRolePreset)),
+  /** The pod the thread's worktree runs in; missing when it has none. */
+  pod: Schema.optional(
+    Schema.Struct({
+      podId: PodRuntimeId,
+      state: PodRuntimeState,
+      /** Stopped because its threads are snoozed or settled; it starts when one wakes. */
+      parked: Schema.Boolean,
+    }),
+  ),
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -605,6 +615,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     usageLimits: Schema.optional(Schema.Boolean),
     /** t3_usage_thread_tree. Missing on older servers. */
     usageThreadTree: Schema.optional(Schema.Boolean),
+    /** t3_thread_organize snoozes and wakes agent trees (scope, whenIdle). Missing on older servers. */
+    snoozeTree: Schema.optional(Schema.Boolean),
   }),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;

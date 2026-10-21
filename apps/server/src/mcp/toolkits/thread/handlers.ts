@@ -305,11 +305,25 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
               message: "snooze requires snoozedUntil.",
             });
           }
-          command = { ...common, type: "thread.snooze", snoozedUntil: input.snoozedUntil };
+          command = {
+            ...common,
+            type: "thread.snooze",
+            snoozedUntil: input.snoozedUntil,
+            scope: input.scope ?? "tree",
+            // An agent snoozing itself is mid-turn: the snooze waits for that turn to end.
+            whenIdle: input.whenIdle ?? caller?.id === projection.thread.id,
+          };
           break;
         case "unsnooze":
+          command = {
+            ...common,
+            type: "thread.unsnooze",
+            reason: "user",
+            scope: input.scope ?? "tree",
+          };
+          break;
         case "unsettle":
-          command = { ...common, type: `thread.${input.action}`, reason: "user" };
+          command = { ...common, type: "thread.unsettle", reason: "user" };
           break;
         case "mark_unread":
           command = { ...common, type: "thread.mark-unread" };

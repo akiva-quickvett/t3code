@@ -152,6 +152,20 @@ the command palette.
 When starting or stopping fails, the chip shows the error and offers **Retry**. If Docker refuses
 to remove a pod, **Remove anyway** forgets it; whatever Docker kept is then listed as an orphan.
 
+### Pods follow their threads
+
+A pod stops once every thread on its worktree is snoozed or settled and none has work running,
+queued, or waiting on you. To pause a snoozed pod instead, which keeps its memory but wakes
+instantly, set `podRuntime.snoozeAction` to `freeze` in the server settings. The pod starts again
+when one of its threads wakes, and a turn waits for it to be running before the agent starts. A
+turn on a pod that failed to start or stop fails at once; use the banner's **Retry**. A
+start checks that the pod's containers and its stack's containers are still there and, in hostname
+mode, that its hostnames answer. It never recreates anything on its own.
+
+If the pod cannot start or stop, each awake thread on it shows a banner with **Retry**, **Open pod
+shell**, **Recreate pod** (which deletes the stack's data), and **Keep snoozed**, which snoozes the
+thread again.
+
 **Settings → Diagnostics → Pods** lists every pod with its memory use, including orphans:
 containers labelled for this T3 Code server that no pod owns. T3 Code never deletes orphans on its
 own; remove them there.

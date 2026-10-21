@@ -270,6 +270,7 @@ export const make = Effect.gen(function* () {
       scheduledTaskScripts: true,
       chatChannels: true,
       podRuntime: true,
+      threadSnoozeTree: true,
     },
   };
 

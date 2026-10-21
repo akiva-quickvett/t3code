@@ -31,7 +31,23 @@ export interface PodRuntimeRecord {
   readonly dnsAddress?: string;
   /** The pod's route file is in the proxy's directory, as far as this server knows. */
   readonly routed?: boolean;
+  /**
+   * When the pod was last asked to run. Threads that park later stop it; a
+   * pod started after its threads parked, from its chip say, stays up.
+   */
+  readonly startRequestedAt?: string;
 }
+
+/**
+ * What the server runs: every client request, plus `freeze`, which only a pod
+ * following its threads asks for. It never reaches the wire: a failed freeze
+ * is recorded as a failed stop, whose Retry frees the memory a freeze holds.
+ */
+export const PodInternalOperation = Schema.Literals([...PodRuntimeOperation.literals, "freeze"]);
+export type PodInternalOperation = typeof PodInternalOperation.Type;
+
+const wireOperation = (operation: PodInternalOperation): PodRuntimeOperation =>
+  operation === "freeze" ? "stop" : operation;
 
 const PodServicePort = Schema.Struct({ name: TrimmedNonEmptyString, port: Schema.Int });
 const PodServiceHostPort = Schema.Struct({
@@ -56,15 +72,17 @@ export const PodRuntimeEvent = Schema.Union([
     type: Schema.Literal("pod.operation-requested"),
     podId: PodRuntimeId,
     occurredAt: IsoDateTime,
-    operation: PodRuntimeOperation,
+    operation: PodInternalOperation,
     /** The agent image a recreate makes its container from: the default when it was asked. */
     image: Schema.optional(TrimmedNonEmptyString),
+    /** Asked for because every thread on the worktree was parked; a wake starts it again. */
+    parked: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("pod.operation-succeeded"),
     podId: PodRuntimeId,
     occurredAt: IsoDateTime,
-    operation: PodRuntimeOperation,
+    operation: PodInternalOperation,
     containerIds: Schema.Array(Schema.String),
     volumeIds: Schema.Array(Schema.String),
     /** "Remove anyway" recorded the removal although Docker refused it. */
@@ -74,7 +92,7 @@ export const PodRuntimeEvent = Schema.Union([
     type: Schema.Literal("pod.operation-failed"),
     podId: PodRuntimeId,
     occurredAt: IsoDateTime,
-    operation: PodRuntimeOperation,
+    operation: PodInternalOperation,
     message: Schema.String,
   }),
   /**
@@ -150,7 +168,7 @@ interface OperationRule {
  * `create` is never asked for directly; pod creation records it, and Start
  * retries it after it failed.
  */
-export const POD_OPERATION_RULES: Readonly<Record<PodRuntimeOperation, OperationRule>> = {
+export const POD_OPERATION_RULES: Readonly<Record<PodInternalOperation, OperationRule>> = {
   create: {
     from: [],
     settled: [],
@@ -168,6 +186,13 @@ export const POD_OPERATION_RULES: Readonly<Record<PodRuntimeOperation, Operation
     ...POD_RUNTIME_REQUESTS.stop,
     pending: "stopping",
     success: "stopped",
+    failure: "stop_failed",
+  },
+  freeze: {
+    from: ["running"],
+    settled: ["frozen", "stopping"],
+    pending: "stopping",
+    success: "frozen",
     failure: "stop_failed",
   },
   recreate: {
@@ -199,6 +224,31 @@ const TRANSITIONAL_STATES = new Set<PodRuntimeState>([
 export const isPodTransitional = (state: PodRuntimeState) => TRANSITIONAL_STATES.has(state);
 
 /**
+ * What parking a pod asks for in its state, or null when there is no memory
+ * to give back. A start that failed after its containers came up left them
+ * running, so it stops; a failed creation is left, since a stop would forget
+ * that its Retry must build the stack.
+ */
+export const podParkOperation = (
+  snapshot: Pick<PodRuntimeSnapshot, "state" | "lastError">,
+  wanted: "stop" | "freeze",
+): "stop" | "freeze" | null => {
+  switch (snapshot.state) {
+    case "running":
+      return wanted;
+    case "frozen":
+      return wanted === "stop" ? "stop" : null;
+    case "start_failed":
+      return snapshot.lastError?.operation === "start" ||
+        snapshot.lastError?.operation === "recreateAgentContainer"
+        ? "stop"
+        : null;
+    default:
+      return null;
+  }
+};
+
+/**
  * Any state but a clean stop or a removal may have containers running, so the
  * worktree stays: storage cleanup tears down only a pod stopped on purpose.
  */
@@ -216,8 +266,8 @@ export const boundedPodMessage = (message: string) =>
  */
 const effectiveOperation = (
   record: PodRuntimeRecord,
-  operation: PodRuntimeOperation,
-): PodRuntimeOperation => {
+  operation: PodInternalOperation,
+): PodInternalOperation => {
   const failed = record.snapshot.lastError?.operation;
   return operation === "start" &&
     record.snapshot.state === "start_failed" &&
@@ -232,8 +282,9 @@ const effectiveOperation = (
  */
 export const planPodRequest = (
   record: PodRuntimeRecord,
-  operation: PodRuntimeRequest,
+  operation: PodRuntimeRequest | "freeze",
   occurredAt: string,
+  options: { readonly parked?: boolean } = {},
 ): Result.Result<
   { readonly type: "none" } | { readonly type: "request"; readonly event: PodRuntimeEvent },
   PodRuntimeError
@@ -252,6 +303,7 @@ export const planPodRequest = (
       podId: record.snapshot.id,
       occurredAt,
       operation: effectiveOperation(record, operation),
+      ...(options.parked === true ? { parked: true } : {}),
     },
   });
 };
@@ -262,7 +314,7 @@ export const planPodRequest = (
  */
 export const planPodCompletion = (
   record: PodRuntimeRecord,
-  operation: PodRuntimeOperation,
+  operation: PodInternalOperation,
   outcome:
     | {
         readonly type: "succeeded";
@@ -476,14 +528,21 @@ const reducePodEvent = (
       };
     }
     case "pod.operation-requested": {
+      // Any other request is someone's own decision, which a wake must not undo.
       // The next start probes again; until then the last result may be stale.
       // A new agent container shares the daemon's network, so it reaches the
       // listener as the old one did, and keeps the start the probe was for.
-      const { mcpListener: _stale, ...unprobed } = snapshot;
+      const { parked: _parked, mcpListener, ...cleared } = snapshot;
+      const starts = POD_OPERATION_RULES[event.operation].success === "running";
       return {
         ...record,
+        ...(starts ? { startRequestedAt: event.occurredAt } : {}),
         snapshot: {
-          ...(event.operation === "recreateAgentContainer" ? snapshot : unprobed),
+          ...cleared,
+          ...(event.operation === "recreateAgentContainer" && mcpListener !== undefined
+            ? { mcpListener }
+            : {}),
+          ...(event.parked === true ? { parked: true as const } : {}),
           ...(event.image === undefined ? {} : { image: event.image }),
           state: POD_OPERATION_RULES[event.operation].pending,
           updatedAt,
@@ -516,7 +575,11 @@ const reducePodEvent = (
         snapshot: {
           ...snapshot,
           state: POD_OPERATION_RULES[event.operation].failure,
-          lastError: { operation: event.operation, message: event.message, at: updatedAt },
+          lastError: {
+            operation: wireOperation(event.operation),
+            message: event.message,
+            at: updatedAt,
+          },
           startedAt: null,
           updatedAt,
         },

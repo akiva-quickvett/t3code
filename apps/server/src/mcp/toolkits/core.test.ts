@@ -18,6 +18,7 @@ import {
   UsageDay,
   UsageReadError,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -74,6 +75,7 @@ const layerOrchestratorToolkitWithUsage = (
     Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
     Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
     Layer.provide(usage),
+    Layer.provide(layerWithoutPods),
   );
 const layerOrchestratorToolkit = layerOrchestratorToolkitWithUsage();
 
@@ -91,6 +93,7 @@ import {
   resolveT3McpToolSummaryAction,
 } from "@t3tools/shared/t3McpToolPresentation";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+import { layerWithoutPods } from "../../pod/testkit/layerWithoutPods.ts";
 
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
@@ -191,6 +194,52 @@ it.effect("checks capability through the production registration", () =>
   ),
 );
 
+const organized: Array<OrchestrationV2ServerCommand> = [];
+it.effect("snoozes and wakes the agent tree unless the agent asks for this thread only", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const call = (args: Record<string, unknown>) =>
+      server
+        .callTool({ name: "t3_thread_organize", arguments: args })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const snoozedUntil = "2099-01-01T09:00:00.000Z";
+    yield* call({ action: "snooze", snoozedUntil });
+    yield* call({ action: "snooze", snoozedUntil, scope: "thread", whenIdle: true });
+    yield* call({ action: "unsnooze" });
+    expect(organized).toMatchObject([
+      // The agent snoozes its own thread mid-turn, so the snooze waits for the turn to end.
+      { type: "thread.snooze", threadId, snoozedUntil, scope: "tree", whenIdle: true },
+      { type: "thread.snooze", scope: "thread", whenIdle: true },
+      { type: "thread.unsnooze", scope: "tree" },
+    ]);
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+            getProjectThreadRecords: () =>
+              Effect.succeed(
+                McpToolAccessTestkit.idleThreadProjection(
+                  McpToolAccessTestkit.liveThreadShell(threadId),
+                ) as never,
+              ),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                organized.push(command);
+                return { sequence: organized.length, storedEvents: [] };
+              }),
+          }),
+        ),
+      ),
+    ),
+  ),
+);
 it.effect("returns a bounded public failure without serializing storage causes", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;

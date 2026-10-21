@@ -19,6 +19,7 @@ import {
   type PodObservation,
   type PodRuntimeEvent,
   type PodRuntimeRecord,
+  type PodInternalOperation,
 } from "./PodRuntimeLifecycle.ts";
 
 const podId = PodRuntimeId.make("pod-abc123");
@@ -288,14 +289,16 @@ describe("pod requests and the agent container", () => {
     snapshot: { ...inState("running").snapshot, mcpListener: "blocked" as const },
   };
   const requested = (
-    operation: PodRuntimeOperation,
+    operation: PodInternalOperation,
     image?: string,
+    parked?: boolean,
   ): Extract<PodRuntimeEvent, { type: "pod.operation-requested" }> => ({
     type: "pod.operation-requested",
     podId,
     occurredAt: at,
     operation,
     ...(image === undefined ? {} : { image }),
+    ...(parked === undefined ? {} : { parked }),
   });
 
   it("keeps the listener probe through an agent-container recreate, and drops it otherwise", () => {
@@ -303,6 +306,19 @@ describe("pod requests and the agent container", () => {
       "blocked",
     );
     expect(applyPodEvent(probed, requested("stop"))?.snapshot).not.toHaveProperty("mcpListener");
+  });
+
+  it("drops the listener probe when threads park the pod, so its wake probes again", () => {
+    const frozen = applyPodEvent(probed, requested("freeze", undefined, true));
+    expect(frozen?.snapshot).toMatchObject({ parked: true, state: "stopping" });
+    expect(frozen?.snapshot).not.toHaveProperty("mcpListener");
+  });
+
+  it("keeps a user's agent-container recreate of a parked pod from parking it again", () => {
+    const parked = { ...probed, snapshot: { ...probed.snapshot, parked: true as const } };
+    const recreated = applyPodEvent(parked, requested("recreateAgentContainer"));
+    expect(recreated?.snapshot).not.toHaveProperty("parked");
+    expect(recreated?.startRequestedAt).toBe(at);
   });
 
   it("records the image a recreate makes its agent container from", () => {

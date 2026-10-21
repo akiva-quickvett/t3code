@@ -3,7 +3,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildDraftActionMenuItems,
   buildThreadActionMenuItems,
+  snoozeMenuChoice,
   type ThreadActionMenuState,
+  type ThreadSnoozeTreeMenuState,
 } from "./threadActionMenu.logic";
 
 const baseState: ThreadActionMenuState = {
@@ -192,6 +194,75 @@ describe("buildThreadActionMenuItems", () => {
     );
     expect(snooze?.disabled).toBe(true);
     expect(snooze?.children?.map((child) => child.id)).toEqual(["snooze:hour", "snooze:custom"]);
+  });
+
+  describe("snooze trees", () => {
+    const idleTree: ThreadSnoozeTreeMenuState = {
+      hasDescendants: true,
+      treeHasActiveWork: false,
+      threadHasActiveWork: false,
+      snoozesWhenIdle: false,
+    };
+    const snoozeItems = (snoozeTree: ThreadSnoozeTreeMenuState) =>
+      buildThreadActionMenuItems({ ...baseState, snoozeTree }).filter(
+        (item) => item.id.startsWith("snooze") || item.id === "cancel-snooze-when-idle",
+      );
+
+    it("snoozes the tree by default and offers only this thread when it has descendants", () => {
+      expect(snoozeItems(idleTree).map((item) => [item.id, item.label])).toEqual([
+        ["snooze", "Snooze"],
+        ["snooze-thread", "Snooze only this thread"],
+      ]);
+      expect(snoozeItems(idleTree)[1]?.children?.map((child) => child.id)).toEqual([
+        "snooze-thread:hour",
+        "snooze-thread:custom",
+      ]);
+      expect(snoozeItems({ ...idleTree, hasDescendants: false }).map((item) => item.id)).toEqual([
+        "snooze",
+      ]);
+    });
+
+    it("waits for active work instead of refusing", () => {
+      const items = snoozeItems({ ...idleTree, treeHasActiveWork: true });
+      expect(items.map((item) => [item.label, item.disabled ?? false])).toEqual([
+        ["Snooze when idle", false],
+        ["Snooze only this thread", false],
+      ]);
+      expect(
+        buildThreadActionMenuItems({
+          ...baseState,
+          canSnoozeNow: false,
+          snoozeTree: { ...idleTree, treeHasActiveWork: true, threadHasActiveWork: true },
+        }).find((item) => item.id === "snooze")?.disabled,
+      ).toBeFalsy();
+    });
+
+    it("offers the way out of a snooze that waits, and Wake for a snoozed thread", () => {
+      expect(snoozeItems({ ...idleTree, snoozesWhenIdle: true }).map((item) => item.label)).toEqual(
+        ["Cancel snooze when idle"],
+      );
+      expect(
+        ids({ ...baseState, isSnoozed: true, snoozeTree: idleTree }).filter((id) =>
+          id.includes("snooze"),
+        ),
+      ).toEqual(["unsnooze"]);
+    });
+
+    it("maps a clicked preset to its scope and whether it waits", () => {
+      const busy = { ...idleTree, treeHasActiveWork: true };
+      expect(snoozeMenuChoice("snooze:hour", busy)).toEqual({
+        presetId: "hour",
+        scope: "tree",
+        whenIdle: true,
+      });
+      expect(snoozeMenuChoice("snooze-thread:custom", busy)).toEqual({
+        presetId: "custom",
+        scope: "thread",
+        whenIdle: false,
+      });
+      expect(snoozeMenuChoice("snooze:hour", undefined)).toMatchObject({ whenIdle: false });
+      expect(snoozeMenuChoice("unsnooze", busy)).toBeNull();
+    });
   });
 
   it("disables title regeneration while one is in flight", () => {

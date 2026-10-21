@@ -510,6 +510,18 @@ export const layerPlacement = Layer.effect(
 
     return {
       podFor: (input) => podTargetFor(input).pipe(Effect.map((target) => target?.podId)),
+      podOf: (input) =>
+        podTargetFor(input).pipe(
+          Effect.catchTags({ ProviderPodRefusedError: () => Effect.succeed(undefined) }),
+          Effect.flatMap((target) =>
+            target === undefined ? Effect.succeed(undefined) : pods.current(target.podId),
+          ),
+        ),
+      startPod: (podId) =>
+        pods.ensureRunning(podId).pipe(
+          Effect.asVoid,
+          Effect.mapError((error) => refuse(`The pod did not start: ${error.message}`)(error)),
+        ),
       place: (input) =>
         Effect.gen(function* () {
           const target = yield* podTargetFor(input);

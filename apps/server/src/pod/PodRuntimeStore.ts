@@ -22,6 +22,7 @@ const StoredRecord = Schema.Struct({
   hostnames: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   dnsAddress: Schema.optionalKey(Schema.String),
   routed: Schema.optionalKey(Schema.Boolean),
+  startRequestedAt: Schema.optionalKey(Schema.String),
 });
 const decodeRecord = Schema.decodeUnknownEffect(Schema.fromJsonString(StoredRecord));
 const encodeRecord = Schema.encodeEffect(Schema.fromJsonString(StoredRecord));
