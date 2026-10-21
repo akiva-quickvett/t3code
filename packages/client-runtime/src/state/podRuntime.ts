@@ -90,6 +90,18 @@ export function podRuntimeWarningMessage(warning: PodRuntimeWarning): string {
   return WARNING_MESSAGES[warning];
 }
 
+/**
+ * Why a running pod's agents work without T3's tools: they cannot reach its
+ * pod-facing MCP listener, usually a host firewall on Linux or the engine's
+ * name resolution in a VM. Undefined while nothing says so, including on
+ * servers that do not probe.
+ */
+export function podMcpListenerProblem(pod: PodRuntimeSnapshot): string | undefined {
+  return pod.state === "running" && pod.mcpListener === "blocked"
+    ? "Agents in this pod cannot reach T3 Code's pod listener, so they run without its tools. See the Pods guide (Host firewall, or macOS and Docker Desktop), then start a new session."
+    : undefined;
+}
+
 export type PodRuntimeTone = "running" | "busy" | "idle" | "failed";
 
 const STATE_PRESENTATION: Readonly<

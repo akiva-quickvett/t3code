@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   DEFAULT_TERMINAL_ID,
+  PodRuntimeId,
   type TerminalAttachStreamEvent,
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
@@ -42,6 +43,9 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
+import * as PortScanner from "../preview/PortScanner.ts";
+import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "./Manager.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
@@ -3214,5 +3218,96 @@ it.layer(
       assert.equal(process.killSignals[0], "SIGTERM");
       expect(process.killSignals).toContain("SIGKILL");
     }).pipe(Effect.provide(TestClock.layer())),
+  );
+});
+
+it.layer(
+  Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
+  { excludeTestServices: true },
+)("TerminalManager on a pod's worktree", (it) => {
+  const podTarget = (worktreePath: string, state: "running" | "stopped") => ({
+    type: "pod" as const,
+    podId: PodRuntimeId.make("pod-terminal"),
+    state,
+    worktreePath,
+    dockerHost: "",
+  });
+
+  /** The real `make`, so the pod launch it wires in is the one under test. */
+  const makePodManager = (state: "running" | "stopped") =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const worktreePath = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-pod-wt-" });
+      const ptyAdapter = new FakePtyAdapter();
+      const launches: Array<
+        Parameters<WorkspaceExecutionTarget.WorkspaceExecutionTarget["Service"]["launch"]>[1]
+      > = [];
+      const manager = yield* TerminalManager.make().pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ServerConfig.layerTest(worktreePath, { prefix: "t3-pod-terminal-" }),
+            ServerSettings.layerTest(),
+            Layer.succeed(PtyAdapter.PtyAdapter, { spawn: (input) => ptyAdapter.spawn(input) }),
+            Layer.mock(PortScanner.PortDiscovery)({
+              registerTerminalProcesses: () => Effect.void,
+              unregisterTerminal: () => Effect.void,
+            }),
+            Layer.mock(NativeTelemetryClient.NativeTelemetryClient)({
+              processTable: Effect.succeed([]),
+            }),
+            Layer.succeed(WorkspaceExecutionTarget.WorkspaceExecutionTarget, {
+              resolve: (path) =>
+                Effect.succeed(
+                  path === worktreePath ? podTarget(worktreePath, state) : { type: "host" },
+                ),
+              launch: (_target, spec) => {
+                launches.push(spec);
+                return {
+                  command: "docker",
+                  args: ["exec", "-i", "-t", "t3-agent", ...spec.command],
+                  env: { FROM_LAUNCH: "1" },
+                };
+              },
+              exec: () => Effect.die("unused"),
+            }),
+          ),
+        ),
+      );
+      return { manager, ptyAdapter, launches, worktreePath };
+    });
+
+  it.effect("opens the shell in the pod's agent container, with the image's shell", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, launches, worktreePath } = yield* makePodManager("running");
+      yield* manager.open(openInput({ cwd: worktreePath }));
+
+      expect(launches).toEqual([
+        expect.objectContaining({
+          command: ["sh", "-c", expect.stringContaining("exec bash || exec sh")],
+          cwd: worktreePath,
+          tty: true,
+          env: expect.objectContaining({ TERM: "xterm-256color", LANG: "C.UTF-8" }),
+        }),
+      ]);
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      expect(ptyAdapter.spawnInputs[0]).toMatchObject({
+        shell: "docker",
+        args: ["exec", "-i", "-t", "t3-agent", "sh", "-c", expect.any(String)],
+      });
+      expect(ptyAdapter.spawnInputs[0]?.env).toMatchObject({ FROM_LAUNCH: "1" });
+    }),
+  );
+
+  it.effect("says to start a stopped pod instead of running docker exec", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, launches, worktreePath } = yield* makePodManager("stopped");
+      yield* manager.open(openInput({ cwd: worktreePath }));
+
+      expect(launches).toEqual([]);
+      expect(ptyAdapter.spawnInputs[0]).toMatchObject({
+        shell: "/bin/sh",
+        args: expect.arrayContaining([expect.stringContaining("pod is not running")]),
+      });
+    }).pipe(Effect.provide(layerWithHostPlatform("linux"))),
   );
 });

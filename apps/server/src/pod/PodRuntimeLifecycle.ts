@@ -3,6 +3,7 @@ import {
   POD_RUNTIME_ERROR_MESSAGE_MAX_LENGTH,
   PodRuntimeError,
   PodRuntimeId,
+  PodRuntimeMcpListenerStatus,
   PodRuntimeOperation,
   POD_RUNTIME_REQUESTS,
   type PodRuntimeRequest,
@@ -56,6 +57,8 @@ export const PodRuntimeEvent = Schema.Union([
     podId: PodRuntimeId,
     occurredAt: IsoDateTime,
     operation: PodRuntimeOperation,
+    /** The agent image a recreate makes its container from: the default when it was asked. */
+    image: Schema.optional(TrimmedNonEmptyString),
   }),
   Schema.Struct({
     type: Schema.Literal("pod.operation-succeeded"),
@@ -98,6 +101,13 @@ export const PodRuntimeEvent = Schema.Union([
     occurredAt: IsoDateTime,
     routed: Schema.Boolean,
     problem: Schema.NullOr(Schema.String),
+  }),
+  /** A probe from the agent container of T3's pod-facing MCP listener; null when it could not tell. */
+  Schema.Struct({
+    type: Schema.Literal("pod.mcp-listener-probed"),
+    podId: PodRuntimeId,
+    occurredAt: IsoDateTime,
+    status: Schema.NullOr(PodRuntimeMcpListenerStatus),
   }),
   /** A removed pod's worktree checkout was removed, freeing the path for a host worktree. */
   Schema.Struct({
@@ -454,11 +464,32 @@ const reducePodEvent = (
         },
       };
     }
-    case "pod.operation-requested":
+    case "pod.mcp-listener-probed": {
+      const { mcpListener: _previous, ...unprobed } = snapshot;
       return {
         ...record,
-        snapshot: { ...snapshot, state: POD_OPERATION_RULES[event.operation].pending, updatedAt },
+        snapshot: {
+          ...unprobed,
+          ...(event.status === null ? {} : { mcpListener: event.status }),
+          updatedAt,
+        },
       };
+    }
+    case "pod.operation-requested": {
+      // The next start probes again; until then the last result may be stale.
+      // A new agent container shares the daemon's network, so it reaches the
+      // listener as the old one did, and keeps the start the probe was for.
+      const { mcpListener: _stale, ...unprobed } = snapshot;
+      return {
+        ...record,
+        snapshot: {
+          ...(event.operation === "recreateAgentContainer" ? snapshot : unprobed),
+          ...(event.image === undefined ? {} : { image: event.image }),
+          state: POD_OPERATION_RULES[event.operation].pending,
+          updatedAt,
+        },
+      };
+    }
     case "pod.operation-succeeded": {
       const state = settledState(event);
       return {

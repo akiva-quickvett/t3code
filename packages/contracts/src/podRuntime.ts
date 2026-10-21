@@ -106,6 +106,15 @@ export const PodRuntimeServiceEndpoint = Schema.Struct({
 });
 export type PodRuntimeServiceEndpoint = typeof PodRuntimeServiceEndpoint.Type;
 
+/**
+ * Whether the pod's agents reach T3's pod-facing MCP listener, as a probe from
+ * the agent container found it after the pod started. `blocked` is almost
+ * always the host firewall dropping the pod network; agents then run without
+ * T3's tools.
+ */
+export const PodRuntimeMcpListenerStatus = Schema.Literals(["reachable", "blocked"]);
+export type PodRuntimeMcpListenerStatus = typeof PodRuntimeMcpListenerStatus.Type;
+
 export const PodRuntimeSnapshot = Schema.Struct({
   id: PodRuntimeId,
   projectId: ProjectId,
@@ -125,6 +134,8 @@ export const PodRuntimeSnapshot = Schema.Struct({
   hostnameProblem: Schema.optionalKey(
     Schema.String.check(Schema.isMaxLength(POD_RUNTIME_ERROR_MESSAGE_MAX_LENGTH)),
   ),
+  /** Absent until a running pod has been probed, or when the probe could not tell. */
+  mcpListener: Schema.optionalKey(PodRuntimeMcpListenerStatus),
 });
 export type PodRuntimeSnapshot = typeof PodRuntimeSnapshot.Type;
 
@@ -270,8 +281,13 @@ export class WorktreePodTeardownError extends Schema.TaggedError<WorktreePodTear
 export const PodRuntimeSnoozeAction = Schema.Literals(["stop", "freeze"]);
 export type PodRuntimeSnoozeAction = typeof PodRuntimeSnoozeAction.Type;
 
-/** The agent image needs the docker CLI with its compose plugin, which runs the stack. */
-export const DEFAULT_POD_RUNTIME_IMAGE = "docker:27-cli";
+/**
+ * The agent image needs the docker CLI with its compose plugin, which runs the
+ * stack. This default names the image T3 builds itself, with curl, git and the
+ * provider CLIs, tagged by its recipe; `.invalid` keeps the name from ever
+ * resolving to a registry image.
+ */
+export const DEFAULT_POD_RUNTIME_IMAGE = "t3.invalid/pod-agent";
 export const DEFAULT_POD_RUNTIME_NETWORK = "t3-pods";
 
 const DockerObjectName = TrimmedNonEmptyString.check(

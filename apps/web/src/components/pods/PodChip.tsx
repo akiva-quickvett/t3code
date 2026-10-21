@@ -1,11 +1,12 @@
 import {
+  podMcpListenerProblem,
   podRuntimeActions,
   podRuntimeStatePresentation,
   podServiceLinks,
   type PodRuntimeTone,
 } from "@t3tools/client-runtime/state/pod-runtime";
 import type { EnvironmentId, PodRuntimeSnapshot, ThreadId } from "@t3tools/contracts";
-import { BoxIcon, GlobeIcon } from "lucide-react";
+import { BoxIcon, GlobeIcon, TriangleAlertIcon } from "lucide-react";
 
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 
@@ -24,9 +25,17 @@ const TONE_VARIANT: Readonly<Record<PodRuntimeTone, "success" | "info" | "second
   failed: "error",
 };
 
+/** A pod whose agents cannot reach T3 warns, whatever its state's tone. */
+function podChipLook(pod: PodRuntimeSnapshot) {
+  return podMcpListenerProblem(pod) === undefined
+    ? { variant: TONE_VARIANT[podRuntimeStatePresentation(pod.state).tone], Icon: BoxIcon }
+    : { variant: "warning" as const, Icon: TriangleAlertIcon };
+}
+
 function podTitle(pod: PodRuntimeSnapshot) {
   const { label } = podRuntimeStatePresentation(pod.state);
-  return pod.lastError === null ? `Pod ${label}` : `Pod ${label}: ${pod.lastError.message}`;
+  const detail = pod.lastError?.message ?? podMcpListenerProblem(pod);
+  return detail === undefined ? `Pod ${label}` : `Pod ${label}: ${detail}`;
 }
 
 function PodChipMenu(props: {
@@ -38,6 +47,8 @@ function PodChipMenu(props: {
   const services = useOpenPodService(props.environmentId);
   const links = podServiceLinks(props.pod);
   const presentation = podRuntimeStatePresentation(props.pod.state);
+  const listenerProblem = podMcpListenerProblem(props.pod);
+  const look = podChipLook(props.pod);
   const actions = podRuntimeActions(props.pod).filter(
     (action) => action.kind !== "openShell" || props.threadId !== null,
   );
@@ -47,14 +58,14 @@ function PodChipMenu(props: {
         render={
           <Badge
             render={<button type="button" />}
-            variant={TONE_VARIANT[presentation.tone]}
+            variant={look.variant}
             size="sm"
             title={podTitle(props.pod)}
             aria-label={podTitle(props.pod)}
           />
         }
       >
-        <BoxIcon />
+        <look.Icon />
         Pod: {presentation.label}
       </MenuTrigger>
       <MenuPopup align="start">
@@ -71,6 +82,12 @@ function PodChipMenu(props: {
             <div className="max-w-72 px-2 py-1 text-muted-foreground text-xs">
               {props.pod.hostnameProblem}
             </div>
+            <MenuSeparator />
+          </>
+        )}
+        {listenerProblem === undefined ? null : (
+          <>
+            <div className="max-w-72 px-2 py-1 text-warning text-xs">{listenerProblem}</div>
             <MenuSeparator />
           </>
         )}
@@ -122,13 +139,13 @@ export function PodChip(props: {
         pod={pod}
       />
     );
-  const presentation = podRuntimeStatePresentation(pod.state);
+  const look = podChipLook(pod);
   return (
     <Tooltip>
       <TooltipTrigger
         render={
-          <Badge variant={TONE_VARIANT[presentation.tone]} size="sm" aria-label={podTitle(pod)}>
-            <BoxIcon />
+          <Badge variant={look.variant} size="sm" aria-label={podTitle(pod)}>
+            <look.Icon />
           </Badge>
         }
       />

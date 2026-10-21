@@ -281,3 +281,34 @@ describe("pod reconcile", () => {
       });
   });
 });
+
+describe("pod requests and the agent container", () => {
+  const probed = {
+    ...inState("running"),
+    snapshot: { ...inState("running").snapshot, mcpListener: "blocked" as const },
+  };
+  const requested = (
+    operation: PodRuntimeOperation,
+    image?: string,
+  ): Extract<PodRuntimeEvent, { type: "pod.operation-requested" }> => ({
+    type: "pod.operation-requested",
+    podId,
+    occurredAt: at,
+    operation,
+    ...(image === undefined ? {} : { image }),
+  });
+
+  it("keeps the listener probe through an agent-container recreate, and drops it otherwise", () => {
+    expect(applyPodEvent(probed, requested("recreateAgentContainer"))?.snapshot.mcpListener).toBe(
+      "blocked",
+    );
+    expect(applyPodEvent(probed, requested("stop"))?.snapshot).not.toHaveProperty("mcpListener");
+  });
+
+  it("records the image a recreate makes its agent container from", () => {
+    expect(
+      applyPodEvent(probed, requested("recreate", "t3.invalid/pod-agent"))?.snapshot.image,
+    ).toBe("t3.invalid/pod-agent");
+    expect(applyPodEvent(probed, requested("start"))?.snapshot.image).toBe("image");
+  });
+});

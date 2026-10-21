@@ -58,7 +58,9 @@ check the `orchestration` capability before reading or mutating state.
 A session that runs in a pod gets the same credential with the endpoint
 `http://host.docker.internal:<pod-listener-port>/mcp`, the pod-facing listener
 that serves only `/mcp` and attachment uploads
-([pod runtime](../internals/pod-runtime.md#pod-facing-mcp-listener)).
+([pod runtime](../internals/pod-runtime.md#pod-facing-mcp-listener)). There, ACP
+agents get it as an `http` server in `session/new|load|fork`, since T3's stdio
+bridge is a host binary, and Pi in its own process's environment only.
 
 ## Provider Injection
 

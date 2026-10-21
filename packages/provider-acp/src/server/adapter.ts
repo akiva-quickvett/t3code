@@ -118,6 +118,7 @@ import {
   subagentThreadTitle,
 } from "@t3tools/provider-core/server/subagentProjection";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { type ProviderPod, ProviderPodProcesses } from "@t3tools/provider-core/server/podProcess";
 
 export const ACP_PROTOCOL = "acp.ndjson-jsonrpc" as const;
 
@@ -134,6 +135,8 @@ export interface AcpAdapterV2RuntimeInput {
   readonly mcpServers: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly acpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly processEnvironment?: NodeJS.ProcessEnv;
+  /** The pod the session runs in, for a flavor that `runsInPods`. */
+  readonly pod?: ProviderPod;
   readonly resumeSessionId?: string;
   readonly interruptPromptOnCancel?: boolean;
   readonly clientCapabilities: EffectAcpSchema.InitializeRequest["clientCapabilities"];
@@ -214,6 +217,11 @@ export interface AcpAdapterV2Flavor {
     readonly message: string;
   }) => Effect.Effect<boolean>;
   readonly withRuntimeStartup?: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
+  /**
+   * The agent is a process T3 spawns, so on a pod's worktree it runs in the
+   * pod: `makeRuntime` then gets the pod and spawns the agent through it.
+   */
+  readonly runsInPods?: true;
   readonly makeRuntime: (
     input: AcpAdapterV2RuntimeInput,
   ) => Effect.Effect<
@@ -368,6 +376,8 @@ export interface AcpAdapterV2Options {
   readonly selfInvocation: SelfInvocation;
   readonly clientTerminals?: {
     readonly environment?: NodeJS.ProcessEnv;
+    /** What terminals get in a pod, instead of `environment`. */
+    readonly podEnvironment?: NodeJS.ProcessEnv;
     readonly shellCommands?: boolean;
   };
   readonly nativeLogging?: (threadId: ThreadId) => AcpAdapterV2NativeLogging;
@@ -544,9 +554,30 @@ interface AcpMcpContext {
 function acpMcpContext(
   session: McpProviderSession.McpProviderSessionConfig | undefined,
   self: SelfInvocation,
+  inPod: boolean,
 ): AcpMcpContext {
   if (session === undefined) {
     return { servers: [], acpServers: [] };
+  }
+  const acpServers = [{ type: "acp", name: "t3-code", serverId: "t3-code" }] as const;
+  if (inPod) {
+    // The stdio bridge is T3's own binary on the host, which a pod cannot run,
+    // so the agent there calls the pod's listener directly. T3's MCP-over-ACP
+    // bridge runs on the host and calls the server's own endpoint, and no
+    // token goes into the agent's environment.
+    return {
+      servers: [
+        {
+          type: "http",
+          name: "t3-code",
+          url: session.endpoint,
+          headers: [{ name: "Authorization", value: session.authorizationHeader }],
+        },
+      ],
+      acpServers,
+      endpoint: session.hostEndpoint ?? session.endpoint,
+      authorization: session.authorizationHeader,
+    };
   }
   // Agents that advertise optional http support still routinely fail to wire
   // injected http servers through to their backend (codex-acp 1.2.0 and pi-acp
@@ -565,7 +596,7 @@ function acpMcpContext(
         ],
       },
     ],
-    acpServers: [{ type: "acp", name: "t3-code", serverId: "t3-code" }],
+    acpServers,
     endpoint: session.endpoint,
     authorization: session.authorizationHeader,
     processEnvironment: {
@@ -1286,11 +1317,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const podProcesses = yield* ProviderPodProcesses;
   const { flavor, selfInvocation: self } = options;
-  const readMcpContext = (threadId: ThreadId | null) =>
+  const readPlacedMcpContext = (threadId: ThreadId | null, inPod: boolean) =>
     threadId === null
-      ? Effect.succeed(acpMcpContext(undefined, self))
-      : mcpSessions.read(threadId).pipe(Effect.map((session) => acpMcpContext(session, self)));
+      ? Effect.succeed(acpMcpContext(undefined, self, inPod))
+      : mcpSessions
+          .read(threadId)
+          .pipe(Effect.map((session) => acpMcpContext(session, self, inPod)));
   const driver = flavor.driver;
   const continuationRequests = options.continuationRequests;
   const postSettleContinuationEnabled =
@@ -1304,6 +1338,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
     openSession: Effect.fn("AcpAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
         const sessionScope = yield* Effect.scope;
+        const pod =
+          flavor.runsInPods === true
+            ? yield* podProcesses.forCwd(input.runtimePolicy.cwd ?? undefined)
+            : undefined;
+        const readMcpContext = (threadId: ThreadId | null) =>
+          readPlacedMcpContext(threadId, pod !== undefined);
         let itemIdentityVersion: 2 | undefined =
           input.initialProviderItemIdentityVersion ??
           (input.initialNativeThreadId === undefined ? 2 : undefined);
@@ -1383,6 +1423,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 defaultCwd: input.runtimePolicy.cwd ?? process.cwd(),
                 environment: options.clientTerminals.environment,
                 shellCommands: options.clientTerminals.shellCommands,
+                pod,
+                podEnvironment: options.clientTerminals.podEnvironment,
                 environmentForSession: (sessionId) => {
                   const remembered = terminalEnvironmentBySessionId.get(sessionId);
                   if (remembered !== undefined) return remembered;
@@ -1872,6 +1914,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           return {
             cwd: input.runtimePolicy.cwd ?? process.cwd(),
             runtimePolicy: input.runtimePolicy,
+            ...(pod === undefined ? {} : { pod }),
             mcpServers: mcpContext.servers,
             acpMcpServers: mcpContext.acpServers,
             ...(mcpContext.processEnvironment === undefined
@@ -5561,6 +5604,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           return mcpBridge;
         });
 
+        /** What the running agent said it takes, which decides the MCP servers it got. */
+        let agentInitialize: EffectAcpSchema.InitializeResponse | undefined;
+
         const spawnAcpRuntime = Effect.fnUntraced(function* (
           threadId: ThreadId | null,
           resumeSessionId?: string,
@@ -5590,7 +5636,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const startup = Effect.gen(function* () {
             yield* spawnAcpRuntime(threadId, resumeSessionId);
             yield* wireAcpRuntimeHandlers(runtime, yield* Ref.get(runtimeCallbackGeneration));
-            return yield* runtime.start();
+            const started = yield* runtime.start();
+            agentInitialize = started.initializeResult;
+            return started;
           });
           return yield* flavor.withRuntimeStartup?.(startup) ?? startup;
         });
@@ -5667,6 +5715,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             );
             yield* wireAcpRuntimeMcpHandlers(replacementRuntime, replacementMcpBridge);
             const started = yield* replacementRuntime.start();
+            agentInitialize = started.initializeResult;
             return { replacementRuntime, started };
           });
           const replacementExit = yield* Effect.exit(
@@ -6312,7 +6361,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const prompt: Array<EffectAcpSchema.ContentBlock> = [];
           const instructionState = {
             interactionMode: turnInput.runtimePolicy.interactionMode,
-            hasT3Mcp: (yield* readMcpContext(turnInput.threadId)).servers.length > 0,
+            hasT3Mcp: yield* readMcpContext(turnInput.threadId).pipe(
+              Effect.map(
+                (mcpContext) =>
+                  (agentInitialize === undefined
+                    ? mcpContext.servers
+                    : AcpSessionRuntime.selectSessionMcpServers(
+                        agentInitialize,
+                        mcpContext.servers,
+                        mcpContext.acpServers,
+                      )
+                  ).length > 0,
+              ),
+            ),
           } satisfies T3AcpInstructionState;
           const previousInstructionState = (yield* Ref.get(promptInstructionStates)).get(sessionId);
           const messageText = providerMessageTextWithAttachmentPaths({

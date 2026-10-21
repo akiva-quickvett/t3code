@@ -13,6 +13,7 @@ import {
   EMPTY_POD_RUNTIME_STATE,
   podBrowsingThread,
   podForWorktree,
+  podMcpListenerProblem,
   podServiceLinks,
   podRuntimeActions,
   reducePodRuntimeEvent,
@@ -157,5 +158,17 @@ describe("pod service links", () => {
     ];
     expect(podBrowsingThread(threads, environmentId, pod("running"))?.id).toBe("latest");
     expect(podBrowsingThread([], environmentId, pod("running"))).toBeUndefined();
+  });
+});
+
+describe("pod MCP listener problem", () => {
+  it("speaks only for a running pod whose probe found the listener blocked", () => {
+    expect(podMcpListenerProblem({ ...pod("running"), mcpListener: "blocked" })).toContain(
+      "cannot reach",
+    );
+    expect(podMcpListenerProblem({ ...pod("running"), mcpListener: "reachable" })).toBeUndefined();
+    // A server that does not probe sends no status, and a stopped pod's is stale.
+    expect(podMcpListenerProblem(pod("running"))).toBeUndefined();
+    expect(podMcpListenerProblem({ ...pod("stopped"), mcpListener: "blocked" })).toBeUndefined();
   });
 });

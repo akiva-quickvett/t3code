@@ -21,6 +21,7 @@ import {
   isPodMcpRoute,
   makePodSubnetCheck,
   McpRequestDispatch,
+  namesPodHostAlias,
   PodMcpListener,
   layerWithPort,
 } from "./PodMcpListener.ts";
@@ -345,3 +346,48 @@ const occupy = (port: number) =>
       });
     },
   );
+
+describe("pod MCP listener for an engine in a VM", () => {
+  const alias = (port: number) => ({ host: `host.docker.internal:${port}` });
+  // A gateway inside the VM, which this machine cannot bind.
+  const vmNetwork = { subnet: "10.99.0.0/16", gateway: "10.99.0.1" };
+
+  it.effect("listens on loopback and takes only requests that name the pods' alias", () => {
+    let docker: ReturnType<typeof makeFakeContainerDriver> | undefined;
+    return Effect.gen(function* () {
+      yield* recordPod;
+      const endpoint = yield* (yield* PodMcpListener).endpointFor(target);
+      expect(endpoint).toMatch(/^http:\/\/host\.docker\.internal:\d+\/mcp$/);
+      const port = portOf(endpoint);
+
+      expect((yield* request(port, "POST", "/mcp", alias(port))).status).toBe(200);
+      // A browser page on this machine, or one that rebinds its name to loopback.
+      expect((yield* request(port, "POST", "/mcp")).status).toBe(403);
+      expect((yield* request(port, "POST", "/mcp", { host: "evil.example" })).status).toBe(403);
+      expect(
+        (yield* request(port, "POST", "/mcp", {
+          ...alias(port),
+          authorization: "Bearer payload.signature",
+        })).status,
+      ).toBe(401);
+      expect((yield* request(port, "GET", "/api/projects", alias(port))).status).toBe(404);
+      // The pod network's gateway is never looked up, let alone bound.
+      expect(docker?.calls.some((call) => call.operation === "network")).toBe(false);
+    }).pipe(
+      Effect.provide(
+        makeLayer(vmNetwork, (fake) => {
+          docker = fake;
+          fake.setEngineOperatingSystem("Docker Desktop");
+        }),
+      ),
+    );
+  });
+
+  it("recognizes only the pods' alias as the request's host", () => {
+    expect(namesPodHostAlias("host.docker.internal:17773")).toBe(true);
+    expect(namesPodHostAlias("host.docker.internal")).toBe(true);
+    expect(namesPodHostAlias("127.0.0.1:17773")).toBe(false);
+    expect(namesPodHostAlias("host.docker.internal.evil.example")).toBe(false);
+    expect(namesPodHostAlias(undefined)).toBe(false);
+  });
+});
