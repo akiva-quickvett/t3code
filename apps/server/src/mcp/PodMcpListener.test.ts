@@ -282,6 +282,48 @@ describe("pod MCP listener", () => {
       yield* held.release;
     }),
   );
+
+  it.effect("follows a recreated pod onto the network its new daemon joined", () => {
+    let docker: ReturnType<typeof makeFakeContainerDriver> | undefined;
+    const dind = (network: string) => ({
+      id: `dind-${network}`,
+      name: "t3-env-pod-listener1-dind",
+      labels: { "t3.pod": podId, "t3.role": "dind", "t3.network": network },
+    });
+    return Effect.gen(function* () {
+      const listener = yield* PodMcpListener;
+      const store = yield* PodRuntimeStore.PodRuntimeStore;
+      const networks = (network: string) =>
+        listener.listening.pipe(
+          Stream.filter((open) => open.length === 1 && open[0]?.network === network),
+          Stream.runHead,
+        );
+      yield* recordPod;
+      yield* observe("running");
+      yield* networks("pods-before");
+
+      // Recreate: the old daemon goes, a new one joins today's network.
+      yield* store.commit(podId, [
+        {
+          type: "pod.operation-requested",
+          podId,
+          occurredAt: "2026-10-21T00:00:02.000Z",
+          operation: "recreate",
+        },
+      ]);
+      yield* docker!.driver.forHost("").removeContainer("dind-pods-before");
+      yield* Effect.sync(() => docker!.seedContainer(dind("pods-after")));
+      yield* observe("running");
+      yield* networks("pods-after");
+    }).pipe(
+      Effect.provide(
+        makeLayer({ subnet: "127.0.0.0/8", gateway: "127.0.0.1" }, (fake) => {
+          docker = fake;
+          fake.seedContainer(dind("pods-before"));
+        }),
+      ),
+    );
+  });
 });
 
 /** Holds a loopback port the way another program would. */

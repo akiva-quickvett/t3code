@@ -61,16 +61,22 @@ Antigravity is bound to the host) run on the host only when the thread's role pr
 while the worktree's stack lives in the pod. `orchestrator_capabilities` lists each refusal.
 
 A provider that serves many threads from one process (Codex, OpenCode) gets one shared session
-per place: the orchestrator scopes the shared session id by where the thread's session must run,
-its pod or the host, by the same rules as above, and the session manager never attaches a thread to
-a shared session placed elsewhere. One process cannot run in two places. The session manager reads
-`runsIn` from the thread's preset itself, so every path that opens a session places it alike.
+per place. The orchestrator names the shared session when it queues a run, which for a new
+worktree is before its pod exists, so turn start moves the thread to the shared session of the
+place it runs in now (its pod's, or the host's, by the same rules as above) and detaches it from
+the old one. The session manager never attaches a thread to a shared session placed elsewhere:
+one process cannot run in two places. It reads `runsIn` from the thread's preset itself, so every
+path that opens a session places it alike.
 
 The host's `docker exec` client forwards no signal to the process it started, so closing it
 leaves the agent and its children running in the container. Each launch therefore marks its
-environment with `T3_POD_SESSION`, which every child inherits, and its end signals every container
-process carrying the mark (TERM, then KILL): the host's process-group kill, extended to children
-that left the group.
+environment with `T3_POD_SESSION` and records its pid, and its end signals every container process
+carrying the mark or descending from that pid (TERM, then KILL): the host's process-group kill,
+extended to children that left the group (they keep the mark) and to children started with a
+cleaned environment, such as Codex's stdio MCP servers (they descend from the launch). A pid
+namespace per launch would be tighter, but the agent container is unprivileged and cannot make one. Closing a session waits for the stop, so server shutdown leaves nothing
+behind. A server that crashed never ran its stops, so each running pod is swept once per start of
+its containers for marks the current server did not make.
 
 A session in a pod never inherits the server's environment. `docker exec` names only the
 instance's own variables, its config-dir variable and the role's context window; inherited
@@ -93,9 +99,10 @@ the project) or when another session in the pod is mid-turn, which the recreate 
 server exposes:
 
 - It binds the pod network's gateway address, only while a pod uses that network, and admits only
-  peers in the network's subnet. The port is fixed (47773) so one host firewall rule admits pods
-  across restarts; a default-deny INPUT policy drops them otherwise. While another program holds
-  it, the listener takes a free port and logs that the rule no longer covers it.
+  peers in the network's subnet. The port is fixed (17773, below the ephemeral range) so one host
+  firewall rule admits pods across restarts; a default-deny INPUT policy drops them otherwise.
+  While another program holds it, the listener takes a free port and logs that the rule no longer
+  covers it.
 - It admits exactly `/mcp` and the signed attachment upload URL, matched on the raw path, and hands
   them to the main server's own routes, so the same bearer check and upload signature apply.
   Pairing, the API, OAuth, webhooks, the preview stream, the relay and the WebSocket answer 404.

@@ -136,9 +136,10 @@ const listenerKey = (dockerHost: string, network: string) => `${dockerHost}\u000
 
 /**
  * The same port on every pod network, so one host firewall rule admits pods
- * across restarts; a default-deny INPUT policy drops them otherwise.
+ * across restarts; a default-deny INPUT policy drops them otherwise. Below
+ * Linux\'s ephemeral range, so no outbound socket takes it first.
  */
-export const DEFAULT_POD_MCP_PORT = 47773;
+export const DEFAULT_POD_MCP_PORT = 17773;
 
 const listenOn = (gateway: string, port: number, handler: NodeHttp.RequestListener) =>
   Effect.callback<Listener, NodeJS.ErrnoException>((resume) => {
@@ -197,7 +198,12 @@ const make = (port: number) =>
      * The network the pod's daemon joined when it was made, which is where its
      * host alias points. Pods made before the label existed follow settings.
      */
-    const networkOf = (podId: PodRuntimeId, dockerHost: string, projectId: ProjectId) =>
+    const networkOf = (
+      podId: PodRuntimeId,
+      dockerHost: string,
+      projectId: ProjectId,
+      remember: boolean,
+    ) =>
       Effect.gen(function* () {
         const known = createdOn.get(podId);
         if (known !== undefined) return known;
@@ -216,7 +222,7 @@ const make = (port: number) =>
             Effect.orElseSucceed(() => undefined),
           );
         if (labelled !== undefined) {
-          createdOn.set(podId, labelled);
+          if (remember) createdOn.set(podId, labelled);
           return labelled;
         }
         const settings = yield* serverSettings.getSettings;
@@ -230,7 +236,13 @@ const make = (port: number) =>
           createdOn.delete(podId);
           return undefined;
         }
-        const network = yield* networkOf(podId, record.dockerHost, record.snapshot.projectId);
+        // Only a running pod's daemon is the one its agents use.
+        const network = yield* networkOf(
+          podId,
+          record.dockerHost,
+          record.snapshot.projectId,
+          record.snapshot.state === "running",
+        );
         return {
           key: listenerKey(record.dockerHost, network),
           dockerHost: record.dockerHost,
@@ -308,7 +320,8 @@ const make = (port: number) =>
     );
 
     // A running pod's network exists, so its listener starts then rather than
-    // at its first session; the last removal stops it.
+    // at its first session; the last removal stops it. A recreated pod may
+    // run on another network, leaving its old one unused.
     const subscription = yield* store.subscribe;
     yield* Stream.fromSubscription(subscription).pipe(
       Stream.runForEach((record) =>
@@ -317,9 +330,10 @@ const make = (port: number) =>
               Effect.catch((error) =>
                 Effect.logWarning("pod MCP listener could not start", { detail: error.detail }),
               ),
-              Effect.asVoid,
+              Effect.andThen(stopUnused),
             )
-          : stopUnused
+          : // A recreate makes a new daemon, on the network settings name then.
+            Effect.sync(() => createdOn.delete(record.snapshot.id)).pipe(Effect.andThen(stopUnused))
         ).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("pod MCP listener reconcile failed", cause),

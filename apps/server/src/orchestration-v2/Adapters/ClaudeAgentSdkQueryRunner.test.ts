@@ -168,8 +168,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI in 
       );
       let launched: (spec: Omit<PodExecSpec, "user">) => void = () => {};
       const launch = new Promise<Omit<PodExecSpec, "user">>((resolve) => (launched = resolve));
-      let stopped: () => void = () => {};
-      const stop = new Promise<void>((resolve) => (stopped = resolve));
+      let stops = 0;
       const podProcess: typeof ProviderPodProcess.Service = {
         resolve: (cwd) =>
           Effect.succeed(
@@ -186,7 +185,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI in 
         command: (hostCommand) => Effect.succeed(`/opt/t3/provider-bin${hostCommand}`),
         launch: (_target, spec) => {
           launched(spec);
-          return { command: docker, args: [], env: {}, stop: Effect.sync(() => stopped()) };
+          return { command: docker, args: [], env: {}, stop: Effect.sync(() => stops++) };
         },
       };
       const session = yield* Effect.gen(function* () {
@@ -221,8 +220,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI in 
       );
       const spec = yield* Effect.promise(() => launch);
       yield* session.close;
-      // The CLI's exit stops what it left in the container.
-      yield* Effect.promise(() => stop);
+      // Closing waits for the stop of what the CLI left in the container, once.
+      expect(stops).toBe(1);
 
       expect(spec.command[0]).toBe("/opt/t3/provider-bin/home/dev/.local/bin/claude");
       expect(spec.cwd).toBe(worktree);

@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 
 import * as PodMcpListener from "../mcp/PodMcpListener.ts";
 import {
@@ -13,7 +14,9 @@ import {
   resolveInstancePodDirectories,
   resolvePodProviderMounts,
 } from "../pod/PodProviderMounts.ts";
+import type { PodRuntimeRecord } from "../pod/PodRuntimeLifecycle.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
+import * as PodRuntimeStore from "../pod/PodRuntimeStore.ts";
 import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
@@ -39,18 +42,80 @@ const resolvePodTarget = (
 export const POD_SESSION_ENV = "T3_POD_SESSION";
 
 /**
- * Signals the container's processes carrying the session's mark, TERM and
- * then KILL. The mark rather than a pid: a pid can be reused by the next
- * session, and a child that left the process group still carries the mark.
- * Exits 3 when nothing carried it, so a stop that found nothing shows.
+ * Runs a launch with its pid recorded, so its stop can find the processes it
+ * started that dropped the mark (a child given a cleaned environment, such
+ * as Codex's stdio MCP servers). `exec` keeps the pid.
  */
-const STOP_SESSION_SCRIPT = [
-  "mark=$1",
+const LAUNCH_SCRIPT = 'echo "$$" > "$1" && shift && exec "$@"';
+
+/** Inside the container, never the host's /tmp, which a pod does not mount. */
+const launchPidFile = (mark: string) => `/tmp/t3-pod-session-${mark}.pid`;
+
+/**
+ * Signals a launch's processes, TERM and then KILL. `session <mark> <pidfile>`
+ * takes those carrying the mark and the descendants of the launch's own
+ * process, while it still runs with the mark: a reused pid carries none.
+ * `others <prefix> -` takes those marked by an earlier server, whose stops
+ * never ran. Marks rather than pids where possible: a child that left the
+ * process group keeps its mark. The KILL pass signals a pid only while its
+ * start time is the one the TERM pass saw. Exits 3 when nothing matched, so a
+ * stop that found nothing shows. A fourth argument replaces /proc, so a test
+ * on a shared machine scans only its own processes.
+ */
+const STOP_SCRIPT = [
+  "mode=$1",
+  "value=$2",
+  "pidfile=$3",
+  "root=${4:-/proc}",
   "found=0",
+  "targets=",
+  'mark_of() { tr "\\0" "\\n" 2>/dev/null < "$root/$1/environ" | grep "^' +
+    POD_SESSION_ENV +
+    '=" | head -n 1; }',
+  "stat_field() {",
+  "  field=$2",
+  '  stat=$(cat "$root/$1/stat" 2>/dev/null) || return 1',
+  "  rest=${stat##*) }",
+  "  set -- $rest",
+  "  shift $((field - 3))",
+  '  echo "$1"',
+  "}",
+  "matches() {",
+  '  case "$1" in',
+  '    "") return 1 ;;',
+  '    "' + POD_SESSION_ENV + '=$value") [ "$mode" = session ] ;;',
+  '    "' + POD_SESSION_ENV + '=$value-"*) return 1 ;;',
+  '    *) [ "$mode" = others ] ;;',
+  "  esac",
+  "}",
+  'add() { start=$(stat_field "$1" 22) && targets="$targets $1:$start"; }',
+  'for proc in "$root"/[0-9]*; do',
+  "  pid=${proc##*/}",
+  '  [ "$pid" = "$$" ] && continue',
+  '  matches "$(mark_of "$pid")" && add "$pid"',
+  "done",
+  'if [ "$mode" = session ] && [ -r "$pidfile" ]; then',
+  '  top=$(cat "$pidfile")',
+  '  if [ "$(mark_of "$top")" = "' + POD_SESSION_ENV + '=$value" ]; then',
+  "    frontier=$top",
+  '    while [ -n "$frontier" ]; do',
+  "      next=",
+  '      for proc in "$root"/[0-9]*; do',
+  "        pid=${proc##*/}",
+  '        parent=$(stat_field "$pid" 4) || continue',
+  "        for candidate in $frontier; do",
+  '          [ "$parent" = "$candidate" ] && { next="$next $pid"; add "$pid"; break; }',
+  "        done",
+  "      done",
+  "      frontier=$next",
+  "    done",
+  "  fi",
+  'rm -f "$pidfile"',
+  "fi",
   "signal() {",
-  "  for proc in /proc/[0-9]*; do",
-  '    [ "${proc#/proc/}" = "$$" ] && continue',
-  `    tr '\\0' '\\n' 2>/dev/null < "$proc/environ" | grep -qx "${POD_SESSION_ENV}=$mark" && { kill "-$1" "\${proc#/proc/}" 2>/dev/null; found=$((found + 1)); }`,
+  "  for target in $targets; do",
+  "    pid=${target%%:*}",
+  '    [ "$(stat_field "$pid" 22)" = "${target#*:}" ] && kill "-$1" "$pid" 2>/dev/null && found=$((found + 1))',
   "  done",
   "}",
   "signal TERM",
@@ -67,12 +132,83 @@ export const layerProcess = Layer.effect(
   ProviderPodProcess,
   Effect.gen(function* () {
     const targets = yield* WorkspaceExecutionTarget.WorkspaceExecutionTarget;
+    const store = yield* PodRuntimeStore.PodRuntimeStore;
     const uid = yield* HostProcess.UserId;
     const gid = yield* HostProcess.GroupId;
     const user = uid === undefined || gid === undefined ? undefined : `${uid}:${gid}`;
     const services = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
     const markPrefix = yield* (yield* Crypto.Crypto).randomUUIDv4().pipe(Effect.orDie);
     let launches = 0;
+
+    // As root: a process of the session running as another user, such as a
+    // setuid helper, hides its environment from the host user. Only processes
+    // carrying a T3 mark, or started by a launch's own marked process, are
+    // ever signalled.
+    const stopMarked = (
+      target: WorkspaceExecutionTarget.PodExecutionTarget,
+      mode: "session" | "others",
+      value: string,
+      pidFile: string,
+    ) =>
+      targets
+        .exec(target, {
+          command: ["sh", "-c", STOP_SCRIPT, "t3-pod-stop", mode, value, pidFile],
+          user: "0",
+          timeoutMs: STOP_TIMEOUT_MS,
+        })
+        .pipe(
+          Effect.flatMap(({ exitCode }) =>
+            exitCode === 0
+              ? Effect.succeed("stopped" as const)
+              : exitCode === STOP_FOUND_NOTHING
+                ? Effect.succeed("none" as const)
+                : Effect.logWarning("stopping a pod's marked processes failed", {
+                    podId: target.podId,
+                    exitCode,
+                  }).pipe(Effect.as("failed" as const)),
+          ),
+          Effect.catch((error) =>
+            Effect.logWarning("could not stop a pod's marked processes", {
+              podId: target.podId,
+              detail: error.message,
+            }).pipe(Effect.as("failed" as const)),
+          ),
+        );
+
+    /**
+     * Sessions of a server that crashed or was killed never ran their stop, so
+     * their processes would outlive it in the container. Each running pod is
+     * swept once per start of its containers, for marks this server did not make.
+     */
+    const swept = new Set<string>();
+    const sweep = (record: PodRuntimeRecord) => {
+      const { snapshot } = record;
+      const key = `${snapshot.id}\u0000${snapshot.startedAt ?? ""}`;
+      if (snapshot.state !== "running" || swept.has(key)) return Effect.void;
+      swept.add(key);
+      const target: WorkspaceExecutionTarget.PodExecutionTarget = {
+        type: "pod",
+        podId: snapshot.id,
+        state: snapshot.state,
+        worktreePath: snapshot.worktreePath,
+        dockerHost: record.dockerHost,
+      };
+      return stopMarked(target, "others", markPrefix, "-").pipe(
+        Effect.flatMap((outcome) =>
+          outcome === "stopped"
+            ? Effect.logInfo("stopped an earlier server's sessions left in a pod", {
+                podId: snapshot.id,
+              })
+            : Effect.void,
+        ),
+      );
+    };
+    const subscription = yield* store.subscribe;
+    yield* Effect.forEach(yield* store.list, sweep, { discard: true }).pipe(
+      Effect.andThen(Stream.fromSubscription(subscription).pipe(Stream.runForEach(sweep))),
+      Effect.forkScoped,
+    );
+
     return {
       resolve: (cwd) => resolvePodTarget(targets, cwd),
       command: (hostCommand) => podProviderCommand(hostCommand).pipe(Effect.provide(services)),
@@ -82,39 +218,29 @@ export const layerProcess = Layer.effect(
         return {
           ...targets.launch(target, {
             ...spec,
+            command: [
+              "sh",
+              "-c",
+              LAUNCH_SCRIPT,
+              "t3-pod-launch",
+              launchPidFile(mark),
+              ...spec.command,
+            ],
             env: { ...spec.env, [POD_SESSION_ENV]: mark },
             ...asUser,
             tty: false,
           }),
-          // As root: a process of the session running as another user, such
-          // as a setuid helper, hides its environment from the host user. Only
-          // processes carrying this launch's random mark are signalled.
-          stop: targets
-            .exec(target, {
-              command: ["sh", "-c", STOP_SESSION_SCRIPT, "t3-pod-stop", mark],
-              user: "0",
-              timeoutMs: STOP_TIMEOUT_MS,
-            })
-            .pipe(
-              Effect.flatMap(({ exitCode }) =>
-                exitCode === 0
-                  ? Effect.logDebug("stopped a pod session's processes", { podId: target.podId })
-                  : exitCode === STOP_FOUND_NOTHING
-                    ? Effect.logInfo("a pod session had no processes left to stop", {
-                        podId: target.podId,
-                      })
-                    : Effect.logWarning("stopping a pod session's processes failed", {
-                        podId: target.podId,
-                        exitCode,
-                      }),
-              ),
-              Effect.catch((error) =>
-                Effect.logWarning("could not stop a pod session's processes", {
-                  podId: target.podId,
-                  detail: error.message,
-                }),
-              ),
+          stop: stopMarked(target, "session", mark, launchPidFile(mark)).pipe(
+            Effect.flatMap((outcome) =>
+              outcome === "stopped"
+                ? Effect.logDebug("stopped a pod session's processes", { podId: target.podId })
+                : outcome === "none"
+                  ? Effect.logInfo("a pod session had no processes left to stop", {
+                      podId: target.podId,
+                    })
+                  : Effect.void,
             ),
+          ),
         };
       },
     };

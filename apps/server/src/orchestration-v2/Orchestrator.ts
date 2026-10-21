@@ -31,7 +31,6 @@ import {
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
   type OrchestrationV2AppThread,
-  type ProviderDriverKind,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
   type OrchestrationV2ContextTransfer,
@@ -146,8 +145,6 @@ import {
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
-import { PodProviderPlacement } from "../provider/PodProviderSessions.ts";
-import { threadRolePresetRunsIn } from "../agentRoles/AgentRolePresetService.ts";
 
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
@@ -839,7 +836,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const eventSink = yield* EventSinkV2;
   const commandReceipts = yield* CommandReceiptStoreV2;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
-  const podPlacement = yield* PodProviderPlacement;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectionStore = yield* ProjectionStoreV2;
   const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
@@ -896,46 +892,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
     );
 
-  /**
-   * A shared process runs where its first thread placed it, so a pod's
-   * threads share one of their own. A thread its pod refuses gets the host's;
-   * opening the session then says why it cannot run.
-   */
-  const sharedSessionPod = (
-    driver: ProviderDriverKind,
-    thread: Pick<OrchestrationV2AppThread, "projectId" | "worktreePath" | "rolePreset">,
-  ) => {
-    const cwd = thread.worktreePath;
-    return cwd === null
-      ? Effect.succeed(undefined)
-      : serverSettings.getSettings.pipe(
-          Effect.flatMap((settings) =>
-            podPlacement.podFor({
-              cwd,
-              driver,
-              runsIn: threadRolePresetRunsIn(settings, thread),
-            }),
-          ),
-          Effect.orElseSucceed(() => undefined),
-        );
-  };
-
   const providerSessionIdFor = (input: {
     readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
     readonly providerInstanceId: ProviderInstanceId;
     readonly threadId: ThreadId;
-    readonly thread: Pick<OrchestrationV2AppThread, "projectId" | "worktreePath" | "rolePreset">;
   }) =>
     input.adapter.getCapabilities().pipe(
       Effect.flatMap((capabilities) =>
         capabilities.sessions.supportsMultipleProviderThreadsPerSession
-          ? sharedSessionPod(input.adapter.driver, input.thread).pipe(
-              Effect.map((podId) =>
-                idAllocator.derive.providerSession({
-                  providerInstanceId: input.providerInstanceId,
-                  ...(podId === undefined ? {} : { scope: podId }),
-                }),
-              ),
+          ? Effect.succeed(
+              idAllocator.derive.providerSession({
+                providerInstanceId: input.providerInstanceId,
+              }),
             )
           : idAllocator.allocate.providerSession({
               providerInstanceId: input.providerInstanceId,
@@ -1688,7 +1656,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter,
               providerInstanceId: queuedRun.providerInstanceId,
               threadId,
-              thread: projection.thread,
             }),
           ),
           Effect.mapError(
@@ -4375,7 +4342,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter: targetAdapter,
               providerInstanceId: input.modelSelection.instanceId,
               threadId: input.command.threadId,
-              thread: input.projection.thread,
             }),
           ));
         const targetProviderThreadBase: OrchestrationV2ProviderThread =
@@ -5521,7 +5487,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter,
               providerInstanceId: modelSelection.instanceId,
               threadId: command.threadId,
-              thread: projection.thread,
             }),
           ));
         const providerThreadId =
@@ -5910,7 +5875,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             adapter,
             providerInstanceId: modelSelection.instanceId,
             threadId: command.threadId,
-            thread: projection.thread,
           }),
         ));
       const existingProviderSession = projection.providerSessions.find(

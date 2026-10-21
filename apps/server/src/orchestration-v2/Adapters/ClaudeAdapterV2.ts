@@ -317,7 +317,7 @@ const spawnClaudeInPod =
       readonly env: Readonly<Record<string, string>>;
     }) => PodProviderLaunch;
     readonly cliEnvironment: NodeJS.ProcessEnv;
-    readonly runStop: (stop: PodProviderLaunch["stop"]) => void;
+    readonly onExit: () => void;
   }) =>
   (options: ClaudeSpawnOptions): ClaudeSpawnedProcess => {
     const command = [options.command, ...options.args].map((arg) =>
@@ -338,7 +338,7 @@ const spawnClaudeInPod =
     });
     // Like the host's process group kill: whatever the CLI left running in
     // the container goes with it.
-    child.once("exit", () => input.runStop(launch.stop));
+    child.once("exit", input.onExit);
     return child;
   };
 
@@ -837,7 +837,7 @@ export const layerQueryRunner: Layer.Layer<
         // The SDK spawns a native binary as `path ...executableArgs ...sdkArgs`,
         // which lets the agent scope wrapper go in front of the CLI. The SDK
         // runs a script entry through node instead, so those launch unwrapped.
-        // A pod's container is its scope.
+        // A pod session is stopped in its container instead.
         const binaryPath = queryOptions.pathToClaudeCodeExecutable;
         const launch =
           podTarget !== undefined ||
@@ -852,6 +852,12 @@ export const layerQueryRunner: Layer.Layer<
                 env: queryOptions.env,
               });
         const hostExecutable = binaryPath ?? "claude";
+        // One stop per launch, shared by the CLI's exit and the session's
+        // close, which waits for it so server shutdown leaves nothing behind.
+        let podLaunch: PodProviderLaunch | undefined;
+        let podStop: Fiber.Fiber<void> | undefined;
+        const stopInPod = () =>
+          podLaunch === undefined ? undefined : (podStop ??= runFork(podLaunch.stop));
         const options =
           podTarget !== undefined
             ? {
@@ -863,9 +869,9 @@ export const layerQueryRunner: Layer.Layer<
                 spawnClaudeCodeProcess: spawnClaudeInPod({
                   hostExecutable,
                   podExecutable: yield* podProcess.command(hostExecutable),
-                  launch: (spec) => podProcess.launch(podTarget, spec),
+                  launch: (spec) => (podLaunch = podProcess.launch(podTarget, spec)),
                   cliEnvironment: hostEnvironment,
-                  runStop: (stop) => void runFork(stop),
+                  onExit: () => void stopInPod(),
                 }),
               }
             : launch === undefined || launch.args.length === 0
@@ -1066,6 +1072,12 @@ export const layerQueryRunner: Layer.Layer<
           ),
           close: Queue.shutdown(promptQueue).pipe(
             Effect.andThen(closeClaudeQuery(queryRuntime)),
+            Effect.ensuring(
+              Effect.suspend(() => {
+                const stopping = stopInPod();
+                return stopping === undefined ? Effect.void : Fiber.join(stopping);
+              }),
+            ),
             Effect.tap(() =>
               logProtocolEvent({
                 direction: "outgoing",

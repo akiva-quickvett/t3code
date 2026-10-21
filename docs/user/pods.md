@@ -44,21 +44,21 @@ binaries, which T3 Code mounts when the provider's binary path is absolute.
 
 ### Host firewall
 
-Agents in a pod reach T3 Code on port 47773 of the pod network's gateway. A firewall that drops
+Agents in a pod reach T3 Code on port 17773 of the pod network's gateway. A firewall that drops
 incoming traffic by default (ufw, firewalld) drops this too, and the agents then run without the
-T3 Code tools. Allow it from the pod network's subnet, which
-`docker network inspect t3-pods --format '{{(index .IPAM.Config 0).Subnet}}'` prints (`t3-pods` is the
-default of `podRuntime.network` in the server settings):
+T3 Code tools. Allow it from the pod network's subnet to its gateway, which
+`docker network inspect t3-pods --format '{{(index .IPAM.Config 0).Subnet}} {{(index .IPAM.Config 0).Gateway}}'`
+prints (`t3-pods` is the default of `podRuntime.network` in the server settings):
 
 ```sh
 # ufw
-sudo ufw allow from 172.18.0.0/16 to any port 47773 proto tcp
+sudo ufw allow from 172.18.0.0/16 to 172.18.0.1 port 17773 proto tcp
 # firewalld
-sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="172.18.0.0/16" port port="47773" protocol="tcp" accept'
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="172.18.0.0/16" destination address="172.18.0.1" port port="17773" protocol="tcp" accept'
 sudo firewall-cmd --reload
 ```
 
-Replace `172.18.0.0/16` with your subnet.
+Replace `172.18.0.0/16` and `172.18.0.1` with your subnet and gateway.
 
 ## Start a thread in a pod
 

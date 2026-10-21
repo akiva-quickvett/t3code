@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - the stop script runs against real local processes.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
@@ -17,7 +19,9 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
 import * as PodMcpListener from "../mcp/PodMcpListener.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
+import * as PodRuntimeStore from "../pod/PodRuntimeStore.ts";
 import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { PodProviderPlacement, ProviderPodProcess } from "./PodProviderSessions.ts";
@@ -282,40 +286,98 @@ const markedProcesses = (mark: string) =>
     }
   });
 
+/**
+ * The process layer over this machine: stop commands run here, as the
+ * container would run them, but over `procRoot`, which holds only the test's
+ * own processes. Each stop's mode, user and exit code are recorded.
+ */
+const localProcessLayer = (procRoot: string) => {
+  const launched: Array<Readonly<Record<string, string>>> = [];
+  const commands: Array<ReadonlyArray<string>> = [];
+  const stops: Array<{
+    readonly mode: string | undefined;
+    readonly user: string | undefined;
+    readonly exitCode: number | null;
+  }> = [];
+  let stopped: () => void = () => {};
+  const nextStop = () => new Promise<void>((resolve) => (stopped = resolve));
+  const targets = WorkspaceExecutionTarget.WorkspaceExecutionTarget.of({
+    resolve: () => Effect.succeed({ type: "host" }),
+    launch: (_target, spec) => {
+      launched.push(spec.env ?? {});
+      commands.push(spec.command);
+      return { command: "docker", args: [], env: {} };
+    },
+    exec: (_target, spec) =>
+      Effect.callback((resume) => {
+        // The launch's pid file lives in the container; here it lives beside the fake /proc.
+        const args = spec.command
+          .slice(1)
+          .map((arg, index) =>
+            index === 5 && arg !== "-" ? NodePath.join(procRoot, "launch.pid") : arg,
+          );
+        const child = NodeChildProcess.spawn(spec.command[0]!, [...args, procRoot], {
+          stdio: "ignore",
+        });
+        child.once("exit", (code) => {
+          stops.push({ mode: spec.command[4], user: spec.user, exitCode: code });
+          stopped();
+          resume(Effect.succeed({ exitCode: code, timedOut: false }));
+        });
+      }),
+  });
+  const layer = layerProcess.pipe(
+    Layer.provideMerge(PodRuntimeStore.layer),
+    Layer.provide(Layer.succeed(WorkspaceExecutionTarget.WorkspaceExecutionTarget, targets)),
+    Layer.provide(SqlitePersistence.layerMemory),
+    Layer.provide(NodeServices.layer),
+  );
+  return { layer, launched, commands, stops, nextStop };
+};
+
+const spawnMarked = (mark: string, script: string) =>
+  NodeChildProcess.spawn("sh", ["-c", script], {
+    env: { ...process.env, [POD_SESSION_ENV]: mark },
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+
+/** A /proc of only these processes: each pid's real environment, copied. */
+const fakeProc = (root: string, children: ReadonlyArray<NodeChildProcess.ChildProcess>) => {
+  for (const child of children) {
+    const pids = [String(child.pid), ...descendants(child.pid!)];
+    for (const pid of pids) {
+      NodeFS.mkdirSync(`${root}/${pid}`, { recursive: true });
+      // /proc reports a size of 0, so a file copy would copy nothing.
+      for (const file of ["environ", "stat"])
+        NodeFS.writeFileSync(`${root}/${pid}/${file}`, NodeFS.readFileSync(`/proc/${pid}/${file}`));
+    }
+  }
+};
+const descendants = (pid: number): Array<string> =>
+  NodeFS.readFileSync(`/proc/${pid}/task/${pid}/children`, "utf8")
+    .trim()
+    .split(/\s+/)
+    .filter((child) => child.length > 0)
+    .flatMap((child) => [child, ...descendants(Number(child))]);
+const ready = (child: NodeChildProcess.ChildProcess) =>
+  Effect.promise(() => new Promise((resolve) => child.stdout!.once("data", resolve)));
+/** Listens now, so an exit before the effect runs is not missed. */
+const exited = (child: NodeChildProcess.ChildProcess) => {
+  const signal = new Promise<NodeJS.Signals | null>((resolve) =>
+    child.once("exit", (_code, exitSignal) => resolve(exitSignal)),
+  );
+  return Effect.promise(() => signal);
+};
+
 describe.skipIf(process.platform !== "linux")("pod provider process", () => {
-  it.effect("marks each launch and stops every process carrying its mark", () =>
-    Effect.gen(function* () {
-      const launched: Array<Readonly<Record<string, string>>> = [];
-      const stops: Array<{ readonly user: string | undefined; readonly exitCode: number | null }> =
-        [];
-      // Runs the stop command here, against this machine's /proc, as the container would.
-      const targets = WorkspaceExecutionTarget.WorkspaceExecutionTarget.of({
-        resolve: () => Effect.succeed({ type: "host" }),
-        launch: (_target, spec) => {
-          launched.push(spec.env ?? {});
-          return { command: "docker", args: [], env: {} };
-        },
-        exec: (_target, spec) =>
-          Effect.callback((resume) => {
-            const child = NodeChildProcess.spawn(spec.command[0]!, spec.command.slice(1), {
-              stdio: "ignore",
-            });
-            child.once("exit", (code) => {
-              stops.push({ user: spec.user, exitCode: code });
-              resume(Effect.succeed({ exitCode: code, timedOut: false }));
-            });
-          }),
-      });
-      const process_ = yield* ProviderPodProcess.pipe(
-        Effect.provide(
-          layerProcess.pipe(
-            Layer.provide(
-              Layer.succeed(WorkspaceExecutionTarget.WorkspaceExecutionTarget, targets),
-            ),
-            Layer.provide(NodeServices.layer),
-          ),
-        ),
+  it.effect("marks each launch and stops every process carrying its mark", () => {
+    const procRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fake-proc-"));
+    const { layer, launched, commands, stops } = localProcessLayer(procRoot);
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(procRoot, { recursive: true, force: true })),
       );
+      const process_ = yield* ProviderPodProcess;
       const target = {
         type: "pod",
         podId,
@@ -327,16 +389,18 @@ describe.skipIf(process.platform !== "linux")("pod provider process", () => {
       process_.launch(target, { command: ["codex"] });
       const [firstEnv, secondEnv] = launched;
       expect(firstEnv).toMatchObject({ KEEP: "1" });
+      // Wrapped so the launch's own pid is recorded in the container.
+      expect(commands[0]).toEqual([
+        "sh",
+        "-c",
+        expect.any(String),
+        "t3-pod-launch",
+        `/tmp/t3-pod-session-${firstEnv?.[POD_SESSION_ENV]}.pid`,
+        "claude",
+      ]);
       expect(firstEnv?.[POD_SESSION_ENV]).toBeDefined();
       expect(firstEnv?.[POD_SESSION_ENV]).not.toBe(secondEnv?.[POD_SESSION_ENV]);
 
-      const spawnMarked = (mark: string, script: string) =>
-        NodeChildProcess.spawn("sh", ["-c", script], {
-          env: { ...process.env, [POD_SESSION_ENV]: mark },
-          stdio: ["ignore", "pipe", "ignore"],
-        });
-      const ready = (child: NodeChildProcess.ChildProcess) =>
-        Effect.promise(() => new Promise((resolve) => child.stdout!.once("data", resolve)));
       // The session's process ignores TERM, so only the KILL pass ends it; its
       // child left the process group and still carries the mark.
       const mark = firstEnv![POD_SESSION_ENV]!;
@@ -351,23 +415,125 @@ describe.skipIf(process.platform !== "linux")("pod provider process", () => {
           other.kill("SIGKILL");
         }),
       );
-      const sessionExited = new Promise<NodeJS.Signals | null>((resolve) =>
-        session.once("exit", (_code, signal) => resolve(signal)),
-      );
+      const sessionExited = exited(session);
 
       yield* ready(session);
       yield* ready(other);
+      fakeProc(procRoot, [session, other]);
       yield* first.stop;
-      expect(yield* Effect.promise(() => sessionExited)).toBe("SIGKILL");
+      expect(yield* sessionExited).toBe("SIGKILL");
       expect(markedProcesses(mark)).toEqual([]);
       expect(other.exitCode).toBeNull();
       expect(other.signalCode).toBeNull();
       // Nothing carries the mark any more: the second stop says so.
       yield* first.stop;
       expect(stops).toEqual([
-        { user: "0", exitCode: 0 },
-        { user: "0", exitCode: 3 },
+        { mode: "session", user: "0", exitCode: 0 },
+        { mode: "session", user: "0", exitCode: 3 },
       ]);
-    }).pipe(Effect.scoped),
-  );
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  });
+
+  it.effect("stops what an earlier server's sessions left in a pod once it runs", () => {
+    const procRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fake-proc-"));
+    const { layer, launched, stops, nextStop } = localProcessLayer(procRoot);
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(procRoot, { recursive: true, force: true })),
+      );
+      const process_ = yield* ProviderPodProcess;
+      const store = yield* PodRuntimeStore.PodRuntimeStore;
+      process_.launch(
+        { type: "pod", podId, state: "running", worktreePath: POD_WORKTREE, dockerHost: "" },
+        { command: ["claude"] },
+      );
+      const own = launched[0]![POD_SESSION_ENV]!;
+      const earlier = spawnMarked("an-earlier-server-1", "echo ready; exec sleep 60 >/dev/null");
+      const current = spawnMarked(own, "echo ready; exec sleep 60 >/dev/null");
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          earlier.kill("SIGKILL");
+          current.kill("SIGKILL");
+        }),
+      );
+      yield* ready(earlier);
+      yield* ready(current);
+      fakeProc(procRoot, [earlier, current]);
+      const earlierExited = exited(earlier);
+      const swept = Effect.promise(nextStop);
+
+      yield* store.commit(podId, [
+        {
+          type: "pod.created",
+          podId,
+          occurredAt: "2026-10-21T00:00:00.000Z",
+          projectId: ProjectId.make("project-1"),
+          worktreePath: POD_WORKTREE,
+          image: "image",
+          dockerHost: "",
+          services: [],
+        },
+        {
+          type: "pod.observed",
+          podId,
+          occurredAt: "2026-10-21T00:00:01.000Z",
+          state: "running",
+          failedOperation: null,
+          message: null,
+          containerIds: [],
+          volumeIds: [],
+        },
+      ]);
+      yield* swept;
+      expect(yield* earlierExited).toBe("SIGTERM");
+      expect(current.exitCode).toBeNull();
+      expect(current.signalCode).toBeNull();
+      expect(stops).toEqual([{ mode: "others", user: "0", exitCode: 0 }]);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  });
+
+  it.effect("stops the children a launch started without its mark", () => {
+    const procRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fake-proc-"));
+    const { layer, launched, stops } = localProcessLayer(procRoot);
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(procRoot, { recursive: true, force: true })),
+      );
+      const process_ = yield* ProviderPodProcess;
+      const launch = process_.launch(
+        { type: "pod", podId, state: "running", worktreePath: POD_WORKTREE, dockerHost: "" },
+        { command: ["codex"] },
+      );
+      const mark = launched[0]![POD_SESSION_ENV]!;
+      // Codex starts its stdio MCP servers with a cleaned environment.
+      const session = spawnMarked(mark, `env -u ${POD_SESSION_ENV} sleep 60 & echo ready; wait`);
+      const unrelated = spawnMarked("", "echo ready; exec sleep 60 >/dev/null");
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          session.kill("SIGKILL");
+          unrelated.kill("SIGKILL");
+        }),
+      );
+      yield* ready(session);
+      yield* ready(unrelated);
+      const child = descendants(session.pid!);
+      expect(child).toHaveLength(1);
+      fakeProc(procRoot, [session, unrelated]);
+      NodeFS.writeFileSync(NodePath.join(procRoot, "launch.pid"), `${session.pid}\n`);
+      const sessionExited = exited(session);
+
+      yield* launch.stop;
+      expect(yield* sessionExited).toBe("SIGTERM");
+      expect(NodeFS.existsSync(`/proc/${child[0]}/stat`) ? stateOf(child[0]!) : "gone").toMatch(
+        /gone|Z/,
+      );
+      expect(unrelated.exitCode).toBeNull();
+      expect(unrelated.signalCode).toBeNull();
+      expect(stops).toEqual([{ mode: "session", user: "0", exitCode: 0 }]);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  });
 });
+
+/** A process's state letter; Z once it is dead and awaits its parent. */
+const stateOf = (pid: string) =>
+  NodeFS.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.charAt(0) ?? "gone";
