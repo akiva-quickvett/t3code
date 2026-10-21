@@ -14,6 +14,8 @@ import {
   ProjectUpdatePayload,
   ProjectId,
   OrchestratorMcpFailure,
+  OrchestratorMcpClientRequestId,
+  NodeId,
   OrchestratorMcpRolePreset,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
@@ -106,7 +108,7 @@ const ProjectCloneTool = Tool.make("t3_project_clone", {
 const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   ...shared,
   description:
-    'Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts. Use this when the user requests independent work, a new thread, or a PR stack in its own worktree; use delegate_task for child subagents. Set workspaceStrategy to {type:"worktree",baseRef:"parent-branch",branch:"new-branch",startFromOrigin:false} for a new worktree based on local commits, or {type:"existing_worktree",worktreePath:"/absolute/path",branch:"existing-branch"} to use an existing checkout. For upstream commits, set startFromOrigin:true. Omitted workspaceStrategy means the project root, NOT the caller\'s worktree. Omit projectId/modelSelection/modes to inherit those settings from the calling thread; a caller outside a T3 thread must pass projectId and gets the project\'s default model. Set scratch:true instead of projectId for a thread without a project: it runs in a fresh folder of its own, outside any repository. Put the task in message. Do not ask the agent to create its own worktree via shell: that does not update the thread binding. Each call creates a new launch with no retry key; retain threadId and use t3_thread_read/t3_thread_wait to follow preparation. To link a thread for the user, write `[title](t3-thread://v1/<threadId>)` with the threadId exactly as returned, not URL-encoded; T3 Code shows the thread\'s current title. After errors or lost responses, inspect t3_thread_list before retrying. Attachments must be pending uploads. The new thread may not run with broader runtime or interaction modes than the caller: the calling T3 thread\'s own modes, or the permission mode an outside agent was approved with.',
+    'Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts. Use this when the user requests independent work, a new thread, or a PR stack in its own worktree; use delegate_task for child subagents. Set workspaceStrategy to {type:"worktree",baseRef:"parent-branch",branch:"new-branch",startFromOrigin:false} for a new worktree based on local commits, or {type:"existing_worktree",worktreePath:"/absolute/path",branch:"existing-branch"} to use an existing checkout. For upstream commits, set startFromOrigin:true. Omitted workspaceStrategy means the project root, NOT the caller\'s worktree. Omit projectId/modelSelection/modes to inherit those settings from the calling thread; a caller outside a T3 thread must pass projectId and gets the project\'s default model. Set scratch:true instead of projectId for a thread without a project: it runs in a fresh folder of its own, outside any repository. Put the task in message. Do not ask the agent to create its own worktree via shell: that does not update the thread binding. Retain threadId and use t3_thread_read/t3_thread_wait to follow preparation. Pass clientRequestId, stable across retries of this launch, so a retry returns the same thread (it is checked again first and fails if its preset, base ref, or provider is gone; then find the thread with t3_thread_list); without it each call creates a new launch. Set supervise:true to be woken when the new thread\'s first run ends, and again whenever a follow-up you send it with t3_thread_send ends; it stays an ordinary top-level thread the user sees in the sidebar, not a subagent, and stopping this thread does not stop it; a Stop holds its wakes until the user next messages this thread. The wake arrives as a delegated task notification: read it with task_status and the taskId it names (the launch returns the first one). A follow-up you do not care about still wakes you once; end that turn without replying. orchestrator_capabilities features.supervisedWakes says whether this server allows supervise. To link a thread for the user, write `[title](t3-thread://v1/<threadId>)` with the threadId exactly as returned, not URL-encoded; T3 Code shows the thread\'s current title. After errors or lost responses without a clientRequestId, inspect t3_thread_list before retrying. Attachments must be pending uploads. The new thread may not run with broader runtime or interaction modes than the caller: the calling T3 thread\'s own modes, or the permission mode an outside agent was approved with.',
   parameters: Schema.Struct({
     projectId: Schema.optional(ProjectId),
     scratch: Schema.optional(
@@ -133,6 +135,13 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
       }),
     ),
     attachments: Schema.optional(Schema.Array(McpAttachmentInput).check(Schema.isMaxLength(8))),
+    supervise: Schema.optional(
+      Schema.Boolean.annotate({
+        description:
+          "Wake the calling thread when the new thread's first run ends, and after each follow-up it sends there. Needs message and a calling T3 thread.",
+      }),
+    ),
+    clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
   }),
   success: Schema.Struct({
     threadId: ThreadId,
@@ -140,6 +149,9 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     modelSelection: ModelSelection,
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
+    taskId: Schema.optional(
+      NodeId.annotate({ description: "Supervised launches only: pass it to task_status." }),
+    ),
   }),
   dependencies: [
     ...shared.dependencies,

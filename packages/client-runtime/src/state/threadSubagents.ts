@@ -40,7 +40,8 @@ export function deriveThreadTurnSubagents(
     projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
   );
   const eligible = projection.subagents.filter(
-    (subagent) => subagent.runId === null || !rolledBackRunIds.has(subagent.runId),
+    (subagent) =>
+      !subagent.supervised && (subagent.runId === null || !rolledBackRunIds.has(subagent.runId)),
   );
   const [first] = eligible;
   if (first === undefined) return null;

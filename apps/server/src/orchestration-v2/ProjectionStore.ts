@@ -571,11 +571,14 @@ function needsRecovery(
     case "delegated-completions":
       return projection.runs.some((run) => run.delegatedCompletion?.delivery != null);
     case "subagent-results": {
-      const parentThreadId = projection.thread.lineage.parentThreadId;
+      const { relationshipToParent, supervisorThreadId } = projection.thread.lineage;
+      const parentThreadId = supervisorThreadId ?? projection.thread.lineage.parentThreadId;
+      // A supervised thread has no original task; only its supervisor-sent runs carry tasks.
+      const delegated =
+        relationshipToParent === "subagent" && projection.thread.forkedFrom?.type === "node";
       return (
-        projection.thread.lineage.relationshipToParent === "subagent" &&
+        (delegated || supervisorThreadId !== undefined) &&
         parentThreadId !== null &&
-        projection.thread.forkedFrom?.type === "node" &&
         ((parent?.subagents ?? []).some(
           (task) =>
             task.origin === "app_owned" &&
@@ -589,9 +592,10 @@ function needsRecovery(
                 ),
             ),
         ) ||
-          (["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
-            latestUnheldRun(projection.runs)?.status ?? "idle",
-          ) &&
+          (delegated &&
+            ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
+              latestUnheldRun(projection.runs)?.status ?? "idle",
+            ) &&
             ![...projection.contextTransfers, ...(parent?.contextTransfers ?? [])].some(
               (transfer) =>
                 transfer.type === "subagent_result" &&
@@ -3688,9 +3692,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               return sql`
                 SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
                 WHERE CASE WHEN json_valid(child.payload_json) THEN
-                  json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
-                  AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NOT NULL
-                  AND json_extract(child.payload_json, '$.forkedFrom.type') = 'node'
+                  (json_extract(child.payload_json, '$.lineage.supervisorThreadId') IS NOT NULL
+                    OR (json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                      AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NOT NULL
+                      AND json_extract(child.payload_json, '$.forkedFrom.type') = 'node'))
                   AND (EXISTS (
                     SELECT 1 FROM orchestration_v2_projection_runs AS requested
                     JOIN orchestration_v2_projection_subagents AS task
@@ -3702,7 +3707,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       AND json_extract(task.payload_json, '$.result') IS NULL
                   ) OR (
                     -- The original task still waits for the latest unheld work.
-                    (SELECT status FROM orchestration_v2_projection_runs
+                    json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                    AND (SELECT status FROM orchestration_v2_projection_runs
                      WHERE thread_id = child.thread_id
                        AND NOT (status = 'queued' AND json_extract(payload_json, '$.queueHeld') IS 1)
                      ORDER BY ordinal DESC LIMIT 1
@@ -6327,15 +6333,16 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         Effect.gen(function* () {
           const projections = (yield* Ref.get(replayState)).projections;
           return [...projections.values()]
-            .filter((projection) =>
-              needsRecovery(
+            .filter((projection) => {
+              const parentThreadId =
+                projection.thread.lineage.supervisorThreadId ??
+                projection.thread.lineage.parentThreadId;
+              return needsRecovery(
                 projection,
                 kind,
-                projection.thread.lineage.parentThreadId === null
-                  ? undefined
-                  : projections.get(projection.thread.lineage.parentThreadId),
-              ),
-            )
+                parentThreadId === null ? undefined : projections.get(parentThreadId),
+              );
+            })
             .toSorted(
               (left, right) =>
                 DateTime.toEpochMillis(left.thread.updatedAt) -

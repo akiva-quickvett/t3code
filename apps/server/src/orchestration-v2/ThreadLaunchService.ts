@@ -89,6 +89,8 @@ export interface ThreadLaunchInput {
   readonly workspaceStrategy: ThreadLaunchWorkspaceStrategy;
   readonly rolePreset?: ThreadRolePreset;
   readonly initialMessage?: ThreadLaunchInitialMessage;
+  /** Supervises the new thread; an initial message it sent wakes it when that run ends. */
+  readonly supervisorThreadId?: ThreadId;
   readonly importedNativeThread?: {
     readonly ref: {
       readonly driver: ProviderDriverKind;
@@ -934,6 +936,9 @@ const make = Effect.gen(function* () {
                 interactionMode: input.interactionMode,
                 branch: initialBranch,
                 worktreePath: initialWorktreePath,
+                ...(input.supervisorThreadId === undefined
+                  ? {}
+                  : { supervisorThreadId: input.supervisorThreadId }),
                 ...(input.rolePreset === undefined ? {} : { rolePreset: input.rolePreset }),
                 ...(input.importedNativeThread === undefined
                   ? {}

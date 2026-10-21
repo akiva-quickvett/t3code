@@ -429,9 +429,10 @@ function directAppOwnedChildTasks(
   target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
   returnedRunIds: ReadonlySet<RunId | null>,
 ): ReadonlyArray<OrchestrationV2Subagent> {
+  const { lineage } = target.thread;
   if (
-    target.thread.lineage.parentThreadId !== parent.thread.id ||
-    target.thread.lineage.relationshipToParent !== "subagent"
+    lineage.supervisorThreadId !== parent.thread.id &&
+    (lineage.parentThreadId !== parent.thread.id || lineage.relationshipToParent !== "subagent")
   ) {
     return [];
   }
@@ -697,7 +698,7 @@ function stablePart(value: string): string {
   return encodeURIComponent(value);
 }
 
-function stableCommandId(input: {
+export function stableCommandId(input: {
   readonly scope: McpInvocationScope;
   readonly requestKey: string;
   readonly operation: string;
@@ -837,6 +838,9 @@ function listItemFromShell(
     ...threadSnooze(shell, nowMs),
     parentThreadId: shell.lineage.parentThreadId,
     relationshipToParent: shell.lineage.relationshipToParent,
+    ...(shell.lineage.supervisorThreadId === undefined
+      ? {}
+      : { supervisorThreadId: shell.lineage.supervisorThreadId }),
     ...(shell.rolePreset == null ? {} : { rolePreset: shell.rolePreset }),
     itemCount: shell.visibleItemCount,
     createdAt: DateTime.formatIso(shell.createdAt),
@@ -879,6 +883,9 @@ function threadDetail(
     worktreePath: projection.thread.worktreePath,
     parentThreadId: projection.thread.lineage.parentThreadId,
     relationshipToParent: projection.thread.lineage.relationshipToParent,
+    ...(projection.thread.lineage.supervisorThreadId === undefined
+      ? {}
+      : { supervisorThreadId: projection.thread.lineage.supervisorThreadId }),
     ...(projection.thread.rolePreset == null ? {} : { rolePreset: projection.thread.rolePreset }),
     runCount: projection.runs.length,
     itemCount,
@@ -2306,6 +2313,7 @@ const make = Effect.gen(function* () {
             threadManagement: true,
             incrementalThreadRead: true,
             scheduledTasks: true,
+            supervisedWakes: settings.supervisedWakes,
             maxBatchThreads: 20,
             usageLimits: true,
           },
@@ -2498,6 +2506,13 @@ const make = Effect.gen(function* () {
         const current = yield* readTask(scope, input.taskId);
         const key = yield* requestKey(input.clientRequestId);
         const parentProjection = yield* loadProjection(scope.thread.threadId);
+        const parentTask = parentProjection.subagents.find(
+          (task) => task.id === input.taskId && task.origin === "app_owned",
+        );
+        // A supervised thread outlives the task and owns its turns: cancelling unqueues the
+        // run it tracks and drops the wake, and a running turn finishes on its own, so the
+        // work it delegated still reports back to it.
+        const supervised = parentTask?.supervised === true;
         // Cancelling stops the child and every task under it, each a write to a
         // thread its user may have raised above the parent's modes since it was
         // delegated. All of them are checked before anything is stopped.
@@ -2513,6 +2528,7 @@ const make = Effect.gen(function* () {
                 shell.interactionMode,
               );
             }
+            if (supervised) return;
             const { subagents } = yield* threadManagement
               .getThreadRecords(threadId, ["subagents"])
               .pipe(Effect.mapError(threadManagementFailure));
@@ -2523,9 +2539,6 @@ const make = Effect.gen(function* () {
             }
           });
         yield* assertStoppable(current.childThreadId);
-        const parentTask = parentProjection.subagents.find(
-          (task) => task.id === input.taskId && task.origin === "app_owned",
-        );
         const disposeCompletionDelivery =
           parentTask?.completionDelivery?.state === "disposed"
             ? Effect.void
@@ -2549,6 +2562,26 @@ const make = Effect.gen(function* () {
                     ),
                   ),
                 );
+        const cancelTrackedRuns = Effect.gen(function* () {
+          const { runs } = yield* threadManagement
+            .getThreadRecords(current.childThreadId, ["runs"])
+            .pipe(Effect.mapError(threadManagementFailure));
+          for (const run of runs) {
+            if (run.delegatedTaskId !== input.taskId || run.status !== "queued") continue;
+            yield* threadManagement
+              .dispatch({
+                type: "queued-run.cancel",
+                commandId: stableCommandId({
+                  scope,
+                  requestKey: key,
+                  operation: `cancel-task-queued-run:${run.id}`,
+                }),
+                threadId: current.childThreadId,
+                runId: run.id,
+              })
+              .pipe(Effect.mapError(threadManagementFailure));
+          }
+        });
         const stopChild = Effect.gen(function* () {
           const commandId = stableCommandId({ scope, requestKey: key, operation: "cancel-task" });
           const reason = input.reason;
@@ -2605,7 +2638,7 @@ const make = Effect.gen(function* () {
         // Checked above; a user raising one of these threads meanwhile is
         // caught again under that thread's lock, which leaves it running.
         const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
-        const stopWithinLimit = stopChild.pipe(
+        const stopWithinLimit = (supervised ? cancelTrackedRuns : stopChild).pipe(
           Effect.provideService(DispatchModeLimit, {
             runtimeMode: parentProjection.thread.runtimeMode,
             interactionMode: parentProjection.thread.interactionMode,
@@ -2636,6 +2669,7 @@ const make = Effect.gen(function* () {
         }
         const child = yield* loadProjection(current.childThreadId);
         if (
+          !supervised &&
           current.workState !== "waiting_for_children" &&
           ThreadManagementService.latestActiveRun(child) === undefined &&
           !child.runs.some(

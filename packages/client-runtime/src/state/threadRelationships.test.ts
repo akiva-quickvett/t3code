@@ -225,6 +225,40 @@ describe("thread relationships", () => {
     },
   );
 
+  it("relates a supervised thread to its launcher without making it a subagent", () => {
+    const launcher = ThreadId.make("thread-launcher");
+    const supervised = ThreadId.make("thread-supervised");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        { id: launcher, status: "completed", forkedFrom: null, lineage: { parentThreadId: null } },
+        {
+          id: supervised,
+          status: "running",
+          forkedFrom: null,
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            supervisorThreadId: launcher,
+          },
+        },
+      ] as never,
+      projection: {
+        thread: { id: launcher },
+        subagents: [{ childThreadId: supervised, status: "running", supervised: true }],
+        contextTransfers: [],
+      } as never,
+    });
+
+    expect(graph.edges).toEqual([
+      expect.objectContaining({
+        sourceThreadId: launcher,
+        targetThreadId: supervised,
+        kind: "supervised",
+        status: "running",
+      }),
+    ]);
+  });
+
   it("keeps the live shell when an archived snapshot contains the same thread id", () => {
     const parent = ThreadId.make("thread-parent");
     const staleParent = ThreadId.make("thread-stale-parent");

@@ -516,6 +516,159 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
   }),
 );
 
+const makeSupervisedLaunchHarness = (supervisedWakes: boolean) =>
+  Effect.gen(function* () {
+    const sourceThreadId = ThreadId.make("source-thread");
+    const projectId = ProjectId.make("project");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const modelSelection = { instanceId: providerInstanceId, model: "gpt-5" };
+    const caller = {
+      id: sourceThreadId,
+      projectId,
+      providerInstanceId,
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      activeRunId: "active-run",
+      archivedAt: null,
+      deletedAt: null,
+    } as OrchestrationV2ThreadShell;
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const layerDependencies = Layer.mergeAll(
+      ServerSettings.layerTest({ supervisedWakes }),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.sync(() => [launchClaude]),
+      }),
+      NodeCrypto.layer,
+      Layer.succeed(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("environment"),
+        requestNamespace: "session",
+        thread: { threadId: sourceThreadId, providerSessionId: "session", providerInstanceId },
+        client: undefined,
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+      }),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: () => Effect.succeed(caller),
+      }),
+      Layer.mock(ThreadLaunch.ThreadLaunchService)({
+        launch: (input) => {
+          launched.push(input);
+          const messageId = input.initialMessage?.messageId;
+          return Effect.succeed({
+            threadId: input.threadId,
+            projection: {
+              thread: { id: input.threadId, projectId, modelSelection },
+              runs:
+                messageId === undefined
+                  ? []
+                  : [
+                      {
+                        id: "run:launched",
+                        userMessageId: messageId,
+                        status: "preparing",
+                        ...(input.supervisorThreadId === undefined
+                          ? {}
+                          : { delegatedTaskId: `task:${input.threadId}` }),
+                      },
+                    ],
+            },
+            resumed: false,
+          } as unknown as ThreadLaunch.ThreadLaunchResult);
+        },
+      }),
+      Layer.mock(Project.ProjectService)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      NodeServices.layer,
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-supervised-launch-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+    );
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(layerDependencies),
+        ),
+      ),
+    );
+    const handle = (params: Parameters<typeof toolkit.handle<"t3_thread_launch">>[1]) =>
+      toolkit.handle("t3_thread_launch", params).pipe(
+        Stream.unwrap,
+        Stream.runCollect,
+        Effect.map((parts) => parts.at(-1)?.result),
+        Effect.provide(layerDependencies),
+      );
+    return { handle, launched, sourceThreadId };
+  });
+
+it.effect("a supervised launch names the caller as supervisor and returns its task", () =>
+  Effect.gen(function* () {
+    const { handle, launched, sourceThreadId } = yield* makeSupervisedLaunchHarness(true);
+    const result = yield* handle({ title: "Slice", message: "Build it", supervise: true });
+    expect(launched[0]?.supervisorThreadId).toBe(sourceThreadId);
+    expect(launched[0]?.initialMessage?.senderThreadId).toBe(sourceThreadId);
+    expect(result).toMatchObject({ taskId: `task:${launched[0]?.threadId}` });
+
+    const idle = yield* handle({ title: "Slice", supervise: true });
+    expect(idle).toMatchObject({ code: "invalid_request" });
+    const unsupervised = yield* handle({ title: "Plain", message: "Build it" });
+    expect(launched[1]?.supervisorThreadId).toBeUndefined();
+    expect(unsupervised).not.toHaveProperty("taskId");
+  }),
+);
+
+it.effect("refuses supervise while supervisedWakes is off and launches nothing", () =>
+  Effect.gen(function* () {
+    const { handle, launched } = yield* makeSupervisedLaunchHarness(false);
+    const refused = yield* handle({ title: "Slice", message: "Build it", supervise: true });
+    expect(refused).toMatchObject({ code: "capability_denied" });
+    expect(launched).toHaveLength(0);
+  }),
+);
+
+it.effect("a retried launch with the same clientRequestId targets the same thread", () =>
+  Effect.gen(function* () {
+    const { handle, launched } = yield* makeSupervisedLaunchHarness(true);
+    yield* handle({ title: "Slice", message: "Build it", clientRequestId: "slice-ste330" });
+    yield* handle({ title: "Slice", message: "Build it", clientRequestId: "slice-ste330" });
+    yield* handle({ title: "Slice", message: "Build it", clientRequestId: "slice-ste331" });
+    yield* handle({ title: "Slice", message: "Build it" });
+    const ids = launched.map((input) => [input.commandId, input.threadId]);
+    expect(ids[1]).toEqual(ids[0]);
+    expect(ids[2]).not.toEqual(ids[0]);
+    expect(ids[3]).not.toEqual(ids[0]);
+  }),
+);
+
+it.effect(
+  "a supervised launch with a preset keeps both, and its retry targets the same thread",
+  () =>
+    Effect.gen(function* () {
+      const { handle, launched, sourceThreadId } = yield* makeSupervisedLaunchHarness(true);
+      const launch = {
+        title: "Slice",
+        message: "Build it",
+        supervise: true,
+        preset: "ticket",
+        clientRequestId: "slice-with-preset",
+      };
+      const first = yield* handle(launch);
+      const retried = yield* handle(launch);
+      expect(launched).toHaveLength(2);
+      for (const input of launched) {
+        expect(input).toMatchObject({
+          commandId: launched[0]?.commandId,
+          threadId: launched[0]?.threadId,
+          supervisorThreadId: sourceThreadId,
+          rolePreset: { id: "ticket", label: "Ticket agent" },
+          modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+        });
+      }
+      expect(retried).toEqual(first);
+    }),
+);
+
 const launchClaude: ServerProvider = {
   instanceId: ProviderInstanceId.make("claudeAgent"),
   driver: ProviderDriverKind.make("claudeAgent"),

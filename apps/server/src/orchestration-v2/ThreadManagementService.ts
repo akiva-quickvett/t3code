@@ -773,7 +773,16 @@ const make = Effect.gen(function* () {
           targetRunId: steerableRun.id,
         };
       } else if (input.mode === "auto" && steerableRun !== undefined) {
-        dispatchMode = { type: "steer_active", targetRunId: steerableRun.id };
+        // A steer joins the turn's own wake, so the supervisor queues behind a turn without one
+        // while its sends record wakes at all.
+        const queuesForWake =
+          input.senderThreadId !== undefined &&
+          input.senderThreadId === target.thread.lineage.supervisorThreadId &&
+          steerableRun.delegatedTaskId === undefined &&
+          (yield* serverSettings.getSettings.pipe(Effect.orDie)).supervisedWakes;
+        dispatchMode = queuesForWake
+          ? { type: "queue_after_active" }
+          : { type: "steer_active", targetRunId: steerableRun.id };
       } else {
         dispatchMode = {
           type: input.mode === "queue" ? "queue_after_active" : "start_immediately",
@@ -1097,7 +1106,8 @@ const make = Effect.gen(function* () {
         Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
       > = [];
       for (const task of subagents) {
-        if (task.origin !== "app_owned" || task.childThreadId === null) continue;
+        // A supervised thread runs on its own; the parent's stop only drops the wakes it is owed.
+        if (task.origin !== "app_owned" || task.childThreadId === null || task.supervised) continue;
         const threadId = task.childThreadId;
         yield* dispatch({
           type: "thread.stop",

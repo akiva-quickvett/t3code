@@ -360,6 +360,8 @@ export function selectThreadRelationshipShells(
   if (projection !== null) {
     const parentThreadId = shellParentThreadId(projection.thread);
     if (parentThreadId !== null) named.add(parentThreadId);
+    const supervisorThreadId = projection.thread.lineage.supervisorThreadId;
+    if (supervisorThreadId !== undefined) named.add(supervisorThreadId);
     for (const subagent of projection.subagents) {
       if (subagent.childThreadId !== null) named.add(subagent.childThreadId);
       for (const agent of subagent.workflow?.agents ?? []) {
@@ -375,7 +377,10 @@ export function selectThreadRelationshipShells(
   const currentParentId = current === undefined ? null : shellParentThreadId(current);
   if (currentParentId !== null) named.add(currentParentId);
   return threads.filter(
-    (thread) => named.has(thread.id) || shellParentThreadId(thread) === threadId,
+    (thread) =>
+      named.has(thread.id) ||
+      shellParentThreadId(thread) === threadId ||
+      thread.lineage.supervisorThreadId === threadId,
   );
 }
 

@@ -110,6 +110,12 @@ export const OrchestrationV2AppThreadLineage = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   rootThreadId: ThreadId,
+  /**
+   * The thread that launched this top-level thread with `supervise: true` and is woken when
+   * the runs it started here end. A separate key, not a relationship, because clients built
+   * before it decode `relationshipToParent` strictly and drop unknown keys.
+   */
+  supervisorThreadId: Schema.optional(ThreadId),
 });
 export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLineage.Type;
 
@@ -698,6 +704,11 @@ export const OrchestrationV2Subagent = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
+  /**
+   * The task tracks one run of a supervised top-level thread so its end wakes the parent.
+   * It is no subagent: no card, no stop cascade, and the thread stays in the sidebar.
+   */
+  supervised: Schema.optional(Schema.Literal(true)),
   status: Schema.Literals([
     "idle",
     "pending",
@@ -2566,6 +2577,7 @@ export const OrchestrationV2Command = Schema.Union([
     interactionMode: ProviderInteractionMode,
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+    supervisorThreadId: Schema.optional(ThreadId),
     rolePreset: Schema.optional(ThreadRolePreset),
     importedNativeThread: Schema.optional(
       Schema.Struct({

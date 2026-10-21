@@ -522,6 +522,97 @@ describe("OrchestratorMcpService", () => {
     }),
   );
 
+  it.effect("cancelling a supervised task unqueues its run and leaves the thread's turns", () =>
+    Effect.gen(function* () {
+      const parentThreadId = ThreadId.make("thread:mcp-cancel-supervised-parent");
+      const childThreadId = ThreadId.make("thread:mcp-cancel-supervised-child");
+      const trackedRunId = RunId.make("run:mcp-cancel-supervised-tracked");
+      const runningRunId = RunId.make("run:mcp-cancel-supervised-running");
+      const taskId = NodeId.make("node:mcp-cancel-supervised-task");
+      const dispatched = yield* Ref.make<ReadonlyArray<{ type: string; runId?: RunId }>>([]);
+      const stoppedTrees = yield* Ref.make(0);
+      const parentProjection = {
+        thread: { id: parentThreadId },
+        runs: [],
+        contextTransfers: [],
+        subagents: [
+          {
+            id: taskId,
+            threadId: parentThreadId,
+            origin: "app_owned",
+            supervised: true,
+            childThreadId,
+            driver: "codex",
+            model: "gpt-5.6-terra",
+            result: null,
+            completionDelivery: { state: "pending" },
+          },
+        ],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const childProjection = {
+        thread: { id: childThreadId },
+        runs: [
+          // The slice's own turn, which may have delegated work of its own.
+          { id: runningRunId, ordinal: 1, status: "running" },
+          { id: trackedRunId, ordinal: 2, status: "queued", delegatedTaskId: taskId },
+        ],
+        contextTransfers: [],
+        messages: [],
+        subagents: [],
+        providerThreads: [],
+        runtimeRequests: [],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (threadId) =>
+            Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
+          getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
+          dispatch: (command) =>
+            Ref.update(dispatched, (commands) => [
+              ...commands,
+              { type: command.type, ...("runId" in command ? { runId: command.runId } : {}) },
+            ]).pipe(Effect.as({} as never)),
+          stopDelegatedTasks: () => Ref.update(stoppedTrees, (count) => count + 1),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      const scope: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:mcp-cancel-supervised"),
+        requestNamespace: "provider-session:mcp-cancel-supervised",
+        thread: {
+          threadId: parentThreadId,
+          providerSessionId: "provider-session:mcp-cancel-supervised",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service.cancelTask(scope, {
+          taskId,
+          clientRequestId: "cancel-supervised-task",
+        });
+        assert.equal(result.status, "cancel_requested");
+        assert.deepEqual(yield* Ref.get(dispatched), [
+          { type: "queued-run.cancel", runId: trackedRunId },
+          { type: "delegated_task.completion-delivery.dispose" },
+        ]);
+        assert.equal(yield* Ref.get(stoppedTrees), 0);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
   it.effect("refuses to cancel a task whose child now runs above the parent's modes", () =>
     Effect.gen(function* () {
       const parentThreadId = ThreadId.make("thread:mcp-cancel-dispose-failed-parent");

@@ -18,7 +18,13 @@ import {
   unknownAgentRolePresetMessage,
 } from "../../../agentRoles/AgentRolePresetService.ts";
 import { narrowerInteractionMode, narrowerRuntimeMode } from "../../OrchestratorMcpService.ts";
-import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
+import {
+  newCommandId,
+  readCaller,
+  requestCommandId,
+  resolveProjectId,
+  unavailable,
+} from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 function projectFailure(error: Project.ProjectServiceError) {
@@ -86,10 +92,32 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       Effect.gen(function* () {
         const context = yield* readCaller();
         const { caller } = context;
-        const commandId = yield* newCommandId();
+        const commandId = yield* requestCommandId("thread-launch", input.clientRequestId);
         const threadId = ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);
         const attachments = input.attachments ?? [];
+        if (input.supervise === true) {
+          const settings = yield* ServerSettings.ServerSettingsService.pipe(
+            Effect.flatMap((service) => service.getSettings),
+            Effect.mapError(unavailable),
+          );
+          if (!settings.supervisedWakes)
+            return yield* new OrchestratorMcpFailure({
+              code: "capability_denied",
+              message:
+                "Supervised launches are turned off on this server (the supervisedWakes setting). Launch without supervise and follow the thread with t3_thread_wait.",
+            });
+          if (caller === undefined)
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: "supervise wakes the calling thread, so it needs an agent in a T3 thread.",
+            });
+          if (input.message === undefined && attachments.length === 0)
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: "A supervised launch needs a message; the run it starts is what wakes you.",
+            });
+        }
         if (attachments.some((attachment) => !Claims.attachmentIsPendingUpload(attachment)))
           return yield* new OrchestratorMcpFailure({
             code: "invalid_request",
@@ -190,6 +218,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               ? narrowerInteractionMode(interactionMode, preset.interactionMode)
               : interactionMode,
           workspaceStrategy: input.workspaceStrategy ?? { type: "root" },
+          ...(input.supervise === true && caller !== undefined
+            ? { supervisorThreadId: caller.id }
+            : {}),
           ...(preset === undefined ? {} : { rolePreset: { id: preset.id, label: preset.label } }),
           ...(input.message === undefined && attachments.length === 0
             ? {}
@@ -222,12 +253,18 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         );
         const thread = result.projection.thread;
         const run = result.projection.runs.find((run) => run.userMessageId === messageId);
+        if (input.supervise === true && run?.delegatedTaskId === undefined)
+          return yield* new OrchestratorMcpFailure({
+            code: "orchestration_error",
+            message: `Thread ${thread.id} launched but is not supervised, so it will not wake you. Follow it with t3_thread_wait.`,
+          });
         return {
           threadId: thread.id,
           projectId: thread.projectId,
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,
           status: run?.status ?? null,
+          ...(run?.delegatedTaskId === undefined ? {} : { taskId: run.delegatedTaskId }),
         };
       }),
   ),
