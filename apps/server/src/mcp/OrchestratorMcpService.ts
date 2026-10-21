@@ -628,7 +628,7 @@ export function narrowerInteractionMode(
  * naming a broader mode runs at the caller's; modes passed explicitly win and
  * are checked as before.
  */
-export function resolvePresetModes(input: {
+function resolvePresetModes(input: {
   readonly parentRuntimeMode: RuntimeMode;
   readonly parentInteractionMode: ProviderInteractionMode;
   readonly requestedRuntimeMode: OrchestratorMcpRuntimeMode | undefined;
@@ -665,7 +665,7 @@ export function resolvePresetModes(input: {
  * model keeps the preset's provider, and its options only while the model is
  * the preset's own.
  */
-export function presetTarget(
+function presetTarget(
   preset: Pick<AgentRolePreset, "target">,
   requested: OrchestratorMcpTarget | undefined,
 ): { readonly target: OrchestratorMcpTarget; readonly optionsFromPreset: boolean } {

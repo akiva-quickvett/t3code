@@ -8,6 +8,7 @@ import {
 } from "../provider/ClaudeModelCatalog.ts";
 import { DEFAULT_AGENT_ROLE_PRESETS } from "./defaultAgentRolePresets.ts";
 
+const decodePreset = Schema.decodeUnknownSync(AgentRolePreset);
 const byId = new Map(DEFAULT_AGENT_ROLE_PRESETS.map((preset) => [preset.id, preset]));
 
 describe("DEFAULT_AGENT_ROLE_PRESETS", () => {
@@ -35,7 +36,7 @@ describe("DEFAULT_AGENT_ROLE_PRESETS", () => {
 
   it("are valid presets", () => {
     for (const preset of DEFAULT_AGENT_ROLE_PRESETS) {
-      expect(Schema.decodeUnknownSync(AgentRolePreset)(preset)).toEqual(preset);
+      expect(decodePreset(preset)).toEqual(preset);
     }
   });
 

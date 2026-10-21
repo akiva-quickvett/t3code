@@ -69,6 +69,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const threadId = ThreadId.make("thread:provider-switch");
+const encodeJsonText = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const projectId = ProjectId.make("project:provider-switch");
 const firstPrompt = "Respond with exactly: codex before switch";
 const claudePrompt = "Respond with exactly: claude switched response";
@@ -3912,7 +3913,7 @@ describe("orchestration v2 provider switching", () => {
           ),
         );
         // The role reaches the provider but never the timeline.
-        const projected = yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))({
+        const projected = yield* encodeJsonText({
           messages: projection.messages,
           turnItems: projection.turnItems,
           visibleTurnItems: projection.visibleTurnItems,

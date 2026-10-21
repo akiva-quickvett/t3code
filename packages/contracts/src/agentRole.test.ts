@@ -12,6 +12,10 @@ import { DEFAULT_SERVER_SETTINGS, ServerSettings } from "./settings.ts";
 const decodePreset = Schema.decodeUnknownExit(AgentRolePreset);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
+const decodePresetSettings = Schema.decodeUnknownSync(AgentRolePresetSettings);
+const decodeDelegate = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
+const decodeCreateThread = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadRequest);
+const decodeThreadRole = Schema.decodeUnknownSync(ThreadRolePreset);
 
 const minimalPreset = {
   id: "review-t1",
@@ -72,27 +76,22 @@ describe("agent role presets in server settings", () => {
     };
     const decoded = decodeServerSettings({ agentRolePresets });
     expect(encodeServerSettings(decoded).agentRolePresets).toMatchObject(agentRolePresets);
-    expect(Schema.decodeUnknownSync(AgentRolePresetSettings)({})).toEqual(
-      DEFAULT_SERVER_SETTINGS.agentRolePresets,
-    );
+    expect(decodePresetSettings({})).toEqual(DEFAULT_SERVER_SETTINGS.agentRolePresets);
   });
 });
 
 describe("preset fields on existing contracts", () => {
   it("are optional, so older callers still decode", () => {
-    const delegate = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
-    expect(delegate({ task: "Review" }).preset).toBeUndefined();
-    expect(delegate({ task: "Review", role: "review", preset: "Review-T1" })).toMatchObject({
+    expect(decodeDelegate({ task: "Review" }).preset).toBeUndefined();
+    expect(decodeDelegate({ task: "Review", role: "review", preset: "Review-T1" })).toMatchObject({
       role: "review",
       preset: "Review-T1",
     });
-    expect(
-      Schema.decodeUnknownSync(OrchestratorMcpCreateThreadRequest)({ preset: "ticket" }).preset,
-    ).toBe("ticket");
+    expect(decodeCreateThread({ preset: "ticket" }).preset).toBe("ticket");
   });
 
   it("record a thread's role as an id and a label snapshot", () => {
-    expect(Schema.decodeUnknownSync(ThreadRolePreset)({ id: "ticket", label: "Ticket" })).toEqual({
+    expect(decodeThreadRole({ id: "ticket", label: "Ticket" })).toEqual({
       id: "ticket",
       label: "Ticket",
     });
