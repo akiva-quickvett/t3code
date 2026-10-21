@@ -129,6 +129,17 @@ const encodeOrchestrationV2ProviderThreadJson = Schema.encodeSync(
 );
 const decodeOrchestrationV2ProviderThread = Schema.decodeUnknownSync(OrchestrationV2ProviderThread);
 const decodeOrchestrationV2ThreadShell = Schema.decodeUnknownSync(OrchestrationV2ThreadShell);
+/** A thread shell as clients built before `supervisorThreadId` decode it. */
+const decodePreSupervisionShell = Schema.decodeUnknownSync(
+  Schema.Struct({
+    ...OrchestrationV2ThreadShell.fields,
+    lineage: Schema.Struct({
+      parentThreadId: Schema.NullOr(ThreadId),
+      relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+      rootThreadId: ThreadId,
+    }),
+  }),
+);
 const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
   OrchestrationV2ProviderCapabilities,
 );
@@ -1342,20 +1353,12 @@ describe("orchestration V2 contracts", () => {
   });
 
   it("lets clients built before supervisorThreadId decode a supervised shell as top-level", () => {
-    const PreSupervisionShell = Schema.Struct({
-      ...OrchestrationV2ThreadShell.fields,
-      lineage: Schema.Struct({
-        parentThreadId: Schema.NullOr(ThreadId),
-        relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
-        rootThreadId: ThreadId,
-      }),
-    });
     const supervised = {
       ...historicalThreadShellJson,
       lineage: { ...historicalThreadShellJson.lineage, supervisorThreadId: "thread-meta" },
     };
 
-    expect(Schema.decodeUnknownSync(PreSupervisionShell)(supervised).lineage).toEqual({
+    expect(decodePreSupervisionShell(supervised).lineage).toEqual({
       parentThreadId: null,
       relationshipToParent: null,
       rootThreadId: "thread-1",

@@ -23,6 +23,22 @@ const decodeThreadListInput = Schema.decodeUnknownSync(OrchestratorMcpThreadList
 const decodeThreadReadInput = Schema.decodeUnknownSync(OrchestratorMcpThreadReadInput);
 const decodeThreadSendInput = Schema.decodeUnknownSync(OrchestratorMcpThreadSendInput);
 const decodeThreadWaitInput = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitInput);
+const decodeListItemLineage = {
+  supervisorThreadId: Schema.decodeUnknownSync(
+    OrchestratorMcpThreadListItem.fields.supervisorThreadId,
+  ),
+  relationshipToParent: Schema.decodeUnknownSync(
+    OrchestratorMcpThreadListItem.fields.relationshipToParent,
+  ),
+};
+const decodeThreadDetailLineage = {
+  supervisorThreadId: Schema.decodeUnknownSync(
+    OrchestratorMcpThreadDetail.fields.supervisorThreadId,
+  ),
+  relationshipToParent: Schema.decodeUnknownSync(
+    OrchestratorMcpThreadDetail.fields.relationshipToParent,
+  ),
+};
 
 describe("orchestrator MCP contracts", () => {
   it("reports supervised wakes only where the server knows them", () => {
@@ -53,13 +69,9 @@ describe("orchestrator MCP contracts", () => {
   });
 
   it("lists and reads a supervisor without a new relationship", () => {
-    for (const schema of [OrchestratorMcpThreadListItem, OrchestratorMcpThreadDetail]) {
-      expect(Schema.decodeUnknownSync(schema.fields.supervisorThreadId)("thread-meta")).toBe(
-        "thread-meta",
-      );
-      expect(() =>
-        Schema.decodeUnknownSync(schema.fields.relationshipToParent)("supervised"),
-      ).toThrow();
+    for (const decode of [decodeListItemLineage, decodeThreadDetailLineage]) {
+      expect(decode.supervisorThreadId("thread-meta")).toBe("thread-meta");
+      expect(() => decode.relationshipToParent("supervised")).toThrow();
     }
   });
 
