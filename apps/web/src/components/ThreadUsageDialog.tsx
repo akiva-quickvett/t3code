@@ -60,7 +60,9 @@ function ThreadUsageDialog({ threadRef }: { readonly threadRef: ScopedThreadRef 
         {data !== null && data.unpricedRecords > 0 ? (
           <DialogFooter variant="bare">
             <span className="text-xs text-muted-foreground">
-              {data.unpricedRecords} usage records have no known price and are not in the cost.
+              {data.unpricedRecords === 1
+                ? "1 usage record has no known price and is not in the cost."
+                : `${data.unpricedRecords} usage records have no known price and are not in the cost.`}
             </span>
           </DialogFooter>
         ) : null}
@@ -102,7 +104,9 @@ function ThreadUsageTable({ tree }: { readonly tree: UsageThreadTree }) {
       </ul>
       {tree.omittedThreads === undefined ? null : (
         <p className="text-xs text-muted-foreground">
-          {tree.omittedThreads} more threads are in the total but not listed.
+          {tree.omittedThreads === 1
+            ? "1 more thread is in the total but not listed."
+            : `${tree.omittedThreads} more threads are in the total but not listed.`}
         </p>
       )}
       <p className="text-xs text-muted-foreground">Usage since {tree.sinceDay} (UTC).</p>
