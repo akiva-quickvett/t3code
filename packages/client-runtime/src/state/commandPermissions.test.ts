@@ -10,6 +10,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
+  AuthTerminalOperateScope,
   ThreadId,
   EnvironmentId,
   ScheduledTaskId,
@@ -111,6 +112,55 @@ describe("command permissions", () => {
         );
         expect(registry.get(edit.permissionAtom(env))).toBe(true);
         yield* edit.authorize(registry, env);
+      }),
+    ),
+  );
+
+  it.effect.each([
+    WS_METHODS.podRuntimeStart,
+    WS_METHODS.podRuntimeStop,
+    WS_METHODS.podRuntimeRecreate,
+    WS_METHODS.podRuntimeRecreateAgentContainer,
+    WS_METHODS.podRuntimeRemove,
+  ])("requires the destination operate grant to change a pod (%s)", (method) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const change = createCommandPermissions(runtime, method);
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(change.permissionAtom(env))).toBe(false);
+        expect((yield* change.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(change.permissionAtom(env))).toBe(true);
+        yield* change.authorize(registry, env);
+        registry.set(sessions(other), AsyncResult.success(grant(false)));
+        expect(registry.get(change.permissionAtom(other))).toBe(false);
+      }),
+    ),
+  );
+
+  it.effect("requires the destination terminal grant, not operate alone, to open a pod shell", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const shell = createCommandPermissions(runtime, WS_METHODS.podRuntimeOpenShell);
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(shell.permissionAtom(env))).toBe(false);
+        expect((yield* shell.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthTerminalOperateScope],
+            permissions: [AuthTerminalOperateScope],
+          }),
+        );
+        expect(registry.get(shell.permissionAtom(env))).toBe(true);
+        yield* shell.authorize(registry, env);
       }),
     ),
   );

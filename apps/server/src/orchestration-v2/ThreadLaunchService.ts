@@ -4,6 +4,7 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
+  type ThreadWorktreeRuntime,
   type ChatAttachment,
   type MessageId,
   type ModelSelection,
@@ -40,6 +41,7 @@ import {
 
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -65,6 +67,7 @@ export type ThreadLaunchWorkspaceStrategy =
       readonly baseRef: string;
       readonly branch?: string | undefined;
       readonly startFromOrigin?: boolean | undefined;
+      readonly runtime?: ThreadWorktreeRuntime | undefined;
     };
 
 export interface ThreadLaunchInitialMessage {
@@ -130,6 +133,7 @@ export class ThreadLaunchError extends Schema.TaggedError<ThreadLaunchError>()(
       "read-receipt",
       "generate-metadata",
       "provision-worktree",
+      "provision-pod",
       "run-setup-script",
       "create-thread",
       "update-thread",
@@ -215,6 +219,7 @@ const make = Effect.gen(function* () {
   const ids = yield* IdAllocator.IdAllocatorV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
+  const pods = yield* PodRuntimeService.PodRuntimeService;
   const preparationScope = yield* Scope.make("sequential");
   const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
   yield* Effect.addFinalizer(() => Scope.close(preparationScope, Exit.void));
@@ -582,6 +587,19 @@ const make = Effect.gen(function* () {
             phase: "setup",
           })
           .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+      }
+      if (
+        worktreePath !== null &&
+        input.workspaceStrategy.type === "worktree" &&
+        input.workspaceStrategy.runtime === "container"
+      ) {
+        // Before setup, which then runs inside the pod. A retried launch finds
+        // the pod recorded for this worktree and starts it again.
+        const podWorktreePath = worktreePath;
+        yield* pods.create({ projectId: input.projectId, worktreePath: podWorktreePath }).pipe(
+          Effect.flatMap((pod) => pods.ensureRunning(pod.id)),
+          Effect.mapError(mapError(input, "provision-pod", threadId)),
+        );
       }
       yield* setupTracker.stageStatus(threadId, "setup-script", "running");
       const setup =

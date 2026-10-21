@@ -6,6 +6,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
+import { layerWithoutPods } from "../pod/testkit/layerWithoutPods.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectService from "./ProjectService.ts";
@@ -78,6 +79,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
         Layer.mock(TerminalManager.TerminalManager)({ open, write, subscribe, closeIdle }),
         ServerSettings.layerTest(),
         NodeCrypto.layer,
+        layerWithoutPods,
       ),
     ),
   );

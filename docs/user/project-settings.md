@@ -197,7 +197,8 @@ To clean up after a worktree before it goes, such as stopping containers its set
 started, turn on **Run before worktree removal** for one of the project's actions, or set
 `"runOnWorktreeRemove": true` on a `t3.json` script. It runs in the worktree whenever T3 Code
 removes one, including cleanup and deleting a thread with its worktree. Removal waits up to two
-minutes for it and goes ahead even if it fails. It can run again if a removal is interrupted,
+minutes for it and goes ahead even if it fails, except in a [pod](./pods.md)'s worktree, where it
+runs inside the pod and a failure keeps the worktree. It can run again if a removal is interrupted,
 so make it safe to repeat. During cleanup, untracked files in the worktree after it runs are
 deleted with the worktree, including any written there from outside T3 Code while it ran. A
 tracked file it edits keeps the worktree.

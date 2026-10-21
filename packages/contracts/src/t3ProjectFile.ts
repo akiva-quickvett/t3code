@@ -76,6 +76,109 @@ export const T3ProjectFileScript = Schema.Struct({
 });
 export type T3ProjectFileScript = typeof T3ProjectFileScript.Type;
 
+const T3_PROJECT_FILE_POD_MAX_ENTRIES = 50;
+
+const POD_SERVICE_NAME = /^[a-z][a-z0-9-]{0,31}$/;
+const POD_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+/** Set by T3 Code in the pod, or read by Docker to find its daemon. */
+const POD_RESERVED_ENV_NAMES = new Set([
+  "PATH",
+  "HOME",
+  "DOCKER_HOST",
+  "DOCKER_CONTEXT",
+  "DOCKER_CONFIG",
+]);
+
+const quotedKey = (key: string) => JSON.stringify(key.slice(0, 64));
+const CREDENTIALED_URL = /^[a-z][a-z0-9+.-]*:\/\/[^/@]*@/i;
+
+/** Names every bad key, so a typo fails the pod block instead of vanishing. */
+const checkPodKeys = (
+  record: Readonly<Record<string, unknown>>,
+  noun: string,
+  problem: (key: string) => string | null,
+) => {
+  const keys = Object.keys(record);
+  if (keys.length > T3_PROJECT_FILE_POD_MAX_ENTRIES)
+    return `At most ${T3_PROJECT_FILE_POD_MAX_ENTRIES} ${noun}s.`;
+  for (const key of keys) {
+    const reason = problem(key);
+    if (reason !== null) return `${quotedKey(key)} is not a valid ${noun} name: ${reason}`;
+  }
+  return true;
+};
+
+export const T3ProjectFilePod = Schema.Struct({
+  compose: Schema.optionalKey(
+    trimmedNonEmpty(
+      {
+        description:
+          'Worktree-relative path to the compose file the pod runs (e.g. "docker-compose.yml"). Defaults to Docker Compose\'s own lookup.',
+      },
+      T3_PROJECT_FILE_PATH_MAX_LENGTH,
+    ),
+  ),
+  services: Schema.Record(
+    Schema.String,
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65_535 })),
+  )
+    .annotate({
+      description:
+        'Services the stack serves, by lowercase name and inner port (e.g. {"web": 3000}). T3 Code links to them from the pod chip.',
+    })
+    .check(
+      Schema.makeFilter((services) =>
+        checkPodKeys(services, "service", (key) =>
+          POD_SERVICE_NAME.test(key)
+            ? null
+            : "use a lowercase letter, then letters, digits or '-'.",
+        ),
+      ),
+    ),
+  up: Schema.optionalKey(
+    Schema.Array(trimmedNonEmpty({ description: "A shell command run inside the pod." }))
+      .annotate({
+        description:
+          'Commands that bring the stack up inside the pod, in order. Defaults to "docker compose up -d".',
+      })
+      .check(Schema.isMaxLength(T3_PROJECT_FILE_POD_MAX_ENTRIES)),
+  ),
+  seeds: Schema.optionalKey(
+    Schema.Array(trimmedNonEmpty({ description: "A shell command run inside the pod." }))
+      .annotate({ description: "Commands that load seed data once the stack is up, in order." })
+      .check(Schema.isMaxLength(T3_PROJECT_FILE_POD_MAX_ENTRIES)),
+  ),
+  env: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.String.check(Schema.isMaxLength(4_096)))
+      .annotate({
+        description:
+          "Environment variables set for every command inside the pod. PATH, HOME, DOCKER_HOST, DOCKER_CONTEXT and DOCKER_CONFIG are T3 Code's.",
+      })
+      .check(
+        Schema.makeFilter((env) =>
+          checkPodKeys(env, "variable", (key) =>
+            !POD_ENV_NAME.test(key)
+              ? "use letters, digits and '_', not starting with a digit."
+              : POD_RESERVED_ENV_NAMES.has(key)
+                ? "T3 Code sets it in the pod."
+                : /_proxy$/i.test(key) && CREDENTIALED_URL.test(env[key] ?? "")
+                  ? "a proxy URL with credentials would show in the host's process list."
+                  : null,
+          ),
+        ),
+      ),
+  ),
+  hostnames: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description: "Serve the services on https://<pod>-<service> hostnames instead of ports.",
+    }),
+  ),
+}).annotate({
+  description:
+    "Run threads that ask for a container in a pod: a private Docker daemon running this repository's compose stack, with the agent container on its network.",
+});
+export type T3ProjectFilePod = typeof T3ProjectFilePod.Type;
+
 export const T3ProjectFile = Schema.Struct({
   $schema: Schema.optionalKey(
     Schema.String.annotate({
@@ -110,6 +213,7 @@ export const T3ProjectFile = Schema.Struct({
       })
       .check(Schema.isMaxLength(T3_PROJECT_FILE_MAX_SCRIPTS)),
   ),
+  pod: Schema.optionalKey(T3ProjectFilePod),
 }).annotate({
   title: "T3 project file",
   description:

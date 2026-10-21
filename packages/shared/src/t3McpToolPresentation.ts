@@ -44,6 +44,9 @@ export type T3McpToolSummaryAction =
   | "worktree-handoff"
   | "worktree-list"
   | "worktree-status"
+  | "pod-status"
+  | "pod-start"
+  | "pod-stop"
   | "project-list"
   | "project-read"
   | "project-create"
@@ -165,6 +168,9 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "worktree-handoff",
   ),
   t3_worktree_status: tool(["Get", "Getting", "Got", "thread worktree status"], "worktree-status"),
+  t3_pod_status: tool(["Get", "Getting", "Got", "pod status"], "pod-status"),
+  t3_pod_start: tool(["Start", "Starting", "Started", "a pod"], "pod-start"),
+  t3_pod_stop: tool(["Stop", "Stopping", "Stopped", "a pod"], "pod-stop"),
   preview_status: tool(["Get", "Getting", "Got", "preview browser status"], "browser", "browser"),
   preview_open: tool(
     ["Open", "Opening", "Opened", "a page in the preview browser"],

@@ -99,4 +99,10 @@ export const UserId = Context.Reference<number | undefined>("@t3tools/shared/Hos
   defaultValue: () => process.getuid?.(),
 });
 
+/** Undefined on platforms without POSIX gids (Windows). */
+export const GroupId = Context.Reference<number | undefined>(
+  "@t3tools/shared/HostProcess/GroupId",
+  { defaultValue: () => process.getgid?.() },
+);
+
 export const isWindows = Effect.map(Platform, (platform) => platform === "win32");

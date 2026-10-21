@@ -24,6 +24,7 @@ import {
   type ScopedThreadRef,
   ThreadId,
   ThreadRolePreset,
+  ThreadWorktreeRuntime,
   SnapShotSource,
 } from "@t3tools/contracts";
 import {
@@ -308,6 +309,7 @@ const PersistedDraftThreadState = Schema.Struct({
   envMode: DraftThreadEnvModeSchema,
   startFromOrigin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   rolePreset: Schema.optionalKey(Schema.NullOr(ThreadRolePreset)),
+  worktreeRuntime: Schema.optionalKey(ThreadWorktreeRuntime),
   promotedTo: Schema.optionalKey(
     Schema.NullOr(
       Schema.Struct({
@@ -401,6 +403,8 @@ export interface DraftSessionState {
   startFromOrigin: boolean;
   /** The role the thread starts with; sent with its creation. */
   rolePreset?: ThreadRolePreset | null;
+  /** "container" runs the new worktree in a pod; absent means the host. */
+  worktreeRuntime?: ThreadWorktreeRuntime;
   promotedTo?: ScopedThreadRef | null;
 }
 
@@ -449,6 +453,7 @@ interface ComposerDraftStoreState {
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
       rolePreset?: ThreadRolePreset | null;
+      worktreeRuntime?: ThreadWorktreeRuntime;
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
     },
@@ -466,6 +471,7 @@ interface ComposerDraftStoreState {
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
       rolePreset?: ThreadRolePreset | null;
+      worktreeRuntime?: ThreadWorktreeRuntime;
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
     },
@@ -482,6 +488,7 @@ interface ComposerDraftStoreState {
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
       rolePreset?: ThreadRolePreset | null;
+      worktreeRuntime?: ThreadWorktreeRuntime;
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
     },
@@ -1410,6 +1417,7 @@ function createDraftThreadState(
     runtimeMode?: RuntimeMode;
     interactionMode?: ProviderInteractionMode;
     rolePreset?: ThreadRolePreset | null;
+    worktreeRuntime?: ThreadWorktreeRuntime;
     environmentSelection?: "auto" | "manual";
     loadBalancedEnvironmentId?: EnvironmentId | null;
   },
@@ -1441,6 +1449,9 @@ function createDraftThreadState(
     options?.environmentSelection ?? existingThread?.environmentSelection;
   const rolePreset =
     options?.rolePreset === undefined ? existingThread?.rolePreset : options.rolePreset;
+  // A pod is a project's own setup; another project starts back on the host.
+  const worktreeRuntime =
+    options?.worktreeRuntime ?? (projectChanged ? undefined : existingThread?.worktreeRuntime);
   return {
     threadId,
     environmentId: projectRef.environmentId,
@@ -1466,6 +1477,7 @@ function createDraftThreadState(
       options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
     startFromOrigin: nextStartFromOrigin,
     ...(rolePreset == null ? {} : { rolePreset }),
+    ...(worktreeRuntime === "container" ? { worktreeRuntime } : {}),
     promotedTo: null,
   };
 }
@@ -1502,6 +1514,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.startFromOrigin === right.startFromOrigin &&
     left.rolePreset?.id === right.rolePreset?.id &&
     left.rolePreset?.label === right.rolePreset?.label &&
+    left.worktreeRuntime === right.worktreeRuntime &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
 }
@@ -2392,6 +2405,9 @@ function toHydratedDraftThreadState(
     ...(persistedDraftThread.rolePreset == null
       ? {}
       : { rolePreset: persistedDraftThread.rolePreset }),
+    ...(persistedDraftThread.worktreeRuntime === "container"
+      ? { worktreeRuntime: persistedDraftThread.worktreeRuntime }
+      : {}),
     ...(persistedDraftThread.environmentSelection
       ? { environmentSelection: persistedDraftThread.environmentSelection }
       : {}),
@@ -2666,6 +2682,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 : existing.environmentSelection);
             const rolePreset =
               options.rolePreset === undefined ? existing.rolePreset : options.rolePreset;
+            const worktreeRuntime =
+              options.worktreeRuntime ?? (projectChanged ? undefined : existing.worktreeRuntime);
             const nextDraftThread: DraftThreadState = {
               threadId: existing.threadId,
               environmentId: nextProjectRef.environmentId,
@@ -2690,6 +2708,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
               startFromOrigin: nextStartFromOrigin,
               ...(rolePreset == null ? {} : { rolePreset }),
+              ...(worktreeRuntime === "container" ? { worktreeRuntime } : {}),
               promotedTo: existing.promotedTo ?? null,
             };
             const isUnchanged =
@@ -2706,6 +2725,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftThread.envMode === existing.envMode &&
               nextDraftThread.startFromOrigin === existing.startFromOrigin &&
               nextDraftThread.rolePreset === existing.rolePreset &&
+              nextDraftThread.worktreeRuntime === existing.worktreeRuntime &&
               scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
             if (isUnchanged) {
               return state;

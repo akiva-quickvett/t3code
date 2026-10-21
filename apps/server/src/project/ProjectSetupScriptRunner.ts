@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ProjectService from "./ProjectService.ts";
@@ -186,7 +187,8 @@ export const make = Effect.gen(function* () {
   const terminalManager = yield* TerminalManager.TerminalManager;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
-  const completionShell = resolveCompletionShell(
+  const executionTarget = yield* WorkspaceExecutionTarget.WorkspaceExecutionTarget;
+  const hostCompletionShell = resolveCompletionShell(
     yield* HostProcess.Platform,
     yield* HostProcess.Environment,
   );
@@ -367,6 +369,11 @@ export const make = Effect.gen(function* () {
     const completionToken = observe
       ? (yield* crypto.randomUUIDv4().pipe(Effect.orDie)).replaceAll("-", "")
       : null;
+    // The terminal runs in the pod when the worktree is a pod's, and every pod shell is POSIX.
+    const completionShell =
+      (yield* executionTarget.resolve(input.worktreePath)).type === "pod"
+        ? "posix"
+        : hostCompletionShell;
     const commandLine =
       observe && completionToken
         ? wrapCommandForCompletion(

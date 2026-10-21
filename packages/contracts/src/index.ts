@@ -40,6 +40,7 @@ export * from "./orchestrationV2.ts";
 export * from "./applicationEvent.ts";
 export * from "./agentRole.ts";
 export * from "./chatChannel.ts";
+export * from "./podRuntime.ts";
 export * from "./orchestratorMcp.ts";
 export * from "./threadMetadataMcp.ts";
 export * from "./threadPullRequest.ts";

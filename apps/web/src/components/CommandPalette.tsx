@@ -58,6 +58,7 @@ import {
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
+  BoxIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronRightIcon,
@@ -80,6 +81,9 @@ import {
   TextSearchIcon,
   TicketIcon,
 } from "lucide-react";
+import { podRuntimeActions } from "@t3tools/client-runtime/state/pod-runtime";
+import { useWorktreePod } from "../state/podRuntime";
+import { usePodActions } from "./pods/usePodActions";
 import { requestThreadFindOpen } from "./chat/threadFindActionBus";
 import {
   useDeferredValue,
@@ -257,6 +261,9 @@ import { readPullRequestListPreferences } from "~/components/pullRequest/pullReq
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
+
+// Removal belongs with the worktree or Diagnostics, not a quick command.
+const PALETTE_POD_REQUESTS = new Set(["start", "stop", "recreate"]);
 
 function getEnvironmentBrowsePlatform(os: string | null | undefined): string {
   if (os === "windows") {
@@ -752,6 +759,8 @@ function OpenCommandPaletteDialog(props: {
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
+  const activePod = useWorktreePod(activeThread?.environmentId ?? null, activeThread?.worktreePath);
+  const podActions = usePodActions(activeThread?.environmentId ?? null);
   const startTicketThread = useStartTicketThread();
   const paletteRouteTarget = useThreadRouteTarget();
   const projects = useProjects();
@@ -1851,6 +1860,22 @@ function OpenCommandPaletteDialog(props: {
         if (refreshed._tag === "Failure") throw squashAtomCommandFailure(refreshed);
       },
     });
+  }
+
+  if (activeThread !== null && activePod !== undefined) {
+    const threadId = activeThread.id;
+    for (const action of podRuntimeActions(activePod)) {
+      if (action.kind === "request" && !PALETTE_POD_REQUESTS.has(action.request)) continue;
+      actionItems.push({
+        kind: "action",
+        value: `action:pod:${action.label}`,
+        searchTerms: ["pod", "container", "docker", "compose", "stack", "shell"],
+        title: action.label === "Retry" ? "Retry pod" : action.label,
+        disabled: !podActions.allowed(action),
+        icon: <BoxIcon className={ITEM_ICON_CLASS} />,
+        run: () => podActions.run(activePod.id, action, threadId),
+      });
+    }
   }
 
   actionItems.push({

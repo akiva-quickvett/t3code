@@ -293,6 +293,7 @@ import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrom
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+import { PodChip } from "./pods/PodChip";
 import { ThreadRoleBadge } from "./roles/RoleBadge";
 import { useStartTicketThread } from "../hooks/useStartTicketThread";
 import { MiddleTruncate } from "./ui/middle-truncate";
@@ -2331,7 +2332,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 <ThreadRoleBadge thread={thread} shrink />
               </span>
             )}
-            {/* M8's pod chip for broker rows goes here; brokers are subagents, so always slim. */}
+            <PodChip environmentId={thread.environmentId} worktreePath={thread.worktreePath} slim />
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (

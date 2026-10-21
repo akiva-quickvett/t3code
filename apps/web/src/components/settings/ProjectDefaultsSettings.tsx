@@ -16,6 +16,7 @@ import {
   resolveDefaultProviderModelSelection,
   sortProviderInstanceEntries,
 } from "../../providerInstances";
+import { useServerConfigs } from "../../state/entities";
 import { useEnvironmentProviders, useEnvironments } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { resolveEnvModeLabel, WORKTREE_SUBMODULES_LABELS } from "../BranchToolbar.logic";
@@ -82,6 +83,14 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const PermissionIcon = runtimeModeConfig[settings.defaultRuntimeMode].icon;
   const mixedWorkspace = useScopedSettingsMixed(["defaultThreadEnvMode"]);
   const mixedSubmodules = useScopedSettingsMixed(["worktreeSubmodules"]);
+  const mixedPodRuntime = useScopedSettingsMixed(["podRuntime"]);
+  const serverConfigs = useServerConfigs();
+  const targetsSupportPods =
+    targets.length > 0 &&
+    targets.every(
+      (entry) =>
+        serverConfigs.get(entry.environmentId)?.environment.capabilities.podRuntime === true,
+    );
   const mixedAutoPull = useScopedSettingsMixed(["defaultAutoPull"]);
   const mixedAgentCredits = useScopedSettingsMixed(["removeAgentCreditsOnMerge"]);
   const mixedMergeMethod = useScopedSettingsMixed(["pullRequestMergeMethod"]);
@@ -370,6 +379,27 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
               </Select>
             }
           />
+          {targetsSupportPods ? (
+            <SettingsRow
+              serverScoped
+              settingKeys={["podRuntime"]}
+              mixed={mixedPodRuntime}
+              {...searchableSetting("pod-runtime")}
+              description={
+                isProjectScope
+                  ? "Lets new worktrees in this project run in a pod when its t3.json has a pod block. Needs Docker on this machine."
+                  : "Lets new worktrees run in a pod when the project's t3.json has a pod block. Needs Docker on this machine. Projects can override it."
+              }
+              control={
+                <Switch
+                  aria-label="Pods"
+                  mixed={mixedPodRuntime}
+                  checked={mixedPodRuntime ? false : settings.podRuntime.enabled}
+                  onCheckedChange={(enabled) => updateSettings({ podRuntime: { enabled } })}
+                />
+              }
+            />
+          ) : null}
         </>
       ) : (
         <>

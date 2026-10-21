@@ -4,6 +4,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
+  AuthTerminalOperateScope,
   type AuthEnvironmentScope,
 } from "./auth.ts";
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
@@ -47,6 +48,13 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.chatChannelsMutate]: AuthSettingsWriteScope,
   // Reads the template through the channel's credentials, so only settings writers may ask.
   [WS_METHODS.chatChannelsGetTemplateStatus]: AuthSettingsWriteScope,
+  [WS_METHODS.podRuntimeStart]: AuthOrchestrationOperateScope,
+  [WS_METHODS.podRuntimeStop]: AuthOrchestrationOperateScope,
+  [WS_METHODS.podRuntimeRecreate]: AuthOrchestrationOperateScope,
+  [WS_METHODS.podRuntimeRecreateAgentContainer]: AuthOrchestrationOperateScope,
+  [WS_METHODS.podRuntimeRemove]: AuthOrchestrationOperateScope,
+  // A shell in the pod is a terminal, with a terminal's reach.
+  [WS_METHODS.podRuntimeOpenShell]: AuthTerminalOperateScope,
 
   [WS_METHODS.scheduledTasksUpsert]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksSetEnabled]: AuthOrchestrationOperateScope,

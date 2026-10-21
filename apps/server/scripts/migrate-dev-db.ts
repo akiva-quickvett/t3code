@@ -213,6 +213,9 @@ const CLEARED_TABLES: ReadonlyArray<string> = [
   "provider_session_runtime",
   "auth_sessions",
   "auth_pairing_links",
+  // Pods are the live server's containers; a dev server must never adopt them.
+  "pod_runtimes",
+  "pod_runtime_events",
 ];
 
 const PROVIDER_SESSIONS_TABLE = "orchestration_v2_projection_provider_sessions";
