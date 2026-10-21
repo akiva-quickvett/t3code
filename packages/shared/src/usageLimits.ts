@@ -1,4 +1,7 @@
 import {
+  type AgentUsageHeadroom,
+  type AgentUsageLimits,
+  type AgentUsageLimitsStatus,
   type EnvironmentId,
   type UsageLimitsReport,
   type ProviderInstanceId,
@@ -8,7 +11,9 @@ import {
   type ServerProvider,
   type ServerProviderUsageLimits,
   type ServerProviderUsageWindow,
+  type UsageHeadroomThresholds,
   type UsageLimitSourceSnapshots,
+  USAGE_LIMITS_MIN_REFRESH_INTERVAL_MS,
 } from "@t3tools/contracts";
 
 import * as DateTime from "effect/DateTime";
@@ -743,4 +748,97 @@ export function collectProviderUsageLimits(
     }
   }
   return { createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)), accounts, notices };
+}
+
+/** Three missed checks: past this the numbers may no longer hold. */
+const AGENT_LIMITS_STALE_AFTER_MS = 3 * USAGE_LIMITS_MIN_REFRESH_INTERVAL_MS;
+
+function hasReset(window: ServerProviderUsageWindow, now: number): boolean {
+  const resetsAt = resetMillis(window);
+  return resetsAt !== null && resetsAt <= now;
+}
+
+/** A window past its reset no longer counts: its reading predates the refill. */
+export function usageHeadroom(
+  windows: readonly ServerProviderUsageWindow[],
+  thresholds: UsageHeadroomThresholds,
+  now: number,
+): AgentUsageHeadroom {
+  const current = windows.filter((window) => !hasReset(window, now));
+  if (current.some((window) => window.usedPercent >= 100)) return "exhausted";
+  const low = current.some(
+    (window) =>
+      window.usedPercent >=
+      (window.kind === "session" ? thresholds.sessionLowPercent : thresholds.weeklyLowPercent),
+  );
+  return low ? "low" : "ok";
+}
+
+function agentLimitsStatus(limits: ServerProviderUsageLimits, now: number): AgentUsageLimitsStatus {
+  if (limits.unavailable) return { unavailable: limits.unavailable.reason };
+  const stale =
+    now - Date.parse(limits.checkedAt) > AGENT_LIMITS_STALE_AFTER_MS ||
+    limits.windows.some((window) => hasReset(window, now));
+  return stale ? "stale" : "ok";
+}
+
+/** Labels are user-written and may name the account; agents never get an email. */
+export function agentSafeLabel(text: string | undefined): string | undefined {
+  const trimmed = text?.trim();
+  return trimmed && !trimmed.includes("@") ? trimmed : undefined;
+}
+
+/** Drops a parenthetical such as Cursor's "(<api key name>)", which names a credential. */
+function agentSafePlan(label: string | undefined): string | undefined {
+  return agentSafeLabel(label?.replace(/\s*\([^)]*\)\s*$/, ""));
+}
+
+/**
+ * The one headroom verdict agents and the Switch account list see. Unknown
+ * when the last check failed; an account that reports no limits (per-token
+ * billing, or a provider that publishes none) has no wall to hit.
+ */
+export function agentHeadroom(
+  provider: ServerProvider,
+  thresholds: UsageHeadroomThresholds,
+  now: number,
+): AgentUsageHeadroom {
+  const limits = provider.usageLimits;
+  if (limits?.unavailable?.reason === "probeFailed") return "unknown";
+  return usageHeadroom(limits?.unavailable ? [] : (limits?.windows ?? []), thresholds, now);
+}
+
+/**
+ * The agent-safe view of one instance's limits. An instance with no snapshot
+ * reports `unsupported`: Pi (history only), ACP registry agents, and Muse,
+ * whose windows arrive only inside a turn (`usage/changed`, used for limit
+ * recovery) and which has no probe to publish them between turns.
+ */
+export function projectAgentUsageLimits(
+  provider: ServerProvider,
+  thresholds: UsageHeadroomThresholds,
+  now: number,
+): AgentUsageLimits {
+  const limits: ServerProviderUsageLimits = provider.usageLimits ?? {
+    checkedAt: provider.checkedAt,
+    windows: [],
+    unavailable: { reason: "unsupported" },
+  };
+  const plan = agentSafePlan(provider.auth.label);
+  return {
+    instanceId: provider.instanceId,
+    driver: provider.driver,
+    label: agentSafeLabel(provider.displayName) ?? provider.instanceId,
+    ...(plan ? { plan } : {}),
+    checkedAt: limits.checkedAt,
+    windows: limits.windows.map((window) => ({
+      kind: window.kind,
+      label: window.label,
+      // Floored so the shown number never contradicts the headroom verdict.
+      usedPercent: Math.floor(window.usedPercent),
+      ...(window.resetsAt ? { resetsAt: window.resetsAt } : {}),
+    })),
+    status: agentLimitsStatus(limits, now),
+    headroom: agentHeadroom(provider, thresholds, now),
+  };
 }

@@ -193,7 +193,7 @@ provider selection model-visible without allowing a request that cannot run.
 
 ## Tool Surface
 
-The server exposes eleven orchestration tools.
+The server exposes these orchestration tools.
 
 ### `orchestrator_capabilities`
 
@@ -206,10 +206,25 @@ Returns:
 - the role presets in effect for the caller's project: id, label, model target,
   `runsIn`, the roles it may delegate to (advisory), and why one cannot start
   here. Instructions stay on the server; and
-- feature flags for polling, cancellation, and batch thread creation.
+- feature flags for polling, cancellation, batch thread creation, and
+  `t3_usage_limits`; and
+- each provider's `headroom`: `ok`, `low`, `unknown` (its last limit check
+  failed), or `exhausted`.
 
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
+
+### `t3_usage_limits`
+
+Read-only. Returns one row per enabled provider instance, optionally filtered by
+`driver` or `instanceId`: label, plan, `checkedAt`, windows (kind, label, used
+percent, reset time), `status` (`ok`, `stale`, or `unavailable` with
+`unsupported` or `probeFailed`), and `headroom` (`ok`, `low`, `unknown` for
+`probeFailed`, `exhausted`; `ok` for `unsupported`). It projects the same snapshots
+as Usage → Limits and never carries email, credential fingerprints, hub
+details, or reset-credit ids. It starts no probe unless `refresh: true`, which
+re-checks only instances not checked or attempted in the last five minutes. Headroom thresholds
+come from the server's `usageHeadroom` setting.
 
 ### `delegate_task`
 

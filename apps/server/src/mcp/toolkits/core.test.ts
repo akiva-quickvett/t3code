@@ -46,6 +46,7 @@ import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as SecretRequests from "../../secrets/SecretRequests.ts";
 import * as ScheduledTaskService from "../../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../../serverSettings.ts";
+import * as UsageService from "../../usage/UsageService.ts";
 import * as McpHttpServer from "../McpHttpServer.ts";
 import * as McpInvocationContext from "../McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "../McpToolAccess.testkit.ts";
@@ -63,10 +64,15 @@ import { ThreadToolkit } from "./thread/tools.ts";
 import { WorktreeToolkit } from "./worktree/tools.ts";
 import { DeviceToolkit } from "./device/tools.ts";
 
-const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
-  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
-  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
-);
+const layerOrchestratorToolkitWithUsage = (
+  usage: Layer.Layer<UsageService.UsageService> = Layer.mock(UsageService.UsageService)({}),
+) =>
+  McpHttpServer.layerOrchestratorToolkit.pipe(
+    Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+    Layer.provide(usage),
+  );
+const layerOrchestratorToolkit = layerOrchestratorToolkitWithUsage();
 
 // Effect returns a declared tool failure as `isError` with its encoded payload
 // as JSON text, never as `structuredContent`.
@@ -1005,3 +1011,65 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
     ),
   ),
 );
+
+it.effect("t3_usage_limits reads limits for orchestration callers only", () => {
+  const reads: Array<unknown> = [];
+  const row = {
+    instanceId: ProviderInstanceId.make("claude_work"),
+    driver: ProviderDriverKind.make("claudeAgent"),
+    label: "Work",
+    checkedAt: "2026-10-01T00:00:00.000Z",
+    windows: [{ kind: "session" as const, label: "Session", usedPercent: 90 }],
+    status: "ok" as const,
+    headroom: "low" as const,
+  };
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const call = (args: Record<string, unknown>, invocation = scope) =>
+      server
+        .callTool({ name: "t3_usage_limits", arguments: args })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+
+    const denied = yield* call({}, { ...scope, capabilities: new Set(["worktree"]) });
+    expect(declaredFailure(denied)).toMatchObject({ code: "capability_denied" });
+    expect(reads).toEqual([]);
+
+    const filtered = yield* call({
+      driver: "claudeAgent",
+      instanceId: "claude_work",
+      refresh: true,
+    });
+    expect(filtered.isError).toBe(false);
+    expect(filtered.structuredContent).toEqual({ instances: [row] });
+    expect(reads).toEqual([{ driver: "claudeAgent", instanceId: "claude_work", refresh: true }]);
+
+    const forClient = yield* call({}, clientScope("auto"));
+    expect(forClient.isError).toBe(false);
+    expect(reads).toHaveLength(2);
+  }).pipe(
+    Effect.provide(
+      layerOrchestratorToolkitWithUsage(
+        Layer.mock(UsageService.UsageService)({
+          readLimitsForAgent: (input) =>
+            Effect.sync(() => {
+              reads.push(input);
+              return { instances: [row] };
+            }),
+        }),
+      ).pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+        Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+        Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+        Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+        Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+      ),
+    ),
+  );
+});

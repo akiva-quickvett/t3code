@@ -42,6 +42,7 @@ import {
   ProviderOptionSelectionValue,
 } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { AgentUsageHeadroom } from "./providerUsageLimits.ts";
 import { AgentRolePresetRunsIn, ThreadRolePreset } from "./agentRole.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
@@ -537,6 +538,8 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
   canRunChildTask: Schema.Boolean,
   canRunCrossProviderChildTask: Schema.Boolean,
   constraints: Schema.Array(Schema.String),
+  /** Missing on older servers; see t3_usage_limits. */
+  headroom: Schema.optional(AgentUsageHeadroom),
 });
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
 
@@ -575,6 +578,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     incrementalThreadRead: Schema.Boolean,
     scheduledTasks: Schema.Boolean,
     maxBatchThreads: Schema.Number,
+    /** t3_usage_limits. Missing on older servers. */
+    usageLimits: Schema.optional(Schema.Boolean),
   }),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;
