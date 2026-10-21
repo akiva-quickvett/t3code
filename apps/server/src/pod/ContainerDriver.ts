@@ -1,7 +1,9 @@
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import * as ProcessRunner from "../processRunner.ts";
 
@@ -34,10 +36,11 @@ export interface PodContainerSpec {
   readonly workdir?: string;
   readonly command: ReadonlyArray<string>;
   /**
-   * A name that resolves, inside the container, to the host's address on its
-   * bridge network. Containers that join this one's network share its hosts file.
+   * A name that resolves, inside the container, to the host: its address on
+   * the container's bridge network (`gateway`), or Docker's own `host-gateway`.
+   * Containers that join this one's network share its hosts file.
    */
-  readonly hostAlias?: string;
+  readonly hostAlias?: { readonly name: string; readonly address: "gateway" | "host-gateway" };
 }
 
 export interface PodNetworkInfo {
@@ -121,6 +124,8 @@ export const ContainerDriverOperation = Schema.Literals([
   "logs",
   "inspect",
   "connect",
+  "image",
+  "info",
 ]);
 export type ContainerDriverOperation = typeof ContainerDriverOperation.Type;
 
@@ -151,6 +156,14 @@ export interface ContainerHost {
     ContainerDriverError
   >;
   readonly ensureNetwork: (name: string) => Effect.Effect<void, ContainerDriverError>;
+  /** `docker info`'s OperatingSystem, read once; null while the daemon cannot be asked. */
+  readonly engineOperatingSystem: Effect.Effect<string | null>;
+  /** Builds the image from `dockerfile` unless the host has it; true when it built. */
+  readonly ensureImage: (input: {
+    readonly tag: string;
+    readonly dockerfile: string;
+    readonly labels: Readonly<Record<string, string>>;
+  }) => Effect.Effect<boolean, ContainerDriverError>;
   /** The network's IPv4 subnet and gateway; fails when it has none. */
   readonly inspectNetwork: (name: string) => Effect.Effect<PodNetworkInfo, ContainerDriverError>;
   readonly createVolume: (input: {
@@ -197,6 +210,10 @@ export class ContainerDriver extends Context.Service<
 >()("t3/pod/ContainerDriver") {}
 
 const DOCKER_TIMEOUT_MS = 120_000;
+/** A first build pulls its base images and installs the provider CLIs. */
+const IMAGE_BUILD_TIMEOUT_MS = 20 * 60_000;
+const ENGINE_INFO_TIMEOUT_MS = 5_000;
+const ENGINE_INFO_RETRY_MS = 30_000;
 const DOCKER_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 const firstLine = (text: string) =>
@@ -205,6 +222,16 @@ const firstLine = (text: string) =>
     .map((line) => line.trim())
     .find((line) => line.length > 0)
     ?.slice(0, DAEMON_MESSAGE_MAX_LENGTH) ?? null;
+
+/** A build prints its progress on stderr too; its reason is the last `ERROR:` line. */
+const buildFailureLine = (text: string) => {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const reason = lines.findLast((line) => /^(#\d+ )?ERROR\b/i.test(line)) ?? lines.at(-1);
+  return reason?.slice(0, DAEMON_MESSAGE_MAX_LENGTH) ?? null;
+};
 
 const isMissingObject = (stderr: string) => /no such (container|volume|object)/i.test(stderr);
 
@@ -370,12 +397,14 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
       readonly env?: Readonly<Record<string, string>>;
       readonly timeoutMs?: number;
       readonly allowMissing?: boolean;
+      readonly stdin?: string;
     },
   ) =>
     runner
       .run({
         command: "docker",
         args,
+        ...(options?.stdin === undefined ? {} : { stdin: options.stdin }),
         env: { ...options?.env, ...hostEnv },
         timeout: options?.timeoutMs ?? DOCKER_TIMEOUT_MS,
         maxOutputBytes: DOCKER_OUTPUT_BYTES,
@@ -404,7 +433,8 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
             new ContainerDriverError({
               operation,
               exitCode: output.code,
-              daemonMessage: firstLine(output.stderr),
+              daemonMessage:
+                operation === "image" ? buildFailureLine(output.stderr) : firstLine(output.stderr),
             }),
           );
         }),
@@ -509,12 +539,15 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
           ? []
           : [
               "--add-host",
-              `${spec.hostAlias}:${
-                (yield* inspectNetwork(spec.network.name).pipe(
-                  Effect.mapError(
-                    (error) => new ContainerDriverError({ ...error, operation: "createContainer" }),
-                  ),
-                )).gateway
+              `${spec.hostAlias.name}:${
+                spec.hostAlias.address === "host-gateway"
+                  ? "host-gateway"
+                  : (yield* inspectNetwork(spec.network.name).pipe(
+                      Effect.mapError(
+                        (error) =>
+                          new ContainerDriverError({ ...error, operation: "createContainer" }),
+                      ),
+                    )).gateway
               }`,
             ];
       const args = [
@@ -563,9 +596,74 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
     };
   };
 
+  // A daemon that cannot answer is asked again only after a while: the
+  // listener asks for every pod on every pod event. Nothing is created on a
+  // daemon that cannot answer, so a guess made meanwhile never sticks.
+  let operatingSystem: string | undefined;
+  let unreadableUntil = 0;
+  const engineOperatingSystem: ContainerHost["engineOperatingSystem"] = Effect.gen(function* () {
+    if (operatingSystem !== undefined) return operatingSystem;
+    const now = yield* Clock.currentTimeMillis;
+    if (now < unreadableUntil) return null;
+    return yield* run("info", ["info", "--format", "{{.OperatingSystem}}"], {
+      timeoutMs: ENGINE_INFO_TIMEOUT_MS,
+    }).pipe(
+      Effect.map((stdout) => {
+        operatingSystem = stdout.trim();
+        return operatingSystem;
+      }),
+      Effect.catch(() =>
+        Effect.sync(() => {
+          unreadableUntil = now + ENGINE_INFO_RETRY_MS;
+          return null;
+        }),
+      ),
+    );
+  });
+
+  /**
+   * Earlier builds of the same image, each as large as this one. Docker
+   * refuses to remove one a container still uses, even a stopped one, so a pod
+   * keeps its image until it is recreated, and a later build removes it then.
+   */
+  const removeEarlierBuilds = (tag: string) =>
+    run("image", [
+      "image",
+      "ls",
+      "--filter",
+      `reference=${tag.slice(0, tag.lastIndexOf(":"))}`,
+      "--format",
+      "{{.Repository}}:{{.Tag}}",
+    ]).pipe(
+      Effect.flatMap((stdout) =>
+        Effect.forEach(
+          lines(stdout).filter((other) => other !== tag),
+          (other) => run("image", ["image", "rm", other]).pipe(Effect.ignore),
+          { discard: true },
+        ),
+      ),
+      Effect.ignore,
+    );
+
+  // Pods starting together build once: the next one finds the image.
+  const imageBuilds = Semaphore.makeUnsafe(1);
+  const ensureImage: ContainerHost["ensureImage"] = ({ tag, dockerfile, labels }) =>
+    run("image", ["image", "inspect", "--format", "{{.Id}}", tag]).pipe(
+      Effect.as(false),
+      Effect.catch(() =>
+        run("image", ["build", "--tag", tag, ...labelArguments(labels), "-"], {
+          stdin: dockerfile,
+          timeoutMs: IMAGE_BUILD_TIMEOUT_MS,
+        }).pipe(Effect.andThen(removeEarlierBuilds(tag)), Effect.as(true)),
+      ),
+      imageBuilds.withPermits(1),
+    );
+
   return {
     list,
     ensureNetwork,
+    engineOperatingSystem,
+    ensureImage,
     inspectNetwork,
     createVolume: ({ name, labels }) =>
       run("createVolume", ["volume", "create", ...labelArguments(labels), name]).pipe(

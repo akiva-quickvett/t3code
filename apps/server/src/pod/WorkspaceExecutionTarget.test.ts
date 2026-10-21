@@ -94,6 +94,14 @@ describe("WorkspaceExecutionTarget", () => {
       });
       expect(launch.env).toEqual({ TERM: "xterm" });
       expect(launch.args).toContain(`t3-envtest-${podId}-agent`);
+      // A provider instance's own env, as Pi, Grok and ACP Registry get it, keeps a key the user set.
+      const instance = targets.launch(target, {
+        command: ["pi"],
+        env: { ANTHROPIC_API_KEY: "sk-ant-instance" },
+        tty: false,
+        instanceCredentials: true,
+      });
+      expect(instance.env).toEqual({ ANTHROPIC_API_KEY: "sk-ant-instance" });
     }).pipe(Effect.provide(layer)),
   );
 });

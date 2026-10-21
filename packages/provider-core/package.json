@@ -95,6 +95,10 @@
       "types": "./src/server/pathExpansion.ts",
       "import": "./src/server/pathExpansion.ts"
     },
+    "./server/podProcess": {
+      "types": "./src/server/podProcess.ts",
+      "import": "./src/server/podProcess.ts"
+    },
     "./server/processGroup": {
       "types": "./src/server/processGroup.ts",
       "import": "./src/server/processGroup.ts"

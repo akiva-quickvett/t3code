@@ -63,13 +63,21 @@ const plan = planPod({
   gitCommonDir: "/home/dev/repo/.git",
   homeDirectory: "/home/dev",
   user: { uid: 1000, gid: 1000 },
-  providerMounts: { configDirs: ["/home/dev/.claude"], codexHomes: [], binDirs: [] },
+  providerMounts: {
+    configDirs: ["/home/dev/.claude"],
+    homeSeeds: [],
+    codexHomes: [],
+    binDirs: [],
+    toolDirs: [],
+  },
   gitConfigPath: null,
   ghConfigDir: null,
   seeds: null,
   podEnv: { DATABASE_URL: "postgres://secret@db" },
   dns: [],
   proxyCaRoot: null,
+  filesDir: null,
+  mcpTransport: "gateway",
   publish: [{ hostIp: "127.0.0.1", hostPort: 20000, containerPort: 3000 }],
 });
 
@@ -98,6 +106,22 @@ describe("Docker container driver", () => {
           "type=bind,src=/home/dev/repo/.git,dst=/home/dev/repo/.git",
           "type=bind,src=/home/dev/.claude,dst=/home/dev/.claude",
         ]);
+      }),
+    ),
+  );
+
+  it.effect("maps the host alias to Docker's host-gateway without asking for the network", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { runs, host } = recordingDriver();
+        yield* (yield* host).createContainer({
+          ...plan.dind,
+          hostAlias: { name: "host.docker.internal", address: "host-gateway" },
+        });
+        expect(runs.map((run) => run.args[0])).toEqual(["create"]);
+        expect(runs[0]?.args).toEqual(
+          expect.arrayContaining(["--add-host", "host.docker.internal:host-gateway"]),
+        );
       }),
     ),
   );
@@ -182,6 +206,74 @@ describe("Docker container driver", () => {
           mounts: [{ source: "/home/dev/routes", destination: "/routes" }],
         });
         expect(yield* docker.inspect("gone")).toBeNull();
+      }),
+    ),
+  );
+
+  it.effect("builds T3's image from its Dockerfile only when the host lacks it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let present = false;
+        const { runs, host } = recordingDriver((input) =>
+          input.args[0] === "image" && input.args[1] === "inspect" && !present
+            ? { code: 1, stderr: "Error: No such image: t3.invalid/pod-agent:1" }
+            : input.args[1] === "ls"
+              ? { stdout: "t3.invalid/pod-agent:0\nt3.invalid/pod-agent:1\n" }
+              : {},
+        );
+        const driver = yield* host;
+        const image = { tag: "t3.invalid/pod-agent:1", dockerfile: "FROM scratch\n", labels: {} };
+        expect(yield* driver.ensureImage(image)).toBe(true);
+        const build = runs.find((run) => run.args[0] === "build");
+        expect(build?.args).toEqual(["build", "--tag", "t3.invalid/pod-agent:1", "-"]);
+        expect(build?.stdin).toBe("FROM scratch\n");
+        // Then the earlier builds go; Docker keeps those a container still uses.
+        expect(runs.filter((run) => run.args[1] === "rm").map((run) => run.args[2])).toEqual([
+          "t3.invalid/pod-agent:0",
+        ]);
+        present = true;
+        runs.length = 0;
+        expect(yield* driver.ensureImage(image)).toBe(false);
+        expect(runs.map((run) => run.args[0])).toEqual(["image"]);
+      }),
+    ),
+  );
+
+  it.effect("builds once for pods that start together, and names why a build failed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let built = 0;
+        const { host } = recordingDriver((input) => {
+          if (input.args[0] === "image")
+            return built > 0 ? {} : { code: 1, stderr: "Error: No such image" };
+          built += 1;
+          return {};
+        });
+        const driver = yield* host;
+        const image = { tag: "t3.invalid/pod-agent:abc", dockerfile: "FROM scratch\n", labels: {} };
+        const results = yield* Effect.all([driver.ensureImage(image), driver.ensureImage(image)], {
+          concurrency: "unbounded",
+        });
+        expect(built).toBe(1);
+        expect([...results].sort()).toEqual([false, true]);
+
+        const offline = recordingDriver((input) =>
+          input.args[0] === "build"
+            ? {
+                code: 1,
+                stderr: [
+                  '#0 building with "default" instance using docker driver',
+                  "#3 [internal] load metadata for docker.io/library/node",
+                  "#3 ERROR: dial tcp: lookup registry-1.docker.io: no such host",
+                  "ERROR: failed to solve: node: failed to resolve source metadata",
+                ].join("\n"),
+              }
+            : { code: 1, stderr: "Error: No such image" },
+        );
+        const failed = yield* (yield* offline.host).ensureImage(image).pipe(Effect.flip);
+        expect(failed.daemonMessage).toBe(
+          "ERROR: failed to solve: node: failed to resolve source metadata",
+        );
       }),
     ),
   );

@@ -32,7 +32,11 @@ export interface FakeCall {
 export const makeFakeContainerDriver = () => {
   const hosts = new Map<
     string,
-    { containers: Map<string, FakeContainer>; volumes: Map<string, Record<string, string>> }
+    {
+      containers: Map<string, FakeContainer>;
+      volumes: Map<string, Record<string, string>>;
+      images: Set<string>;
+    }
   >();
   const calls: Array<FakeCall> = [];
   let nextId = 1;
@@ -41,6 +45,7 @@ export const makeFakeContainerDriver = () => {
   let execExitCode: (call: FakeCall) => number | null = () => 0;
   let podNetwork: PodNetworkInfo = { subnet: "172.18.0.0/16", gateway: "172.18.0.1" };
   let containerLogs: (name: string) => string = () => "";
+  let engineOperatingSystem: string | null = "Arch Linux";
   let execOutput: (call: FakeCall) => string = () => "";
   /** Containers other than the pod's, such as a proxy, as `docker inspect` reports them. */
   const inspections = new Map<string, ContainerInspection>();
@@ -48,7 +53,11 @@ export const makeFakeContainerDriver = () => {
   const hostState = (host: string) => {
     const existing = hosts.get(host);
     if (existing !== undefined) return existing;
-    const created = { containers: new Map<string, FakeContainer>(), volumes: new Map() };
+    const created = {
+      containers: new Map<string, FakeContainer>(),
+      volumes: new Map(),
+      images: new Set<string>(),
+    };
     hosts.set(host, created);
     return created;
   };
@@ -111,6 +120,15 @@ export const makeFakeContainerDriver = () => {
           })),
         ),
       ensureNetwork: (name) => record("network", name).pipe(Effect.asVoid),
+      engineOperatingSystem: Effect.sync(() => engineOperatingSystem),
+      ensureImage: ({ tag }) =>
+        record("image", tag).pipe(
+          Effect.map(() => {
+            const built = !state.images.has(tag);
+            state.images.add(tag);
+            return built;
+          }),
+        ),
       inspectNetwork: (name) => record("network", name).pipe(Effect.map(() => podNetwork)),
       createVolume: ({ name, labels }) =>
         record("createVolume", name).pipe(
@@ -219,6 +237,10 @@ export const makeFakeContainerDriver = () => {
     /** What every pod network reports as its subnet and gateway. */
     setNetwork: (info: PodNetworkInfo) => {
       podNetwork = info;
+    },
+    /** `docker info`'s OperatingSystem, such as "Docker Desktop" for an engine in a VM. */
+    setEngineOperatingSystem: (value: string | null) => {
+      engineOperatingSystem = value;
     },
     /** What a container that is not a pod's, such as the hostname proxy, inspects as. */
     seedInspection: (name: string, inspection: ContainerInspection | null) => {

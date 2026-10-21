@@ -20,6 +20,7 @@ import {
   POD_NETWORK_LABEL,
   POD_ROLE_LABEL,
 } from "../pod/PodContainerPlan.ts";
+import { POD_MCP_LOOPBACK_ADDRESS, podMcpTransportFor } from "../pod/PodMcpTransport.ts";
 import * as PodRuntimeStore from "../pod/PodRuntimeStore.ts";
 import type { PodExecutionTarget } from "../pod/WorkspaceExecutionTarget.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -108,13 +109,26 @@ const reply = (response: NodeHttp.ServerResponse, status: number, text: string) 
   response.end(text);
 };
 
+/**
+ * A loopback listener is reachable from every process on this machine,
+ * browsers included, so it takes only requests that name the pods' alias:
+ * a page that rebinds its own name to 127.0.0.1 still sends that name.
+ */
+export const namesPodHostAlias = (host: string | undefined) =>
+  host !== undefined &&
+  URL.canParse(`http://${host}`) &&
+  new URL(`http://${host}`).hostname === POD_HOST_ALIAS;
+
 export const makePodRequestHandler =
   (input: {
     readonly fromPodNetwork: (remoteAddress: string | undefined) => boolean;
+    readonly admitsHost?: (host: string | undefined) => boolean;
     readonly dispatch: McpRequestDispatch["Service"]["dispatch"];
   }) =>
   (request: NodeHttp.IncomingMessage, response: NodeHttp.ServerResponse) => {
     if (!input.fromPodNetwork(request.socket.remoteAddress))
+      return reply(response, 403, "Forbidden");
+    if (input.admitsHost !== undefined && !input.admitsHost(request.headers.host))
       return reply(response, 403, "Forbidden");
     if (!isPodMcpRoute(request.method, request.url)) return reply(response, 404, "Not Found");
     if (presentsClientToken(request.headers.authorization))
@@ -133,6 +147,10 @@ interface OpenListener extends Listener {
 }
 
 const listenerKey = (dockerHost: string, network: string) => `${dockerHost}\u0000${network}`;
+const LOOPBACK_KEY = "loopback";
+
+const isLoopback = (address: string) =>
+  address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 
 /**
  * The same port on every pod network, so one host firewall rule admits pods
@@ -236,6 +254,10 @@ const make = (port: number) =>
           createdOn.delete(podId);
           return undefined;
         }
+        const transport = yield* podMcpTransportFor(driver.forHost(record.dockerHost));
+        // One loopback listener serves every pod of engines in a VM.
+        if (transport === "loopback")
+          return { key: LOOPBACK_KEY, dockerHost: record.dockerHost, network: "", transport };
         // Only a running pod's daemon is the one its agents use.
         const network = yield* networkOf(
           podId,
@@ -247,6 +269,7 @@ const make = (port: number) =>
           key: listenerKey(record.dockerHost, network),
           dockerHost: record.dockerHost,
           network,
+          transport,
         };
       });
 
@@ -263,6 +286,37 @@ const make = (port: number) =>
             return yield* new PodMcpListenerError({ detail: "The pod no longer exists." });
           const existing = listeners.get(owner.key);
           if (existing !== undefined) return existing;
+          if (owner.transport === "loopback") {
+            const listener = yield* listen(
+              POD_MCP_LOOPBACK_ADDRESS,
+              port,
+              makePodRequestHandler({
+                // Every peer is loopback; the bearer token tells sessions apart.
+                fromPodNetwork: (remoteAddress) =>
+                  remoteAddress !== undefined && isLoopback(remoteAddress),
+                admitsHost: namesPodHostAlias,
+                dispatch,
+              }),
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new PodMcpListenerError({
+                    detail: `Could not listen on ${POD_MCP_LOOPBACK_ADDRESS}: ${cause.message}`,
+                    cause,
+                  }),
+              ),
+            );
+            listeners.set(owner.key, {
+              ...listener,
+              network: owner.network,
+              address: POD_MCP_LOOPBACK_ADDRESS,
+            });
+            yield* publish;
+            yield* Effect.logInfo("pod MCP listener started on loopback for an engine in a VM", {
+              port: listener.port,
+            });
+            return listener;
+          }
           const network = yield* driver
             .forHost(owner.dockerHost)
             .inspectNetwork(owner.network)

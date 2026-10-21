@@ -1,6 +1,7 @@
 import type { PodRuntimeId } from "@t3tools/contracts";
 
 import type { PodContainerMount, PodContainerSpec, PodPublishedPort } from "./ContainerDriver.ts";
+import type { PodMcpTransport } from "./PodMcpTransport.ts";
 
 export const POD_LABEL = "t3.pod";
 export const POD_ENVIRONMENT_LABEL = "t3.environment";
@@ -45,10 +46,19 @@ export const POD_STRIPPED_ENV_KEYS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TO
 export interface PodProviderMounts {
   /** Provider config dirs with their logins, mounted read-write as directories. */
   readonly configDirs: ReadonlyArray<string>;
+  /**
+   * Files of the host home that a provider replaces by rename, such as the
+   * default layout's `~/.claude.json`: a bind would go stale on the first
+   * host write, so each start copies them into the pod's own home, and
+   * nothing is written back.
+   */
+  readonly homeSeeds: ReadonlyArray<string>;
   /** Codex's shared home and, with an auth overlay, its shadow home. */
   readonly codexHomes: ReadonlyArray<string>;
   /** Real directories of provider binaries, mounted read-only at pod-private paths. */
   readonly binDirs: ReadonlyArray<string>;
+  /** Managed installs T3 keeps for an agent, read-only at their own paths, off PATH. */
+  readonly toolDirs: ReadonlyArray<string>;
 }
 
 export interface PodPlanInput {
@@ -74,12 +84,22 @@ export interface PodPlanInput {
   readonly dns: ReadonlyArray<string>;
   /** The hostname proxy's CA root on the host, which the agent container then trusts. */
   readonly proxyCaRoot: string | null;
+  /** Files T3 writes for the pod's agents, such as Pi's extension, read-only at the same path. */
+  readonly filesDir: string | null;
+  /** How the pod's agents reach T3's MCP listener, which decides who maps the host alias. */
+  readonly mcpTransport: PodMcpTransport;
 }
 
 export interface PodPlan {
   readonly volume: { readonly name: string; readonly labels: Readonly<Record<string, string>> };
   readonly dind: PodContainerSpec;
   readonly agent: PodContainerSpec;
+  /** Host home files to copy into the agent's home: the host copies `host` to `snapshot`, in the pod's files dir. */
+  readonly homeSeeds: ReadonlyArray<{
+    readonly host: string;
+    readonly snapshot: string;
+    readonly target: string;
+  }>;
 }
 
 /**
@@ -177,8 +197,15 @@ export const planPod = (input: PodPlanInput): PodPlan => {
       ...input.dns.flatMap((server) => ["--dns", server]),
     ],
     // The agent container shares this network namespace and its hosts file;
-    // the alias is how its agents reach T3's pod-facing MCP listener.
-    hostAlias: POD_HOST_ALIAS,
+    // the alias is how its agents reach T3's pod-facing MCP listener. An
+    // engine in a VM answers the name itself, through its own DNS, which
+    // resolvers set above replace; Docker's `host-gateway` is the same host
+    // address there.
+    ...(input.mcpTransport === "gateway"
+      ? { hostAlias: { name: POD_HOST_ALIAS, address: "gateway" as const } }
+      : input.dns.length > 0
+        ? { hostAlias: { name: POD_HOST_ALIAS, address: "host-gateway" as const } }
+        : {}),
   };
 
   // Pod-private targets after the image's own directories, so a host binary
@@ -211,6 +238,10 @@ export const planPod = (input: PodPlanInput): PodPlan => {
         target: bin.target,
         readOnly: true,
       })),
+      // At their own paths: an install refers to itself by absolute path, and
+      // nothing of the image lives under the T3 home.
+      ...input.providerMounts.toolDirs.map((dir) => bind(dir, true)),
+      ...(input.filesDir === null ? [] : [bind(input.filesDir, true)]),
       ...(input.gitConfigPath === null ? [] : [bind(input.gitConfigPath, true)]),
       ...(input.ghConfigDir === null ? [] : [bind(input.ghConfigDir, true)]),
       ...(input.proxyCaRoot === null
@@ -239,5 +270,16 @@ export const planPod = (input: PodPlanInput): PodPlan => {
     command: ["sleep", "infinity"],
   };
 
-  return { volume: { name: names.volume, labels: labels("volume") }, dind, agent };
+  const homeSeeds =
+    input.filesDir === null
+      ? []
+      : input.providerMounts.homeSeeds
+          .filter((file) => file.startsWith(`${input.homeDirectory}/`))
+          .map((file) => ({
+            host: file,
+            snapshot: `${input.filesDir}/home/${file.slice(input.homeDirectory.length + 1)}`,
+            target: file,
+          }));
+
+  return { volume: { name: names.volume, labels: labels("volume") }, dind, agent, homeSeeds };
 };

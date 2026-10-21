@@ -22,6 +22,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
@@ -35,6 +36,11 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import {
+  type PodProcessSpec,
+  type ProviderPod,
+  ProviderPodProcesses,
+} from "@t3tools/provider-core/server/podProcess";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { handoffBudget } from "@t3tools/provider-core/server/handoffBudget";
@@ -1363,6 +1369,87 @@ describe("PiAdapterV2", () => {
       assert.equal(spawn.env.T3_MCP_URL, "http://127.0.0.1:43123/mcp");
       assert.equal(spawn.env.T3_MCP_BEARER_TOKEN, "secret-pi-token");
       assert.equal(spawn.env.T3_PI_RUNTIME_MODE, "full-access");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("runs Pi in a pod with only its own env and MCP credential, stopped there", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const fileDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-pi-pod-files-" });
+      yield* (yield* McpProviderSessions.McpProviderSessions).set({
+        environmentId: EnvironmentId.make("environment-pi-pod"),
+        threadId: THREAD_ID,
+        providerSessionId: "mcp-session-pi-pod",
+        providerInstanceId: PI_INSTANCE_ID,
+        endpoint: "http://host.docker.internal:17773/mcp",
+        hostEndpoint: "http://127.0.0.1:43123/mcp",
+        authorizationHeader: "Bearer pod-pi-token",
+        browserToolsAvailable: true,
+      });
+      const launches: Array<PodProcessSpec> = [];
+      let stops = 0;
+      const pod: ProviderPod = {
+        podId: "pod-pi",
+        fileDir,
+        hostBinariesRun: true,
+        launch: (spec) =>
+          Effect.sync(() => {
+            launches.push(spec);
+            return {
+              command: "docker",
+              args: ["exec", "-i", "t3-agent", spec.command, ...spec.args],
+              env: {},
+              stop: Effect.sync(() => {
+                stops += 1;
+              }),
+            };
+          }),
+      };
+      const fake = yield* makeFakePi;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const adapter = yield* makePiAdapterV2({
+            instanceId: PI_INSTANCE_ID,
+            settings: { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
+            environment: { HOST_ONLY: "server", INSTANCE_KEY: "instance" },
+            podEnvironment: { INSTANCE_KEY: "instance" },
+          }).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, fake.spawner),
+            Effect.provideService(ProviderPodProcesses, {
+              forCwd: (cwd) => Effect.succeed(cwd === "/work/pod" ? pod : undefined),
+            }),
+          );
+          yield* adapter.openSession({
+            threadId: THREAD_ID,
+            providerSessionId: SESSION_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/work/pod",
+            }),
+          });
+        }),
+      );
+
+      assert.lengthOf(launches, 1);
+      const launch = launches[0]!;
+      assert.equal(launch.command, "pi");
+      assert.equal(launch.cwd, "/work/pod");
+      assert.equal(launch.env.T3_MCP_URL, "http://host.docker.internal:17773/mcp");
+      assert.equal(launch.env.T3_MCP_BEARER_TOKEN, "pod-pi-token");
+      assert.equal(launch.env.INSTANCE_KEY, "instance");
+      assert.isUndefined(launch.env.HOST_ONLY);
+      // The extension is written where the pod sees it, and Pi is pointed at it.
+      const extension = launch.args[launch.args.indexOf("--extension") + 1]!;
+      assert.isTrue(extension.startsWith(fileDir));
+      // The pod's files dir is seen container-wide, so the file must not carry the credential.
+      const source = yield* fileSystem.readFileString(extension);
+      assert.notInclude(source, "pod-pi-token");
+      assert.notInclude(source, "host.docker.internal");
+      // The host spawns only the docker CLI, and the session's end stops Pi in the pod.
+      assert.deepEqual(fake.lastSpawn().args.slice(0, 4), ["exec", "-i", "t3-agent", "pi"]);
+      assert.equal(stops, 1);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

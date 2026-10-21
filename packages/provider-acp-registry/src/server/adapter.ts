@@ -62,6 +62,8 @@ export interface AcpRegistryAdapterV2Options {
   readonly instanceId: Parameters<typeof makeAcpAdapterV2>[0]["instanceId"];
   readonly settings: AcpRegistrySettings;
   readonly environment: NodeJS.ProcessEnv;
+  /** The instance's own variables: all the agent inherits in a pod, where the server's env stays out. */
+  readonly podEnvironment?: NodeJS.ProcessEnv;
   readonly selfInvocation: SelfInvocation;
   readonly nativeLogging?: Parameters<typeof makeAcpAdapterV2>[0]["nativeLogging"];
   readonly makeRuntime?: (
@@ -134,6 +136,18 @@ function makeAcpRegistryRuntime(
   > =>
     Effect.gen(function* () {
       const { processEnvironment, ...runtimeInput } = input;
+      const { pod } = input;
+      const refuseInPod = (reason: string) =>
+        new EffectAcpErrors.AcpSpawnError({
+          command: options.settings.agentId || ACP_REGISTRY_PROVIDER,
+          cause: new Error(reason),
+        });
+      // Checked before resolving, which would download an install the pod cannot use.
+      if (pod !== undefined && !pod.hostBinariesRun && options.settings.source !== "local") {
+        return yield* refuseInPod(
+          "ACP Registry installs are built for this host, which cannot run them in a pod's Linux container. Use a local command the pod's image provides instead.",
+        );
+      }
       const resolved = yield* catalog
         .resolve(options.settings, input.cwd, options.environment)
         .pipe(
@@ -145,16 +159,31 @@ function makeAcpRegistryRuntime(
               }),
           ),
         );
+      if (pod !== undefined && resolved.distribution === "uvx") {
+        return yield* refuseInPod(
+          "This ACP Registry agent is a Python tool installed against this host's Python, which a pod's image does not have, so it cannot run in a pod.",
+        );
+      }
       const context = yield* Layer.build(
         AcpSessionRuntime.layer({
           ...runtimeInput,
           spawn:
-            processEnvironment === undefined
-              ? resolved.spawn
-              : {
+            pod !== undefined
+              ? {
                   ...resolved.spawn,
-                  env: { ...resolved.spawn.env, ...processEnvironment },
-                },
+                  // The host's PATH found a configured command; in the pod a bare
+                  // name is the image's, and an absolute path its mount.
+                  ...(options.settings.commandPath.trim().length > 0
+                    ? { command: options.settings.commandPath.trim() }
+                    : {}),
+                  env: { ...options.podEnvironment, ...resolved.distributionEnv },
+                }
+              : processEnvironment === undefined
+                ? resolved.spawn
+                : {
+                    ...resolved.spawn,
+                    env: { ...resolved.spawn.env, ...processEnvironment },
+                  },
           ...(options.settings.authMethodId ? { authMethodId: options.settings.authMethodId } : {}),
           customModels: readCustomModelEntries(options.settings.customModels).map(
             (entry) => entry.slug,
@@ -210,6 +239,7 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
           normalizeSessionUpdate: copilotRouting.normalizeSessionUpdate,
           extractSubagentUpdate: extractCopilotSubagentUpdate,
         }),
+    runsInPods: true,
     makeRuntime: options.makeRuntime ?? makeAcpRegistryRuntime(options, catalog),
     ...(runtimeCoordinator === undefined
       ? {}
@@ -249,6 +279,9 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
       ? {
           clientTerminals: {
             environment: options.environment,
+            ...(options.podEnvironment === undefined
+              ? {}
+              : { podEnvironment: options.podEnvironment }),
             shellCommands: true,
           },
         }
@@ -285,6 +318,7 @@ export const AcpRegistryAdapterV2Driver: ProviderAdapterDriver<
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
         environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        podEnvironment: yield* mergeProviderInstanceEnvironment(input.environment, {}),
         selfInvocation,
         nativeLogging: (threadId) =>
           makeNativeLogger({

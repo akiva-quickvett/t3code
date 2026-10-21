@@ -149,6 +149,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerSessionId,
           providerInstanceId: scope.thread.providerInstanceId,
           endpoint: request.endpoint ?? endpoint,
+          ...(request.endpoint === undefined ? {} : { hostEndpoint: endpoint }),
           authorizationHeader: `Bearer ${rawToken}`,
           browserToolsAvailable: scope.capabilities.has("preview"),
           capabilities: scope.capabilities,

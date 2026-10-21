@@ -42,6 +42,12 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import {
+  definedEnvironment,
+  podInstanceEnvironment,
+  type ProviderPod,
+  ProviderPodProcesses,
+} from "@t3tools/provider-core/server/podProcess";
 import { parsePiCompactCommand, type PiCompactCommand } from "./commands.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -188,10 +194,15 @@ const PiProviderCapabilitiesV2 = {
   },
 } satisfies OrchestrationV2ProviderCapabilities;
 
+/** Where Pi keeps its login, settings and sessions instead of `~/.pi/agent`. */
+const PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
+
 export interface PiAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: PiSettings;
   readonly environment: NodeJS.ProcessEnv;
+  /** The instance's own variables: all Pi inherits in a pod, where the server's env stays out. */
+  readonly podEnvironment?: NodeJS.ProcessEnv;
   readonly continuationRequests?: {
     readonly offer: (
       request: ProviderContinuationRequests.ProviderContinuationRequest,
@@ -425,7 +436,57 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const podProcesses = yield* ProviderPodProcesses;
   const { continuationRequests } = options;
+
+  /**
+   * Pi on the host, or through `docker exec` in the pod whose worktree `cwd`
+   * is on. The pod gets only the env named here, never the server's, and its
+   * processes are stopped there: closing the docker CLI forwards no signal.
+   */
+  const connectPi = (input: {
+    readonly pod: ProviderPod | undefined;
+    readonly args: ReadonlyArray<string>;
+    readonly cwd: string;
+    readonly env: NodeJS.ProcessEnv;
+    /** The thread whose agent scope the host process joins; a short-lived fork joins none. */
+    readonly threadId: ProviderAdapter.ProviderAdapterV2OpenSessionInput["threadId"] | null;
+  }) =>
+    Effect.gen(function* () {
+      const command = options.settings.binaryPath || "pi";
+      if (input.pod === undefined) {
+        const scoped =
+          input.threadId === null
+            ? { command, args: input.args }
+            : yield* agentScope.wrap({
+                command,
+                args: input.args,
+                name: "pi",
+                threadId: input.threadId,
+                env: input.env,
+              });
+        return yield* makePiRpcConnection({
+          command: scoped.command,
+          args: scoped.args,
+          cwd: input.cwd,
+          env: input.env,
+        });
+      }
+      const launch = yield* input.pod.launch({
+        command,
+        args: input.args,
+        cwd: input.cwd,
+        env: definedEnvironment(input.env),
+      });
+      yield* Effect.addFinalizer(() => launch.stop);
+      return yield* makePiRpcConnection({
+        command: launch.command,
+        args: launch.args,
+        cwd: undefined,
+        // The docker CLI runs with the host's environment; the container gets only the spec's.
+        env: { ...process.env, ...launch.env },
+      });
+    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
 
   const protocolError = (detail: string, payload?: unknown) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
@@ -457,37 +518,34 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               }),
           ),
         );
+      const pod = yield* podProcesses.forCwd(cwd);
       // The extension owns both the optional MCP bridge and Pi's permission
       // hook. Materialize it even when this session has no MCP credential so
-      // Supervised never silently degrades to unrestricted tool execution.
-      const extensionPath = yield* provideCacheFs(
-        materializePiT3McpExtension(host.paths.providerStatusCacheDir),
-      );
+      // Supervised never silently degrades to unrestricted tool execution. A
+      // pod's agents see only the pod's own files dir, not the server cache.
+      const extensionDir = pod === undefined ? host.paths.providerStatusCacheDir : pod.fileDir;
+      if (extensionDir === undefined) {
+        return yield* protocolError("This pod has no directory for Pi's T3 extension.");
+      }
+      const extensionPath = yield* provideCacheFs(materializePiT3McpExtension(extensionDir));
       const resolvedLaunchArgs = resolvePiLaunchArgs(options.settings.launchArgs);
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
       const launch = buildPiRpcLaunch({
         launchArgs: resolvedLaunchArgs.args,
-        environment: options.environment,
+        environment: pod === undefined ? options.environment : (options.podEnvironment ?? {}),
         mcpSession,
         extensionPath,
         runtimeMode: input.runtimePolicy.runtimeMode,
       });
-      const scopedLaunch = yield* agentScope.wrap({
-        command: options.settings.binaryPath || "pi",
+      const connection: PiRpcConnection = yield* connectPi({
+        pod,
         args: launch.args,
-        name: "pi",
-        threadId: input.threadId,
-        env: launch.env,
-      });
-      const connection: PiRpcConnection = yield* makePiRpcConnection({
-        command: scopedLaunch.command,
-        args: scopedLaunch.args,
         cwd,
         env: launch.env,
+        threadId: input.threadId,
       }).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.mapError(
           (cause) =>
             new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -2991,7 +3049,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             // switch_session/clone alone would retain the source cwd.
             const forkLaunch = buildPiRpcLaunch({
               launchArgs: resolvedLaunchArgs.args,
-              environment: options.environment,
+              environment: pod === undefined ? options.environment : (options.podEnvironment ?? {}),
               mcpSession: undefined,
               extensionPath: undefined,
               disableExtensions: true,
@@ -2999,11 +3057,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             });
             const nativeId = yield* Effect.scoped(
               Effect.gen(function* () {
-                const forkConnection = yield* makePiRpcConnection({
-                  command: options.settings.binaryPath || "pi",
+                const forkConnection = yield* connectPi({
+                  pod,
                   args: [...forkLaunch.args, "--fork", sourceFile],
                   cwd,
                   env: forkLaunch.env,
+                  threadId: null,
                 });
                 yield* Stream.fromQueue(forkConnection.events).pipe(
                   Stream.runDrain,
@@ -3026,7 +3085,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 }
                 return file;
               }),
-            ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+            );
             const now = yield* DateTime.now;
             return yield* registerThread(
               {
@@ -3241,10 +3300,19 @@ export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2Dri
     function* (input: ProviderAdapterDriverCreateInput<PiSettings>) {
       const hostEnvironment = yield* HostProcess.Environment;
       const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+      const environment = yield* mergeProviderInstanceEnvironment(
+        input.environment,
+        hostEnvironment,
+      );
       return yield* makePiAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment,
+        podEnvironment: podInstanceEnvironment(
+          yield* mergeProviderInstanceEnvironment(input.environment, {}),
+          environment,
+          [PI_AGENT_DIR_ENV],
+        ),
         continuationRequests,
       });
     },
@@ -3273,6 +3341,7 @@ const layer: Layer.Layer<ProviderAdapter.ProviderAdapterV2, never, PiAdapterV2Dr
         instanceId: PI_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_PI_SETTINGS,
         environment: hostEnvironment,
+        podEnvironment: podInstanceEnvironment({}, hostEnvironment, [PI_AGENT_DIR_ENV]),
         continuationRequests,
       });
     }),

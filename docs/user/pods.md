@@ -6,10 +6,27 @@ on that worktree runs inside the pod; Git, diffs and checkpoints stay on your ma
 
 Pods need Docker on the machine running T3 Code. They are off until you turn them on.
 
-Claude and Codex agents on a pod's worktree run in the pod too, with the same login as on your
-machine, and keep the T3 Code tools. Other providers cannot run in a pod: a thread using one is
-refused unless its role preset sets **Runs in → Host**, which runs it on your machine against the
-same worktree (useful for read-only reviewers).
+Agents on a pod's worktree run in the pod too, with the same login as on your machine, and keep
+the T3 Code tools. A provider that cannot run in a pod is refused on a pod's worktree unless the
+thread's role preset sets **Runs in → Host**, which runs it on your machine against the same
+worktree (useful for read-only reviewers).
+
+| Provider            | In a pod? | Notes                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude, Codex       | yes       |                                                                                                                                                                                                                                                                                                                                                                                                |
+| Pi                  | yes       | Its `~/.pi/agent` (or `PI_CODING_AGENT_DIR`) is mounted.                                                                                                                                                                                                                                                                                                                                       |
+| Grok                | yes       | Its `~/.grok` (or `GROK_HOME`) is mounted.                                                                                                                                                                                                                                                                                                                                                     |
+| ACP Registry agents | yes       | The registry's install is mounted read-only. The agent's own login directory is not, so give it an API key in the instance's environment. Agents installed with `uvx` (Python) cannot run in a pod. A **Local command** given as a bare name runs the pod image's copy of that command, and T3 Code still checks that your machine has it too; on a Mac, only such a command can run in a pod. |
+| Cursor              | no        | It runs inside T3 Code itself.                                                                                                                                                                                                                                                                                                                                                                 |
+| OpenCode            | no        | One OpenCode server serves every directory.                                                                                                                                                                                                                                                                                                                                                    |
+| Antigravity         | no        | Its profiles and installer are tied to your machine.                                                                                                                                                                                                                                                                                                                                           |
+| Muse                | no        | T3 Code cannot mount its login, and its own tool sandbox is untested in a container.                                                                                                                                                                                                                                                                                                           |
+
+In a pod a provider gets only the variables set on its instance (**Settings → Providers**), never
+those of the machine running T3 Code, so an API key such as `XAI_API_KEY` or a Pi provider key
+that you export in your shell must be set on the instance as well. ACP agents reach the T3 Code
+tools in a pod over HTTP; an agent that ignores HTTP tool servers, as some ACP adapters do, runs
+there without them.
 
 ## Set up a project
 
@@ -35,14 +52,32 @@ in the pod's agent container as you, so files they write stay yours; `up` defaul
 pod at `/seeds/<repository folder name>/`. A pod whose creation is interrupted or fails runs `up`
 and `seeds` again when you retry it, so write seeds that are safe to repeat.
 
-The agent container's image must have the Docker CLI with its compose plugin; creating a pod checks
-for it and says so if the image lacks it. The default, `docker:27-cli`, is minimal: it has no
-`git`, no `bash` and no project toolchain, so terminals use `sh` and setup and teardown scripts that
-need more fail. Set `podRuntime.defaultImage` in the server settings to an image with `git` and
-whatever your scripts run. To run agents in the pod, the image also needs to run the Claude and
-Codex CLIs: a glibc-based image (such as a Debian one) with them installed, or with the host's
-binaries, which T3 Code mounts when the provider's binary path is absolute. Include `curl` too: the
-default image has none, and its busybox `wget` cannot reach `*.pods.internal` hostnames.
+The default agent image, `t3.invalid/pod-agent`, is one T3 Code builds on your Docker host the
+first time a pod needs it, which takes a few minutes and needs network access once. Its tag is a
+digest of its recipe, so an update that changes the image builds it again and removes the earlier
+builds no pod still uses. It is
+Debian-based, with `curl`, `git`, `ssh`, the Docker CLI with compose, and the Claude, Codex, Pi
+and Grok CLIs; it holds no credentials, since logins come from the config directories the pod
+mounts. On Linux, a provider whose binary path is absolute runs your machine's own install,
+mounted read-only; a bare command name runs the image's copy. Most of its size, about 1.2 GB, is
+the provider CLIs.
+
+To use another image, set `podRuntime.defaultImage` in the server settings. A new default applies
+to pods created after, and to a pod's agent container when it is recreated: **Recreate pod**, or
+the recreate T3 Code does on its own when a session needs something the pod lacks. That recreate
+may build the image first, so the session can take minutes to start while the pod chip shows the
+pod starting. On Linux, an image without the CLIs can be much smaller when
+every provider instance sets an absolute binary path, since T3 Code then mounts your machine's
+installs. Such an image needs:
+
+- the Docker CLI with its compose plugin (and buildx, if your stack builds images), which creating
+  a pod checks for;
+- glibc, to run your machine's provider binaries, and `node` for CLIs installed as Node scripts,
+  such as Pi;
+- `sh` with the usual tools (`cat`, `cp`, `grep`, `kill`, `sleep`, `test`, `tr`), which T3 Code
+  uses to start, stop and set up sessions;
+- `curl`, or `nc`, for the firewall check; without either, the check reports nothing;
+- `git` and anything your setup and teardown scripts run.
 
 `env` is set for every command in the pod and written to the worktree's `.env`, replacing those
 variables and keeping the rest of the file; keep `.env` out of Git. A `.env` that is a symlink, as
@@ -53,7 +88,7 @@ placeholder that names no service fails the pod and names the variable.
 
 ### Host firewall
 
-Agents in a pod reach T3 Code on port 17773 of the pod network's gateway. A firewall that drops
+On Linux, agents in a pod reach T3 Code on port 17773 of the pod network's gateway. A firewall that drops
 incoming traffic by default (ufw, firewalld) drops this too, and the agents then run without the
 T3 Code tools. Allow it from the pod network's subnet to its gateway, which
 `docker network inspect t3-pods --format '{{(index .IPAM.Config 0).Subnet}} {{(index .IPAM.Config 0).Gateway}}'`
@@ -69,6 +104,28 @@ sudo firewall-cmd --reload
 
 Replace `172.18.0.0/16` and `172.18.0.1` with your subnet and gateway.
 
+T3 Code checks this from inside each pod when it starts. While the check fails, the pod chip turns
+yellow and its menu and **Settings → Diagnostics → Pods** say so. After fixing the firewall, start
+a new session in the pod: T3 Code checks again then.
+
+### macOS and Docker Desktop
+
+With Docker Desktop, on a Mac or on Linux, or any other Docker engine on a Mac, containers run in a
+virtual machine whose pod network your machine cannot reach. T3 Code notices that from the engine
+and listens for its pods on `127.0.0.1:17773` instead, where the engine's own
+`host.docker.internal` arrives; no firewall rule is needed. The engine resolves that name itself,
+so when a pod uses resolvers of its own (`podRuntime.dnsServers`, or hostname mode), T3 Code maps
+it to Docker's `host-gateway` instead, which Rancher Desktop does not support. Anything running on your machine can
+reach that port, so the per-session token is what keeps other programs out, and the listener only
+takes requests addressed to `host.docker.internal`.
+
+Your Mac's provider binaries cannot run in the pod's Linux container, so pods there use the CLIs of
+the default image whatever binary path an instance sets.
+
+This mode has not yet been confirmed on a real Mac. To check it by hand while T3 Code runs a pod,
+`docker run --rm curlimages/curl -s -o /dev/null -w '%{http_code}\n' http://host.docker.internal:17773/mcp`
+should print an HTTP status such as 401 or 403, not `000`.
+
 ## Start a thread in a pod
 
 In the composer, choose **New worktree**, then **Runtime → Container**. T3 Code creates the
@@ -83,8 +140,9 @@ from containers (for example `["192.168.1.1"]`) and recreate the pod.
 ## Manage a pod
 
 Switching a pod thread to another account of the same provider works mid-thread. If the pod was
-made before that account was enabled, T3 Code recreates the pod's agent container to add its
-login; the stack keeps running, and other agents in the pod resume on their next turn.
+made before that account was enabled, or before that provider could run in pods, T3 Code recreates
+the pod's agent container to add what it needs; the stack keeps running, and other agents in the
+pod resume on their next turn.
 
 The pod chip next to the thread title shows its state. Click it to stop or start the pod, open a
 shell in it, recreate it, or remove it. Stopping keeps everything, and starting resumes the stack
@@ -148,8 +206,8 @@ routes; leave them, since they serve running pods and T3 Code removes its own.
 Inside the pod, the stack's containers resolve `*.pods.internal` too, and the agent container
 trusts the proxy's certificates, so commands there can reach any pod's hostname. Lookups of those
 hostnames can take a few seconds, because orch's DNS server does not answer IPv6 lookups yet (a fix
-is pending in orch); busybox tools such as the default image's `wget` give up with `bad address`,
-so use an agent image with `curl` or another glibc-based tool for requests to pod hostnames.
+is pending in orch); busybox tools such as `wget` in Alpine-based images give up with
+`bad address`, so use `curl`, which the default image has.
 
 If the proxy is missing when a pod is created, the pod still starts on ports and Diagnostics says
 why; **Recreate pod** once the proxy is back moves it to hostnames. If only its route cannot be put

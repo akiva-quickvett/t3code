@@ -13,9 +13,11 @@ const input: PodPlanInput = {
   homeDirectory: "/home/dev",
   user: { uid: 1000, gid: 1000 },
   providerMounts: {
-    configDirs: ["/home/dev/.claude"],
+    configDirs: ["/home/dev/.claude", "/home/dev/.pi/agent"],
+    homeSeeds: ["/home/dev/.claude.json"],
     codexHomes: ["/home/dev/.codex", "/home/dev/.codex-work"],
     binDirs: ["/home/dev/.local/bin"],
+    toolDirs: ["/home/dev/.t3/tools/devin"],
   },
   gitConfigPath: "/home/dev/.gitconfig",
   ghConfigDir: "/home/dev/.config/gh",
@@ -27,6 +29,8 @@ const input: PodPlanInput = {
   },
   dns: [],
   proxyCaRoot: null,
+  filesDir: "/home/dev/.t3/caches/pods/pod-abc123",
+  mcpTransport: "gateway",
   publish: [],
 };
 
@@ -50,9 +54,12 @@ describe("pod container plan", () => {
       "bind /home/dev/worktrees/feature:/home/dev/worktrees/feature",
       "bind /home/dev/repo/.git:/home/dev/repo/.git",
       "bind /home/dev/.claude:/home/dev/.claude",
+      "bind /home/dev/.pi/agent:/home/dev/.pi/agent",
       "bind /home/dev/.codex:/home/dev/.codex",
       "bind /home/dev/.codex-work:/home/dev/.codex-work",
       "bind /home/dev/.local/bin:/opt/t3/provider-bin/home/dev/.local/bin ro",
+      "bind /home/dev/.t3/tools/devin:/home/dev/.t3/tools/devin ro",
+      "bind /home/dev/.t3/caches/pods/pod-abc123:/home/dev/.t3/caches/pods/pod-abc123 ro",
       "bind /home/dev/.gitconfig:/home/dev/.gitconfig ro",
       "bind /home/dev/.config/gh:/home/dev/.config/gh ro",
       "bind /home/dev/pods/seeds/repo:/seeds/repo ro",
@@ -77,10 +84,28 @@ describe("pod container plan", () => {
     ]);
   });
 
+  it("copies .claude.json into the agent's home through the pod's files dir instead of binding it", () => {
+    const plan = planPod(input);
+    expect(plan.agent.mounts.some((mount) => mount.source.endsWith(".claude.json"))).toBe(false);
+    expect(plan.homeSeeds).toEqual([
+      {
+        host: "/home/dev/.claude.json",
+        snapshot: "/home/dev/.t3/caches/pods/pod-abc123/home/.claude.json",
+        target: "/home/dev/.claude.json",
+      },
+    ]);
+    expect(planPod({ ...input, filesDir: null }).homeSeeds).toEqual([]);
+  });
+
   it("never mounts the T3 home, /tmp or a multiplexer socket", () => {
     const plan = planPod(input);
     for (const mount of [...plan.agent.mounts, ...plan.dind.mounts]) {
-      expect(mount.source).not.toMatch(/\.t3|^\/tmp|herdr|tmux|\.sock$/);
+      expect(mount.source).not.toMatch(/^\/tmp|herdr|tmux|\.sock$/);
+      // Of the T3 home, only a registry agent's install and the pod's own files, read-only.
+      if (/\.t3/.test(mount.source)) {
+        expect(mount.source).toMatch(/\/\.t3\/(tools\/[^/]+|caches\/pods\/pod-abc123)$/);
+        expect(mount.readOnly).toBe(true);
+      }
     }
   });
 
@@ -105,7 +130,13 @@ describe("pod container plan", () => {
     expect(dind.labels).toMatchObject({ "t3.network": "t3-pods" });
     // Beside the daemon's own command, which keeps dockerd first.
     expect(dind.command[0]).toBe("dockerd");
-    expect(dind.hostAlias).toBe("host.docker.internal");
+    expect(dind.hostAlias).toEqual({ name: "host.docker.internal", address: "gateway" });
+    // An engine in a VM maps the alias to this machine itself; the gateway is not it.
+    expect(planPod({ ...input, mcpTransport: "loopback" }).dind).not.toHaveProperty("hostAlias");
+    // Unless resolvers of its own replace the engine's, which answers the name.
+    expect(
+      planPod({ ...input, mcpTransport: "loopback", dns: ["10.0.0.53"] }).dind.hostAlias,
+    ).toEqual({ name: "host.docker.internal", address: "host-gateway" });
   });
 
   it("labels everything with the pod and the environment that owns it", () => {

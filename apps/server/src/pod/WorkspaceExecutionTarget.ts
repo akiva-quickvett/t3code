@@ -29,10 +29,18 @@ export class WorkspaceExecutionTarget extends Context.Service<
   WorkspaceExecutionTarget,
   {
     readonly resolve: (path: string) => Effect.Effect<ExecutionTarget>;
-    /** A host command that runs `spec` in the pod; credentials the host holds are not passed on. */
+    /**
+     * A host command that runs `spec` in the pod; credentials the host holds
+     * are not passed on, unless `instanceCredentials` says the env is a
+     * provider instance's own, where a key is how the user signs that
+     * provider in.
+     */
     readonly launch: (
       target: PodExecutionTarget,
-      spec: ContainerDriver.PodExecSpec & { readonly tty: boolean },
+      spec: ContainerDriver.PodExecSpec & {
+        readonly tty: boolean;
+        readonly instanceCredentials?: true;
+      },
     ) => ContainerDriver.PodExecLaunch;
     readonly exec: (
       target: PodExecutionTarget,
@@ -65,8 +73,10 @@ const make = Effect.gen(function* () {
               },
         ),
       ),
-    launch: (target, spec) =>
-      driver.forHost(target.dockerHost).execLaunch(agentName(target), safe(spec)),
+    launch: (target, { instanceCredentials, ...spec }) =>
+      driver
+        .forHost(target.dockerHost)
+        .execLaunch(agentName(target), instanceCredentials === true ? spec : safe(spec)),
     exec: (target, spec) => driver.forHost(target.dockerHost).exec(agentName(target), safe(spec)),
   });
 });

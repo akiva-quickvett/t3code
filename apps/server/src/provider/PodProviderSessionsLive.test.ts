@@ -14,6 +14,7 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -23,11 +24,16 @@ import * as Stream from "effect/Stream";
 import * as PodMcpListener from "../mcp/PodMcpListener.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { ContainerDriverError } from "../pod/ContainerDriver.ts";
+import { PodPaths } from "../pod/PodPaths.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import * as PodRuntimeStore from "../pod/PodRuntimeStore.ts";
 import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { PodProviderPlacement, ProviderPodProcess } from "./PodProviderSessions.ts";
+import {
+  PodProviderPlacement,
+  podRefusalReason,
+  ProviderPodProcess,
+} from "./PodProviderSessions.ts";
 import { layerPlacement, layerProcess, POD_SESSION_ENV } from "./PodProviderSessionsLive.ts";
 
 const podId = PodRuntimeId.make("pod-placement1");
@@ -61,9 +67,20 @@ const makeLayer = (input: {
   readonly mountedAtStart: boolean;
   readonly recreateMounts?: boolean;
   readonly instanceEnabled?: boolean;
+  /** The probe's exit code in the agent container: 0 reaches the listener. */
+  readonly probeExitCode?: number | null;
+  /** What the pod's snapshot says of the listener when a session is placed. */
+  readonly mcpListener?: PodRuntimeSnapshot["mcpListener"];
+  /** Pod snapshots the status stream sends once the layer is up. */
+  readonly streamed?: ReadonlyArray<PodRuntimeSnapshot>;
+  /** The server keeps per-pod files under this root; a pod made before it lacks its dir. */
+  readonly filesRoot?: string;
 }) => {
   const mounted = new Set(input.mountedAtStart ? [input.configDir] : []);
   const recreated: Array<PodRuntimeId> = [];
+  const probes: Array<ReadonlyArray<string>> = [];
+  const notes: Array<{ readonly startedAt: string | null; readonly status: string | null }> = [];
+  const noted = Deferred.makeUnsafe<void>();
   const targets = WorkspaceExecutionTarget.WorkspaceExecutionTarget.of({
     resolve: (path) =>
       Effect.succeed(
@@ -79,12 +96,22 @@ const makeLayer = (input: {
       ),
     launch: () => ({ command: "docker", args: [], env: {} }),
     exec: (_target, spec) =>
-      Effect.succeed({
-        exitCode: mounted.has(spec.command[2] ?? "") ? 0 : 1,
-        timedOut: false,
-        outputTail: "",
+      Effect.sync(() => {
+        if (spec.command[3] === "t3-mcp-probe") {
+          probes.push(spec.command.slice(4));
+          return { exitCode: input.probeExitCode ?? 0, timedOut: false, outputTail: "" };
+        }
+        return {
+          exitCode: mounted.has(spec.command[2] ?? "") ? 0 : 1,
+          timedOut: false,
+          outputTail: "",
+        };
       }),
   });
+  const placed = {
+    ...snapshot("running"),
+    ...(input.mcpListener === undefined ? {} : { mcpListener: input.mcpListener }),
+  };
   const layer = layerPlacement.pipe(
     Layer.provide(Layer.succeed(WorkspaceExecutionTarget.WorkspaceExecutionTarget, targets)),
     Layer.provide(
@@ -92,11 +119,23 @@ const makeLayer = (input: {
         recreateAgentContainer: (id) =>
           Effect.sync(() => {
             recreated.push(id);
-            if (input.recreateMounts !== false) mounted.add(input.configDir);
+            if (input.recreateMounts !== false) {
+              mounted.add(input.configDir);
+              if (input.filesRoot !== undefined) mounted.add(`${input.filesRoot}/${id}`);
+            }
             return snapshot("starting");
           }),
         awaitSettled: () => Effect.succeed(snapshot("running")),
-        forPath: () => Effect.succeed(snapshot("running")),
+        forPath: () => Effect.succeed(placed),
+        subscribe: Stream.make({
+          type: "snapshot" as const,
+          enabled: true,
+          pods: input.streamed ?? [],
+        }),
+        noteMcpListener: (_id, startedAt, status) =>
+          Effect.sync(() => {
+            notes.push({ startedAt, status });
+          }).pipe(Effect.andThen(Deferred.succeed(noted, undefined)), Effect.asVoid),
       }),
     ),
     Layer.provide(
@@ -116,9 +155,17 @@ const makeLayer = (input: {
         },
       }),
     ),
+    Layer.provide(
+      Layer.succeed(
+        PodPaths,
+        input.filesRoot === undefined
+          ? undefined
+          : { t3Home: "/t3", filesRoot: input.filesRoot, toolsDir: `${input.filesRoot}/tools` },
+      ),
+    ),
     Layer.provide(NodeServices.layer),
   );
-  return { layer, recreated };
+  return { layer, recreated, probes, notes, noted };
 };
 
 const withConfigDir = <A, E, R>(use: (configDir: string) => Effect.Effect<A, E, R>) =>
@@ -277,6 +324,138 @@ describe("pod provider placement", () => {
         ),
       ),
     ),
+  );
+});
+
+describe("pod provider refusals", () => {
+  it("runs every driver that spawns its own process in the pod", () => {
+    for (const driver of ["claudeAgent", "codex", "pi", "grok", "acpRegistry"])
+      expect(podRefusalReason(ProviderDriverKind.make(driver))).toBeUndefined();
+  });
+
+  it("says why each driver that cannot run in a pod is refused", () => {
+    const reason = (driver: string) => podRefusalReason(ProviderDriverKind.make(driver));
+    expect(reason("cursor")).toContain("inside the T3 server process");
+    expect(reason("opencode")).toContain("one server per instance");
+    expect(reason("antigravity")).toContain("bound to the host");
+    expect(reason("muse")).toContain("Muse");
+    expect(reason("some-future-driver")).toBe(
+      "Only Claude, Codex, Pi, Grok and ACP Registry sessions run in a pod.",
+    );
+  });
+
+  it.effect("places Pi, Grok and ACP Registry sessions in the pod and refuses Muse", () =>
+    withConfigDir((configDir) =>
+      Effect.gen(function* () {
+        for (const driver of ["pi", "grok", "acpRegistry"])
+          expect(
+            yield* place({ cwd: POD_WORKTREE, driver: ProviderDriverKind.make(driver) }),
+          ).toMatchObject({ type: "pod", podId, mcpEndpoint: ENDPOINT });
+        const muse = yield* place({
+          cwd: POD_WORKTREE,
+          driver: ProviderDriverKind.make("muse"),
+        }).pipe(Effect.flip);
+        expect(muse.message).toContain("runsIn: host");
+      }).pipe(Effect.provide(makeLayer({ configDir, mountedAtStart: true }).layer)),
+    ),
+  );
+});
+
+describe("pod placement for pods made before their providers' mounts", () => {
+  it.effect(
+    "recreates the agent container once for a Pi session that lacks the pod's files dir",
+    () =>
+      withConfigDir((configDir) => {
+        const { layer, recreated } = makeLayer({
+          configDir,
+          mountedAtStart: true,
+          filesRoot: "/t3/caches/pods",
+        });
+        return Effect.gen(function* () {
+          expect(yield* place({ cwd: POD_WORKTREE, driver: claude })).toMatchObject({
+            agentRecreated: false,
+          });
+          const pi = ProviderDriverKind.make("pi");
+          expect(yield* place({ cwd: POD_WORKTREE, driver: pi })).toMatchObject({
+            type: "pod",
+            agentRecreated: true,
+          });
+          expect(yield* place({ cwd: POD_WORKTREE, driver: pi })).toMatchObject({
+            agentRecreated: false,
+          });
+          expect(recreated).toEqual([podId]);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+});
+
+describe("pod MCP listener probe", () => {
+  const started = { ...snapshot("running"), startedAt: "2026-10-21T01:00:00.000Z" };
+
+  it.effect("probes from the agent container once per start and records a blocked listener", () =>
+    withConfigDir((configDir) => {
+      const { layer, probes, notes, noted } = makeLayer({
+        configDir,
+        mountedAtStart: true,
+        probeExitCode: 28,
+        streamed: [started, started, snapshot("stopped")],
+      });
+      return Effect.gen(function* () {
+        yield* PodProviderPlacement;
+        yield* Deferred.await(noted);
+        expect(probes).toEqual([[ENDPOINT, "host.docker.internal", "40123"]]);
+        expect(notes).toEqual([{ startedAt: started.startedAt, status: "blocked" }]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect.each([
+    { exitCode: 0, status: "reachable" },
+    { exitCode: 125, status: null },
+  ])("records exit $exitCode as $status", ({ exitCode, status }) =>
+    withConfigDir((configDir) => {
+      const { layer, notes, noted } = makeLayer({
+        configDir,
+        mountedAtStart: true,
+        probeExitCode: exitCode,
+        streamed: [started],
+      });
+      return Effect.gen(function* () {
+        yield* PodProviderPlacement;
+        yield* Deferred.await(noted);
+        expect(notes).toEqual([{ startedAt: started.startedAt, status }]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("probes again when a session is placed while the listener was blocked", () =>
+    withConfigDir((configDir) => {
+      const { layer, probes, notes, noted } = makeLayer({
+        configDir,
+        mountedAtStart: true,
+        mcpListener: "blocked",
+      });
+      return Effect.gen(function* () {
+        yield* place({ cwd: POD_WORKTREE, driver: claude });
+        yield* Deferred.await(noted);
+        expect(probes).toHaveLength(1);
+        expect(notes).toEqual([{ startedAt: null, status: "reachable" }]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("does not probe on placement once the listener was reachable", () =>
+    withConfigDir((configDir) => {
+      const { layer, probes } = makeLayer({
+        configDir,
+        mountedAtStart: true,
+        mcpListener: "reachable",
+      });
+      return Effect.gen(function* () {
+        yield* place({ cwd: POD_WORKTREE, driver: claude });
+        expect(probes).toEqual([]);
+      }).pipe(Effect.provide(layer));
+    }),
   );
 });
 

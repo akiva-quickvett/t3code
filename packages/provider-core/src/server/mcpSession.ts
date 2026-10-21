@@ -6,6 +6,11 @@ export interface McpProviderSessionConfig {
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
   readonly endpoint: string;
+  /**
+   * The server's own endpoint when `endpoint` is a pod's listener, which only
+   * the pod reaches; T3's own bridges on the host call this one instead.
+   */
+  readonly hostEndpoint?: string;
   readonly authorizationHeader: string;
   /**
    * Adapters read it to keep developer instructions truthful: when the user

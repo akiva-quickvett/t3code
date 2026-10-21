@@ -12,6 +12,8 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import * as NodeBuffer from "node:buffer";
 
+import { definedEnvironment, type ProviderPod } from "@t3tools/provider-core/server/podProcess";
+
 const MAX_LIVE_TERMINALS = 16;
 const MAX_UNRELEASED_TERMINALS = 64;
 const MAX_RETAINED_TERMINALS = 32;
@@ -130,6 +132,22 @@ export interface AcpClientTerminalsOptions {
     | ((sessionId: string) => NodeJS.ProcessEnv | undefined)
     | undefined;
   readonly forceKillAfter?: Duration.Input | undefined;
+  /**
+   * The pod the session's agent runs in, where its terminals run too. They
+   * get `podEnvironment` and the request's variables, none of the server's.
+   */
+  readonly pod?: ProviderPod | undefined;
+  readonly podEnvironment?: NodeJS.ProcessEnv | undefined;
+}
+
+/** The terminal's command line in a pod: Devin's shell source runs under the container's `sh`. */
+function acpPodTerminalArgv(
+  request: EffectAcpSchema.CreateTerminalRequest,
+  shellCommands: boolean | undefined,
+): readonly [string, ...Array<string>] {
+  return shellCommands === true && (request.args?.length ?? 0) === 0
+    ? ["sh", "-c", request.command]
+    : [request.command, ...(request.args ?? [])];
 }
 
 function acpTerminalCommand(input: {
@@ -224,16 +242,37 @@ export const makeAcpClientTerminals = Effect.fn("makeAcpClientTerminals")(functi
               ? undefined
               : { ...options.environment, ...sessionEnvironment, ...requestEnvironment };
           const terminalScope = yield* Scope.make();
+          const pod = options.pod;
+          const podLaunch =
+            pod === undefined
+              ? undefined
+              : yield* Effect.gen(function* () {
+                  const [command, ...args] = acpPodTerminalArgv(request, options.shellCommands);
+                  return yield* pod.launch({
+                    command,
+                    args,
+                    cwd: request.cwd ?? options.defaultCwd,
+                    env: definedEnvironment({ ...options.podEnvironment, ...requestEnvironment }),
+                  });
+                });
+          // The docker CLI forwards no signal; the launch's stop ends the command in the pod.
+          if (podLaunch !== undefined) yield* Scope.addFinalizer(terminalScope, podLaunch.stop);
           const child = yield* restore(
             spawner
               .spawn(
-                acpTerminalCommand({
-                  request,
-                  shellCommands: options.shellCommands,
-                  defaultCwd: options.defaultCwd,
-                  environment,
-                  forceKillAfter: options.forceKillAfter,
-                }),
+                podLaunch === undefined
+                  ? acpTerminalCommand({
+                      request,
+                      shellCommands: options.shellCommands,
+                      defaultCwd: options.defaultCwd,
+                      environment,
+                      forceKillAfter: options.forceKillAfter,
+                    })
+                  : ChildProcess.make(podLaunch.command, podLaunch.args, {
+                      env: podLaunch.env,
+                      extendEnv: true,
+                      forceKillAfter: options.forceKillAfter ?? "5 seconds",
+                    }),
               )
               .pipe(
                 Effect.provideService(Scope.Scope, terminalScope),
@@ -266,7 +305,7 @@ export const makeAcpClientTerminals = Effect.fn("makeAcpClientTerminals")(functi
               ),
             },
             exit: yield* Deferred.make<EffectAcpSchema.WaitForTerminalExitResponse>(),
-            kill: child.kill().pipe(Effect.ignore),
+            kill: child.kill().pipe(Effect.ignore, Effect.andThen(podLaunch?.stop ?? Effect.void)),
             dispose: Scope.close(terminalScope, Exit.void).pipe(Effect.ignore),
             exitStatus: undefined,
             released: false,
