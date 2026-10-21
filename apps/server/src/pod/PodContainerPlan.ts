@@ -141,7 +141,10 @@ export const planPod = (input: PodPlanInput): PodPlan => {
     ],
     env: { DOCKER_TLS_CERTDIR: "" },
     publish: input.publish,
-    command: ["--host=unix:///var/run/docker.sock", `--host=${POD_DOCKER_HOST}`],
+    // Naming dockerd keeps the image's entrypoint from adding its own
+    // `--host=tcp://0.0.0.0:2375`, which would clash with this listener and
+    // open the daemon to every container on the pods network.
+    command: ["dockerd", "--host=unix:///var/run/docker.sock", `--host=${POD_DOCKER_HOST}`],
   };
 
   // Pod-private targets after the image's own directories, so a host binary

@@ -57,6 +57,16 @@ describe("pod container plan", () => {
     ]);
   });
 
+  it("runs dockerd itself, so the image adds no listener open to the pods network", () => {
+    // A first argument that is a flag makes docker:dind's entrypoint add
+    // --host=tcp://0.0.0.0:2375, which clashes with the loopback listener.
+    expect(planPod(input).dind.command).toEqual([
+      "dockerd",
+      "--host=unix:///var/run/docker.sock",
+      "--host=tcp://127.0.0.1:2375",
+    ]);
+  });
+
   it("gives the daemon only its volume, the worktree and seeds", () => {
     expect(mountList(planPod(input).dind.mounts)).toEqual([
       "volume t3-env1-pod-abc123-dockerlib:/var/lib/docker",

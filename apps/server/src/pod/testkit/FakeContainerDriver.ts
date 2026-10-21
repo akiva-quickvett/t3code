@@ -37,6 +37,7 @@ export const makeFakeContainerDriver = () => {
   let failWhen: (call: FakeCall) => boolean = () => false;
   let dieWhen: (call: FakeCall) => boolean = () => false;
   let execExitCode: (call: FakeCall) => number | null = () => 0;
+  let containerLogs: (name: string) => string = () => "";
 
   const hostState = (host: string) => {
     const existing = hosts.get(host);
@@ -154,6 +155,7 @@ export const makeFakeContainerDriver = () => {
         args: ["exec", id, ...spec.command],
         env: { ...spec.env },
       }),
+      logs: (id) => record("logs", id).pipe(Effect.map((call) => containerLogs(call.target ?? id))),
       memoryUsage: (ids) =>
         record("stats", null).pipe(
           Effect.map(
@@ -193,6 +195,10 @@ export const makeFakeContainerDriver = () => {
     },
     execExitCode: (resolve: (call: FakeCall) => number | null) => {
       execExitCode = resolve;
+    },
+    /** What `docker logs` prints for a container, by name. */
+    containerLogs: (resolve: (name: string) => string) => {
+      containerLogs = resolve;
     },
   };
 };

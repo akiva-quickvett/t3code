@@ -10,9 +10,11 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
@@ -231,6 +233,58 @@ describe("PodRuntimeService", () => {
         expect(driver.volumes()).toEqual([]);
         expect(yield* pods.forPath(worktreePath)).toBeUndefined();
         expect((yield* pods.status({})).pods).toEqual([]);
+      }),
+    );
+  });
+
+  it.effect("fails a creation at once when its daemon exits, with what the daemon printed", () => {
+    const driver = makeFakeContainerDriver();
+    driver.execExitCode((call) => {
+      if (!call.target?.endsWith("-dind")) return 0;
+      const dind = driver.containers().find((container) => container.name === call.target);
+      if (dind !== undefined) driver.setStatus(dind.id, "exited");
+      return 1;
+    });
+    driver.containerLogs(() =>
+      [
+        "starting dockerd",
+        "failed to load listeners: listen tcp 127.0.0.1:2375: bind: address already in use",
+      ].join("\n"),
+    );
+    return withPods(driver, (pods) =>
+      Effect.gen(function* () {
+        const { id } = yield* pods.create({ projectId, worktreePath });
+        yield* pods.drain;
+        expect(yield* pods.awaitSettled(id)).toMatchObject({
+          state: "start_failed",
+          lastError: {
+            operation: "create",
+            message:
+              "Starting the pod's Docker daemon failed: it exited: starting dockerd | failed to load listeners: listen tcp 127.0.0.1:2375: bind: address already in use",
+          },
+        });
+        // One readiness probe, not a minute of them.
+        expect(operations(driver).filter((step) => step.endsWith("docker info"))).toHaveLength(1);
+      }),
+    );
+  });
+
+  it.effect("fails a creation whose daemon runs but never answers, once the probes give up", () => {
+    const driver = makeFakeContainerDriver();
+    driver.execExitCode((call) => (call.target?.endsWith("-dind") ? 1 : 0));
+    return withPods(driver, (pods) =>
+      Effect.gen(function* () {
+        const { id } = yield* pods.create({ projectId, worktreePath });
+        const settled = yield* Effect.forkChild(pods.awaitSettled(id));
+        // Readiness probes are spaced a second apart; run the clock past all of them.
+        for (let second = 0; second < 90; second++) yield* TestClock.adjust("1 second");
+        expect(yield* Fiber.join(settled)).toMatchObject({
+          state: "start_failed",
+          lastError: {
+            operation: "create",
+            message: "Waiting for the pod's Docker daemon failed (exit 1).",
+          },
+        });
       }),
     );
   });
