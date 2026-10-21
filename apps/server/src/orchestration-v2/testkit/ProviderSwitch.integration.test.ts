@@ -122,6 +122,8 @@ function makeTestAdapter(input: {
   readonly holdFirstTurn?: Deferred.Deferred<void>;
   readonly releaseFirstTurn?: Deferred.Deferred<void>;
   readonly readsRoleInstructions?: true;
+  /** Records `open:<instance>` and `close:<instance>` in the order sessions open and close. */
+  readonly sessionLifecycle?: Array<string>;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
     instanceId: input.instanceId,
@@ -130,6 +132,13 @@ function makeTestAdapter(input: {
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
     openSession: (sessionInput) =>
       Effect.gen(function* () {
+        if (input.sessionLifecycle !== undefined) {
+          const lifecycle = input.sessionLifecycle;
+          lifecycle.push(`open:${input.instanceId}`);
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => lifecycle.push(`close:${input.instanceId}`)),
+          );
+        }
         const events = yield* PubSub.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const now = yield* DateTime.now;
         const providerSession: OrchestrationV2ProviderSession = {
@@ -3570,6 +3579,8 @@ describe("orchestration v2 provider switching", () => {
       readonly personalOrganizationKey: string | undefined;
       /** Fails the first handoff turn once, before the prompt reaches the provider. */
       readonly failFirstHandoff?: "start" | "injection";
+      /** Both accounts share one config dir's transcripts, so the switch resumes natively. */
+      readonly sharedConfig?: boolean;
     }) =>
       Effect.gen(function* () {
         const provider = PROVIDERS[input.provider ?? "claude"];
@@ -3587,6 +3598,7 @@ describe("orchestration v2 provider switching", () => {
         const failStartOnce = yield* Ref.make(input.failFirstHandoff === "start");
         const failInjectionOnce = yield* Ref.make(input.failFirstHandoff === "injection");
         const nativeThreadGeneration = yield* Ref.make(0);
+        const sessionLifecycle: Array<string> = [];
         const adapters = [
           makeTestAdapter({
             instanceId: workSelection.instanceId,
@@ -3595,6 +3607,7 @@ describe("orchestration v2 provider switching", () => {
             modelSelection: workSelection,
             responseByRunOrdinal: { 1: "Work account answer" },
             capturedTurns,
+            sessionLifecycle,
           }),
           makeTestAdapter({
             instanceId: personalSelection.instanceId,
@@ -3608,6 +3621,7 @@ describe("orchestration v2 provider switching", () => {
             failInjectionOnce,
             nativeThreadGeneration,
             getModelContextWindow: () => 32_000,
+            sessionLifecycle,
           }),
         ];
         const organizationKeys = new Map([
@@ -3630,7 +3644,9 @@ describe("orchestration v2 provider switching", () => {
               organizationKeys.has(instanceId)
                 ? Effect.succeed({
                     driver: provider.driver,
-                    continuationKey: `${provider.driver}:home:/${instanceId}`,
+                    continuationKey: input.sharedConfig
+                      ? `${provider.driver}:home:/shared`
+                      : `${provider.driver}:home:/${instanceId}`,
                     organizationKey: organizationKeys.get(instanceId),
                     enabled: true,
                     capabilities: provider.capabilities,
@@ -3721,6 +3737,7 @@ describe("orchestration v2 provider switching", () => {
             (item) => item.type === "system_notice" && item.message === MIXED_ORGANIZATION_NOTICE,
           ),
           handoffTurnTexts: (yield* Ref.get(capturedTurns)).slice(1).map((turn) => turn.text),
+          sessionLifecycle,
         };
       });
 
@@ -3796,6 +3813,60 @@ describe("orchestration v2 provider switching", () => {
             assert.include(handoffTurnTexts[0], "Personal account retry");
           }),
         ),
+    );
+
+    it.live(
+      "stops the old Claude session before resuming its transcript under another organization",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const work = ProviderInstanceId.make(`${CLAUDE_DRIVER}_work`);
+            const personal = ProviderInstanceId.make(`${CLAUDE_DRIVER}_personal`);
+            const { projection, mixedOrganizationNotices, handoffTurnTexts, sessionLifecycle } =
+              yield* switchAccounts({
+                name: "shared-config-mixed-organization",
+                workOrganizationKey: "org-work",
+                personalOrganizationKey: "org-personal",
+                sharedConfig: true,
+              });
+
+            assert.isEmpty(projection.contextHandoffs);
+            assert.deepEqual(
+              projection.runs.map((run) => run.providerThreadId),
+              [projection.runs[0]!.providerThreadId, projection.runs[0]!.providerThreadId],
+            );
+            // Both sessions append to one transcript, so the old one must be gone first.
+            assert.deepEqual(sessionLifecycle.slice(0, 3), [
+              `open:${work}`,
+              `close:${work}`,
+              `open:${personal}`,
+            ]);
+            assert.deepEqual(
+              mixedOrganizationNotices.map((item) => item.runId),
+              [projection.runs[1]!.id],
+            );
+            assert.lengthOf(handoffTurnTexts, 1);
+            assert.include(handoffTurnTexts[0], MIXED_ORGANIZATION_NOTE);
+            assert.include(handoffTurnTexts[0], "Personal account request");
+          }),
+        ),
+    );
+
+    it.live("adds no organization note to a native resume within one organization", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { projection, mixedOrganizationNotices, handoffTurnTexts } = yield* switchAccounts({
+            name: "shared-config-same-organization",
+            workOrganizationKey: "org-work",
+            personalOrganizationKey: "org-work",
+            sharedConfig: true,
+          });
+
+          assert.isEmpty(projection.contextHandoffs);
+          assert.lengthOf(mixedOrganizationNotices, 0);
+          assert.notInclude(handoffTurnTexts[0], MIXED_ORGANIZATION_NOTE);
+        }),
+      ),
     );
 
     it.live("adds no organization note between Codex accounts", () =>

@@ -23,6 +23,7 @@ import * as Semaphore from "effect/Semaphore";
 
 import * as ModelManifest from "./ModelManifest.ts";
 import { applyProviderCompatibility } from "./providerCompatibility.ts";
+import { makeCopiedLoginDetector, stampCopiedLogin } from "./copiedLogins.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import {
@@ -361,6 +362,7 @@ export const layer = Layer.effect(
     const config = yield* ServerConfig.ServerConfig;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const detectCopiedLogins = yield* makeCopiedLoginDetector;
 
     const changesPubSub = yield* Effect.acquireRelease(
       PubSub.unbounded<ReadonlyArray<ServerProvider>>(),
@@ -492,6 +494,7 @@ export const layer = Layer.effect(
       },
     ) {
       const manifest = yield* manifestService.current;
+      const copiedLogins = yield* detectCopiedLogins((yield* Ref.get(liveSubsRef)).values());
       const nextProvidersWithUpdateState = yield* Effect.forEach(
         nextProviders,
         applyProviderUpdateState,
@@ -520,7 +523,7 @@ export const layer = Layer.effect(
 
           const providers = orderProviderSnapshots(
             [...mergedProviders.values()].map((provider) =>
-              classifyCompatibility(provider, manifest),
+              stampCopiedLogin(classifyCompatibility(provider, manifest), copiedLogins),
             ),
           );
           const providersToPersist = providers.filter((provider) =>
@@ -787,14 +790,16 @@ export const layer = Layer.effect(
           nextSubs.set(instanceId, instance);
         }
         yield* Ref.set(liveSubsRef, nextSubs);
+        // Adding, removing or disabling an instance can start or end a copied login elsewhere.
+        const copiedLogins = yield* detectCopiedLogins(nextSubs.values());
 
         const [previousProviders, providers] = yield* Ref.modify(
           providersRef,
           (previousProviders) => {
             const providers = orderProviderSnapshots(
-              previousProviders.filter((provider) =>
-                knownInstanceIds.has(snapshotInstanceKey(provider)),
-              ),
+              previousProviders
+                .filter((provider) => knownInstanceIds.has(snapshotInstanceKey(provider)))
+                .map((provider) => stampCopiedLogin(provider, copiedLogins)),
             );
             return [[previousProviders, providers] as const, providers];
           },

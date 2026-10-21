@@ -34,8 +34,8 @@ thread can move to another Claude instance from the model picker. An instance
 with the same config directory resumes the same Claude session. An instance with
 a different config directory starts a new Claude session and receives a context
 handoff of the conversation so far; the picker labels those entries. Separate
-account directories keep their own local conversation state. Claude does not
-have Codex's shared-home and shadow-home arrangement.
+account directories keep their own local conversation state unless they share
+it, as described next.
 
 If the other instance is signed in to a different Claude organization, the
 picker warns that earlier reasoning won't carry over, and the thread shows a
@@ -44,6 +44,30 @@ under another organization, so the agent is told to re-read the thread. Anything
 published under the old organization stays private to it, so its links may not
 open from the new account; the agent republishes what the thread still needs, or
 does so when you ask.
+
+## Share conversations across accounts
+
+To move a thread between accounts and keep resuming the same Claude session,
+set **Shared config path** on the second instance to the first instance's config
+directory, such as `~/.claude`. Before Claude starts, that instance's config
+directory links to the shared one for conversation history, `settings.json`,
+`CLAUDE.md`, rules, skills, agents, commands, hooks and plugins. Its login and
+`.claude.json` stay its own, so each instance still signs in separately.
+
+Instances that share one directory resume each other's threads natively instead
+of starting with a handoff. The shared directory must be one Claude has already
+used. If the config directory already has its own copy of one of those entries,
+the instance reports a conflict and changes nothing; merge or move it by hand,
+then save the instance's settings again or restart T3 Code.
+
+Clearing **Shared config path** removes the links T3 Code made, so the instance
+keeps its own history again. Conversations created while sharing stay in the
+shared directory.
+
+Sign each instance in with `claude auth login`. Do not copy `.credentials.json`
+between config directories: Claude replaces the login whenever it refreshes it,
+which signs the other copy out. Provider settings warn when two enabled instances
+hold a copied login.
 
 For presets that differ only in API keys or endpoints, use the instance's
 **Environment variables**. Variable assignments do not belong in **Launch arguments**.

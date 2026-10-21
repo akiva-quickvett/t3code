@@ -59,6 +59,8 @@ export interface ProviderInstance {
   readonly orchestrationAdapter: ProviderAdapter.ProviderAdapterV2["Service"];
   readonly textGeneration: ProviderTextGeneration;
   readonly auth?: ProviderAuthController;
+  /** The file holding this instance's stored login; never sent to clients. */
+  readonly loginFilePath?: string;
   readonly acpSessionManagement?: {
     readonly listSessions: (input: {
       readonly cwd: string;

@@ -67,6 +67,7 @@ import {
   handoffSourceInstanceIds,
   MIXED_ORGANIZATION_NOTE,
   MIXED_ORGANIZATION_NOTICE,
+  nativeResumeSource,
 } from "./MixedOrganizationNote.ts";
 
 export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStartError>()(
@@ -903,8 +904,15 @@ export const layer: Layer.Layer<
         }).filter((instanceId) => instanceId !== run.providerInstanceId);
         return sources.length === 0 ? [] : [{ handoff, sources }];
       });
+      const nativeSource = nativeResumeSource({
+        providerThread: runningProviderThread,
+        providerInstanceId: run.providerInstanceId,
+        providerThreads: projection.providerThreads,
+        runs: projection.runs,
+        providerTurns: projection.providerTurns,
+      });
       const targetOrganization =
-        handoffsWithSources.length === 0
+        handoffsWithSources.length === 0 && nativeSource === undefined
           ? undefined
           : yield* instanceOrganization(run.providerInstanceId);
       const crossOrganizationHandoffs: Array<OrchestrationV2ContextHandoff> = [];
@@ -918,14 +926,20 @@ export const layer: Layer.Layer<
           crossOrganizationHandoffs.push(handoff);
         }
       }
-      const crossOrganization = crossOrganizationHandoffs.length > 0;
+      const crossOrganizationResume =
+        nativeSource !== undefined &&
+        crossesOrganization(targetOrganization, [
+          yield* instanceOrganization(nativeSource.instanceId),
+        ]);
+      const crossOrganization = crossOrganizationHandoffs.length > 0 || crossOrganizationResume;
       const mixedOrganizationNoticeId = idAllocator.derive.runSignalTurnItem({
         runId: run.id,
         signal: "mixed-organization",
       });
       // A later attempt of the same run must not rewrite the notice the first attempt placed.
       const noteMixedOrganization =
-        crossOrganizationHandoffs.some((handoff) => handoff.targetRunId === run.id) &&
+        (crossOrganizationHandoffs.some((handoff) => handoff.targetRunId === run.id) ||
+          (crossOrganizationResume && nativeSource?.switchRunId === run.id)) &&
         !projection.turnItems.some((item) => item.id === mixedOrganizationNoticeId);
       const events: Array<OrchestrationV2DomainEvent> = [
         {

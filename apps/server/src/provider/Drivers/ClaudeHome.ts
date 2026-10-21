@@ -64,13 +64,29 @@ export const hasClaudeManagedMcpConfig = Effect.fn("hasClaudeManagedMcpConfig")(
   return yield* fileSystem.exists(managedMcpConfigPath).pipe(Effect.orElseSucceed(() => false));
 });
 
+export const resolveClaudeSharedConfigPath = Effect.fn("resolveClaudeSharedConfigPath")(function* (
+  config: Partial<Pick<ClaudeSettings, "sharedConfigPath">>,
+): Effect.fn.Return<string | undefined, never, Path.Path> {
+  const sharedConfigPath = config.sharedConfigPath?.trim() ?? "";
+  if (sharedConfigPath.length === 0) return undefined;
+  const path = yield* Path.Path;
+  return path.resolve(expandHomePath(sharedConfigPath, yield* HostProcess.HomeDirectory));
+});
+
+/**
+ * Instances that share a config dir's transcripts resume each other's sessions
+ * natively, so the shared dir names the group. Resolving it like a config dir
+ * puts an instance sharing `~/.claude` in the default instance's group.
+ */
 export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationGroupKey")(
   function* (
-    config: Pick<ClaudeSettings, "homePath">,
+    config: Pick<ClaudeSettings, "homePath"> & Partial<Pick<ClaudeSettings, "sharedConfigPath">>,
     environment?: NodeJS.ProcessEnv,
   ): Effect.fn.Return<string, never, Path.Path> {
-    const resolvedHomePath = yield* resolveClaudeHomePath(config, environment);
-    return `claude:home:${resolvedHomePath}`;
+    const groupPath =
+      (yield* resolveClaudeSharedConfigPath(config)) ??
+      (yield* resolveClaudeHomePath(config, environment));
+    return `claude:home:${groupPath}`;
   },
 );
 
