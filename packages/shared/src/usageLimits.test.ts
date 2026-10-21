@@ -1,10 +1,14 @@
 import {
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
+  type ServerProviderUsageWindow,
+  UsageHeadroomThresholds,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -21,9 +25,12 @@ import {
   elapsedShare,
   formatResetsIn,
   limitsNotice,
+  agentSafeLabel,
   paceOf,
+  projectAgentUsageLimits,
   providersWithLimits,
   remainingPercent,
+  usageHeadroom,
   usesChatGptSharing,
 } from "./usageLimits.ts";
 
@@ -1557,5 +1564,219 @@ describe("Antigravity limit presentation", () => {
       "3p-weekly",
     ]);
     expect(windows.map((window) => window.remainingPercent)).toEqual([80, 90, 10, 0]);
+  });
+});
+
+describe("agent usage limits", () => {
+  const defaults = Schema.decodeSync(UsageHeadroomThresholds)({});
+  const usageWindow = (
+    kind: ServerProviderUsageWindow["kind"],
+    usedPercent: number,
+    resetsAt = "2026-09-03T14:00:00.000Z",
+  ): ServerProviderUsageWindow => ({ id: kind, kind, label: kind, usedPercent, resetsAt });
+
+  it("defaults to low at 85% session or 95% weekly", () => {
+    expect(defaults).toEqual({ sessionLowPercent: 85, weeklyLowPercent: 95 });
+    expect(DEFAULT_SERVER_SETTINGS.usageHeadroom).toEqual(defaults);
+  });
+
+  it.each([
+    ["session", 84.9, "ok"],
+    ["session", 85, "low"],
+    ["session", 85.1, "low"],
+    ["session", 99.9, "low"],
+    ["session", 100, "exhausted"],
+    ["weekly", 94.9, "ok"],
+    ["weekly", 95, "low"],
+    ["weekly", 95.1, "low"],
+    ["weekly", 99.9, "low"],
+    ["weekly", 100, "exhausted"],
+    ["monthly", 95, "low"],
+    ["other", 100, "exhausted"],
+  ] as const)("rates a %s window at %s%% as %s", (kind, usedPercent, headroom) => {
+    expect(usageHeadroom([usageWindow(kind, usedPercent)], defaults, now)).toBe(headroom);
+  });
+
+  it("follows threshold overrides, but 100% is always exhausted", () => {
+    const strict = { sessionLowPercent: 50, weeklyLowPercent: 70 };
+    expect(usageHeadroom([usageWindow("session", 49)], strict, now)).toBe("ok");
+    expect(usageHeadroom([usageWindow("session", 50)], strict, now)).toBe("low");
+    expect(usageHeadroom([usageWindow("weekly", 69)], strict, now)).toBe("ok");
+    expect(usageHeadroom([usageWindow("weekly", 70)], strict, now)).toBe("low");
+
+    const lax = { sessionLowPercent: 100, weeklyLowPercent: 100 };
+    expect(usageHeadroom([usageWindow("session", 99)], lax, now)).toBe("ok");
+    expect(usageHeadroom([usageWindow("weekly", 100)], lax, now)).toBe("exhausted");
+  });
+
+  it("takes the worst window and ignores windows that already reset", () => {
+    expect(
+      usageHeadroom([usageWindow("session", 10), usageWindow("weekly", 100)], defaults, now),
+    ).toBe("exhausted");
+    const resetWeek = usageWindow("weekly", 100, "2026-09-03T11:59:00.000Z");
+    expect(usageHeadroom([usageWindow("session", 10), resetWeek], defaults, now)).toBe("ok");
+  });
+
+  it("projects a fresh snapshot to the agent shape", () => {
+    expect(
+      projectAgentUsageLimits(
+        provider({
+          displayName: "Work",
+          auth: { status: "authenticated", label: "Claude Max" },
+          usageLimits: {
+            checkedAt: "2026-09-03T11:58:00.000Z",
+            windows: [window, { ...usageWindow("weekly", 96), id: "seven_day" }],
+          },
+        }),
+        defaults,
+        now,
+      ),
+    ).toEqual({
+      instanceId: "codex",
+      driver: "codex",
+      label: "Work",
+      plan: "Claude Max",
+      checkedAt: "2026-09-03T11:58:00.000Z",
+      windows: [
+        {
+          kind: "session",
+          label: "Session",
+          usedPercent: 40,
+          resetsAt: "2026-09-03T14:00:00.000Z",
+        },
+        { kind: "weekly", label: "weekly", usedPercent: 96, resetsAt: "2026-09-03T14:00:00.000Z" },
+      ],
+      status: "ok",
+      headroom: "low",
+    });
+  });
+
+  it.each([
+    ["checked over fifteen minutes ago", "2026-09-03T11:44:59.000Z", window.resetsAt, "stale"],
+    ["checked fifteen minutes ago", "2026-09-03T11:45:00.000Z", window.resetsAt, "ok"],
+    ["a window has reset since", "2026-09-03T11:58:00.000Z", "2026-09-03T11:59:00.000Z", "stale"],
+  ] as const)("reports status %s", (_name, checkedAt, resetsAt, status) => {
+    const projected = projectAgentUsageLimits(
+      provider({ usageLimits: { checkedAt, windows: [{ ...window, resetsAt }] } }),
+      defaults,
+      now,
+    );
+    expect(projected.status).toBe(status);
+  });
+
+  it.each([
+    [84.6, 84, "ok"],
+    [99.6, 99, "low"],
+  ] as const)("shows %s%% as %s%%, never above the %s verdict", (raw, shown, headroom) => {
+    const projected = projectAgentUsageLimits(
+      provider({
+        usageLimits: {
+          checkedAt: "2026-09-03T11:58:00.000Z",
+          windows: [usageWindow("session", raw)],
+        },
+      }),
+      defaults,
+      now,
+    );
+    expect(projected.windows[0]?.usedPercent).toBe(shown);
+    expect(projected.headroom).toBe(headroom);
+  });
+
+  it.each([
+    ["unsupported", "ok"],
+    ["probeFailed", "unknown"],
+  ] as const)("reports unavailable: %s with headroom %s", (reason, headroom) => {
+    const projected = projectAgentUsageLimits(
+      provider({
+        usageLimits: {
+          checkedAt: "2026-09-03T11:58:00.000Z",
+          windows: [],
+          unavailable: { reason, message: "API key login" },
+        },
+      }),
+      defaults,
+      now,
+    );
+    expect(projected.status).toEqual({ unavailable: reason });
+    expect(projected.windows).toEqual([]);
+    expect(projected.headroom).toBe(headroom);
+  });
+
+  it("reports an instance without a limits snapshot as unsupported", () => {
+    const projected = projectAgentUsageLimits(
+      provider({
+        instanceId: ProviderInstanceId.make("pi"),
+        driver: ProviderDriverKind.make("pi"),
+      }),
+      defaults,
+      now,
+    );
+    expect(projected.status).toEqual({ unavailable: "unsupported" });
+    expect(projected.checkedAt).toBe("2026-09-03T11:00:00.000Z");
+    expect(projected.windows).toEqual([]);
+    expect(projected.headroom).toBe("ok");
+  });
+
+  it("drops a credential name from the plan and any label that holds an email", () => {
+    const projected = projectAgentUsageLimits(
+      provider({
+        driver: ProviderDriverKind.make("cursor"),
+        displayName: "  Cursor work  ",
+        auth: { status: "authenticated", label: "Cursor API key (my-key)" },
+      }),
+      defaults,
+      now,
+    );
+    expect(projected.label).toBe("Cursor work");
+    expect(projected.plan).toBe("Cursor API key");
+    expect(agentSafeLabel("Work (me@example.com)")).toBeUndefined();
+    expect(agentSafeLabel("   ")).toBeUndefined();
+  });
+
+  it("never carries account identity, credentials, hub links or reset credits", () => {
+    const projected = projectAgentUsageLimits(
+      provider({
+        instanceId: ProviderInstanceId.make("claude_work"),
+        displayName: "me@example.com",
+        auth: {
+          status: "authenticated",
+          label: "me@example.com",
+          email: "me@example.com",
+          profileId: "profile-secret",
+          workspaceId: "org-secret",
+          workspaceLabel: "Secret Org",
+        },
+        usageLimits: {
+          checkedAt: "2026-09-03T11:58:00.000Z",
+          windows: [window, usageWindow("weekly", 30), usageWindow("other", 5)],
+          credentialFingerprint: "fingerprint-secret",
+          resetCredits: {
+            availableCount: 1,
+            nextExpiresAt: "2026-09-10T00:00:00.000Z",
+            nextCreditId: "credit-secret",
+          },
+          externalUsage: { label: "Hub", url: "https://hub.example.com/?key=hub-key-secret" },
+        },
+      }),
+      defaults,
+      now,
+    );
+    const serialized = JSON.stringify(projected);
+    for (const secret of [
+      "example.com",
+      "profile-secret",
+      "org-secret",
+      "Secret Org",
+      "fingerprint-secret",
+      "credit-secret",
+      "hub-key-secret",
+      "Hub",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(projected.label).toBe("claude_work");
+    expect(projected).not.toHaveProperty("plan");
+    // Every orchestrator call can carry one row per instance.
+    expect(serialized.length).toBeLessThan(500);
   });
 });

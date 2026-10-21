@@ -15,10 +15,12 @@ import {
   type OrchestrationV2ThreadProjection,
   type ServerProvider,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import { projectAgentUsageLimits } from "@t3tools/shared/usageLimits";
 
 import {
   DispatchModeLimit,
@@ -1031,6 +1033,93 @@ describe("OrchestratorMcpService provider resolution", () => {
           ]);
         }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
       }),
+  );
+
+  it.effect("reports the same headroom as t3_usage_limits and no account emails", () =>
+    Effect.gen(function* () {
+      const thresholds = { sessionLowPercent: 70, weeklyLowPercent: 95 };
+      const sessionAt = (usedPercent: number) => ({
+        checkedAt: "2026-09-13T00:00:00.000Z",
+        windows: [
+          {
+            id: "five_hour",
+            kind: "session" as const,
+            label: "Session",
+            usedPercent,
+            resetsAt: "2026-09-14T00:00:00.000Z",
+          },
+        ],
+      });
+      const unavailable = (reason: "unsupported" | "probeFailed") => ({
+        checkedAt: "2026-09-13T00:00:00.000Z",
+        windows: [],
+        unavailable: { reason },
+      });
+      const instance = (
+        id: string,
+        usageLimits?: ServerProvider["usageLimits"],
+        displayName?: string,
+      ): ServerProvider => ({
+        ...providerSnapshot({
+          instanceId: ProviderInstanceId.make(id),
+          driver: ProviderDriverKind.make("codex"),
+          model: "gpt-5.4",
+        }),
+        ...(usageLimits === undefined ? {} : { usageLimits }),
+        ...(displayName === undefined ? {} : { displayName }),
+      });
+      const providers = [
+        instance("codex", sessionAt(10), "Codex work"),
+        instance("codex_low", sessionAt(70), "me@example.com"),
+        instance("codex_full", sessionAt(100)),
+        instance("codex_api_key", unavailable("unsupported")),
+        instance("codex_flaky", unavailable("probeFailed")),
+        instance("codex_unprobed"),
+      ];
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(parentProjection([])),
+        }),
+        ServerSettings.layerTest({ usageHeadroom: thresholds }),
+        providerRegistryLayer(providers),
+        adapterRegistryLayer(providers.map((provider) => provider.instanceId)),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const capabilities = yield* service.capabilities(scope);
+        const now = yield* Clock.currentTimeMillis;
+        const toolHeadroom = providers.map((provider) => [
+          String(provider.instanceId),
+          projectAgentUsageLimits(provider, thresholds, now).headroom,
+        ]);
+        assert.deepEqual(toolHeadroom, [
+          ["codex", "ok"],
+          ["codex_low", "low"],
+          ["codex_full", "exhausted"],
+          ["codex_api_key", "ok"],
+          ["codex_flaky", "unknown"],
+          ["codex_unprobed", "ok"],
+        ]);
+        assert.deepEqual(
+          capabilities.providers.map((provider) => [
+            String(provider.providerInstanceId),
+            provider.headroom,
+          ]),
+          toolHeadroom,
+        );
+        assert.deepEqual(
+          capabilities.providers.slice(0, 2).map((provider) => provider.displayName),
+          ["Codex work", null],
+        );
+        assert.notInclude(JSON.stringify(capabilities), "example.com");
+        assert.isTrue(capabilities.features.usageLimits);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
   );
 
   it.effect("leaves models the user hid out of the capability catalog", () =>

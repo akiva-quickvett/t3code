@@ -63,6 +63,7 @@ import {
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import { agentHeadroom, agentSafeLabel } from "@t3tools/shared/usageLimits";
 import {
   normalizeThreadPullRequestKey,
   visibleThreadPullRequests,
@@ -2232,10 +2233,11 @@ const make = Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
         const providers = yield* loadProviders;
         const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
-        const modelPreferences = yield* serverSettings.getSettings.pipe(
-          Effect.map((settings) => settings.providerModelPreferences ?? {}),
+        const settings = yield* serverSettings.getSettings.pipe(
           Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
         );
+        const modelPreferences = settings.providerModelPreferences ?? {};
+        const now = yield* Clock.currentTimeMillis;
         const rolePresets = yield* loadRolePresets(parent?.thread.projectId);
         return {
           parentThreadId: parent?.thread.id ?? null,
@@ -2251,7 +2253,7 @@ const make = Effect.gen(function* () {
             return {
               providerInstanceId: provider.instanceId,
               driverKind: provider.driver,
-              displayName: provider?.displayName ?? null,
+              displayName: agentSafeLabel(provider.displayName) ?? null,
               models:
                 provider?.models
                   .filter(
@@ -2273,6 +2275,7 @@ const make = Effect.gen(function* () {
               canRunChildTask: constraints.length === 0,
               canRunCrossProviderChildTask: constraints.length === 0,
               constraints: [...constraints],
+              headroom: agentHeadroom(provider, settings.usageHeadroom, now),
             };
           }),
           rolePresets: rolePresets.map((preset) => ({
@@ -2304,6 +2307,7 @@ const make = Effect.gen(function* () {
             incrementalThreadRead: true,
             scheduledTasks: true,
             maxBatchThreads: 20,
+            usageLimits: true,
           },
         };
       }),

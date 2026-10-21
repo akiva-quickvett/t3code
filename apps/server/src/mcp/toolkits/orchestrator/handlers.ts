@@ -7,6 +7,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+import * as UsageService from "../../../usage/UsageService.ts";
 
 const handlers = {
   orchestrator_capabilities: McpToolAccess.reads(() =>
@@ -15,6 +16,19 @@ const handlers = {
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.capabilities(scope);
     }),
+  ),
+  t3_usage_limits: McpToolAccess.reads((input) =>
+    McpInvocationContext.requireMcpCapability("orchestration").pipe(
+      Effect.mapError(
+        () =>
+          new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "This MCP credential does not grant orchestration capabilities.",
+          }),
+      ),
+      Effect.andThen(UsageService.UsageService),
+      Effect.flatMap((usage) => usage.readLimitsForAgent(input)),
+    ),
   ),
   delegate_task: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {

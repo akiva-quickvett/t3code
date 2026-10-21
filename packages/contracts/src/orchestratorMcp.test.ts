@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import {
+  OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
@@ -12,6 +13,7 @@ import {
   OrchestratorMcpThreadWaitInput,
 } from "./orchestratorMcp.ts";
 
+const decodeCapabilitiesResult = Schema.decodeUnknownSync(OrchestratorMcpCapabilitiesResult);
 const decodeCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput);
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
 const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskResult);
@@ -180,5 +182,60 @@ describe("orchestrator MCP contracts", () => {
         reason: "Loop converged.",
       }).reason,
     ).toBe("Loop converged.");
+  });
+});
+
+describe("orchestrator capabilities headroom", () => {
+  const provider = {
+    providerInstanceId: "codex",
+    driverKind: "codex",
+    displayName: null,
+    models: [],
+    canRunChildTask: true,
+    canRunCrossProviderChildTask: true,
+    constraints: [],
+  };
+  const result = (providers: ReadonlyArray<unknown>, features: Record<string, unknown> = {}) => ({
+    parentThreadId: null,
+    inheritedProviderInstanceId: null,
+    inheritedModel: null,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    providers,
+    rolePresets: [],
+    features: {
+      appOwnedSubagents: true,
+      asyncPolling: true,
+      cancellation: true,
+      batchThreadCreation: true,
+      threadManagement: true,
+      incrementalThreadRead: true,
+      scheduledTasks: true,
+      maxBatchThreads: 20,
+      ...features,
+    },
+  });
+
+  it("decodes a result from a server that predates headroom", () => {
+    const decoded = decodeCapabilitiesResult(result([provider]));
+    expect(decoded.providers[0]?.headroom).toBeUndefined();
+    expect(decoded.features.usageLimits).toBeUndefined();
+  });
+
+  it("carries per-instance headroom and rejects unknown verdicts", () => {
+    const decoded = decodeCapabilitiesResult(
+      result(
+        [
+          { ...provider, headroom: "low" },
+          { ...provider, headroom: "unknown" },
+        ],
+        {
+          usageLimits: true,
+        },
+      ),
+    );
+    expect(decoded.providers.map((entry) => entry.headroom)).toEqual(["low", "unknown"]);
+    expect(decoded.features.usageLimits).toBe(true);
+    expect(() => decodeCapabilitiesResult(result([{ ...provider, headroom: "full" }]))).toThrow();
   });
 });
