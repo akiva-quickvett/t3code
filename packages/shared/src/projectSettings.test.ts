@@ -22,6 +22,18 @@ const projectId = ProjectId.make("project-a");
 const otherProjectId = ProjectId.make("project-b");
 
 describe("resolveProjectSettings", () => {
+  it("merges a project's pod override over the environment's, keeping its Docker settings", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      podRuntime: { ...DEFAULT_SERVER_SETTINGS.podRuntime, dockerHost: "unix:///docker.sock" },
+      projectSettingsOverrides: { [projectId]: { podRuntime: { enabled: true } } },
+    };
+    expect(resolveProjectSettings(settings, projectId).settings.podRuntime).toEqual({
+      ...settings.podRuntime,
+      enabled: true,
+    });
+  });
+
   it("inherits every scopable key when the project has no overrides", () => {
     const resolved = resolveProjectSettings(DEFAULT_SERVER_SETTINGS, projectId);
     expect(resolved.settings).toBe(DEFAULT_SERVER_SETTINGS);

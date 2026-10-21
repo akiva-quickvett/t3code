@@ -48,6 +48,7 @@ import {
 } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
+import { EMPTY_POD_RUNTIME_STATE, reducePodRuntimeEvent } from "./podRuntime.ts";
 import {
   applyServerConfigProjection,
   type ServerConfigProjection,
@@ -1085,6 +1086,29 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:scheduled-tasks:live",
       tag: WS_METHODS.scheduledTasksSubscribe,
     }),
+    podRuntimeLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:pod-runtime:live",
+      tag: WS_METHODS.podRuntimeSubscribe,
+      transform: (stream) =>
+        stream.pipe(
+          Stream.scan(() => EMPTY_POD_RUNTIME_STATE, reducePodRuntimeEvent),
+          // The seed is not news; the first value is the server's snapshot.
+          Stream.drop(1),
+        ),
+    }),
+    // Whether a project's t3.json has a pod block; the composer offers containers only then.
+    podRuntimeProjectStatus: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:pod-runtime:project-status",
+      tag: WS_METHODS.podRuntimeStatus,
+      staleTimeMs: 60_000,
+    }),
+    // Asks Docker for orphans and memory, so it polls only while Diagnostics shows it.
+    podRuntimeDiagnostics: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:pod-runtime:diagnostics",
+      tag: WS_METHODS.podRuntimeStatus,
+      idleTtlMs: 0,
+      refreshIntervalMs: 10_000,
+    }),
     // Merged by the server; clients render this list and never layer presets themselves.
     agentRolePresetsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:agent-roles:live",
@@ -1285,6 +1309,30 @@ export function createServerEnvironmentAtoms<R, E>(
     signalProcess: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:signal-process",
       tag: WS_METHODS.serverSignalProcess,
+    }),
+    startPod: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:pod-runtime:start",
+      tag: WS_METHODS.podRuntimeStart,
+    }),
+    stopPod: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:pod-runtime:stop",
+      tag: WS_METHODS.podRuntimeStop,
+    }),
+    recreatePod: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:pod-runtime:recreate",
+      tag: WS_METHODS.podRuntimeRecreate,
+    }),
+    recreatePodAgentContainer: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:pod-runtime:recreate-agent-container",
+      tag: WS_METHODS.podRuntimeRecreateAgentContainer,
+    }),
+    removePod: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:pod-runtime:remove",
+      tag: WS_METHODS.podRuntimeRemove,
+    }),
+    openPodShell: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:pod-runtime:open-shell",
+      tag: WS_METHODS.podRuntimeOpenShell,
     }),
     saveAgentRolePreset: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:agent-roles:save",

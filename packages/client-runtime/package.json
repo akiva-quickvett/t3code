@@ -131,6 +131,10 @@
       "types": "./src/state/chatChannels.ts",
       "default": "./src/state/chatChannels.ts"
     },
+    "./state/pod-runtime": {
+      "types": "./src/state/podRuntime.ts",
+      "default": "./src/state/podRuntime.ts"
+    },
     "./state/auth": {
       "types": "./src/state/auth.ts",
       "default": "./src/state/auth.ts"

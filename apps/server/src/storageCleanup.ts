@@ -1,5 +1,6 @@
 import {
   GitCommandError,
+  WorktreePodTeardownError,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
 } from "@t3tools/contracts";
@@ -46,6 +47,8 @@ import * as TerminalManager from "./terminal/Manager.ts";
 import { isFilesystemRoot, managedWorktreesDirectories } from "./worktreesDirectory.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as WorktreeLifecycle from "./workspace/WorktreeLifecycle.ts";
+import { podHoldsWorktree } from "./pod/PodRuntimeLifecycle.ts";
+import * as PodRuntimeService from "./pod/PodRuntimeService.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -67,8 +70,10 @@ const ORPHAN_WORKTREE_GRACE_MS = 60 * 60 * 1_000;
 const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 const REPORT_ENTRY_LIMIT = 200;
 const isGitCommandError = Schema.is(GitCommandError);
+const isWorktreePodTeardownError = Schema.is(WorktreePodTeardownError);
 
 function cleanupFailureReason(error: { readonly message: string }) {
+  if (isWorktreePodTeardownError(error)) return `Teardown failed: ${error.message}`;
   return isGitCommandError(error)
     ? `${error.command}: ${error.detail.split(/\r?\n/)[0]}${error.reason ? ` (${error.reason})` : ""}`
     : (error.message.split(/\r?\n/)[0] ?? error.message);
@@ -209,6 +214,20 @@ const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const gitManager = yield* GitManager.GitManager;
   const worktreeLifecycle = yield* WorktreeLifecycle.WorktreeLifecycle;
+  const pods = yield* PodRuntimeService.PodRuntimeService;
+  // A pod holds its worktree unless it was stopped on purpose; a stopped pod is torn down with it.
+  const podHold = (worktreePath: string) =>
+    pods
+      .forPath(worktreePath)
+      .pipe(
+        Effect.map((pod) =>
+          pod === undefined || !podHoldsWorktree(pod.state)
+            ? null
+            : pod.state === "start_failed" || pod.state === "stop_failed"
+              ? "its pod failed; retry, stop or remove it first"
+              : "its pod is running",
+        ),
+      );
   const terminals = yield* TerminalManager.TerminalManager;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -610,6 +629,8 @@ const make = Effect.gen(function* () {
         if (group.some((member) => member.branch !== thread.branch))
           return keep("a subagent thread's branch differs from this worktree's branch");
         if (hasTerminal(worktreePath)) return keep("open terminal");
+        const heldByPod = yield* podHold(worktreePath);
+        if (heldByPod !== null) return keep(heldByPod);
         // Roots are canonical, so compare canonical paths. A symlinked parent
         // (a linked drive) is fine; a symlinked worktree directory is not.
         const realPath = yield* fs.realPath(worktreePath);
@@ -723,6 +744,8 @@ const make = Effect.gen(function* () {
             (entry) => path.resolve(entry.worktreePath) === worktreePath,
           );
           if (hasTerminal(worktreePath)) return "open terminal";
+          const stillHeldByPod = yield* podHold(worktreePath);
+          if (stillHeldByPod !== null) return stillHeldByPod;
           if (deleted) {
             if (
               latest.length > 0 ||

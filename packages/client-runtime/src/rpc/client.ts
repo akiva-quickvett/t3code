@@ -61,6 +61,7 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.scheduledTasksSubscribe
   | typeof WS_METHODS.agentRolesSubscribe
   | typeof WS_METHODS.chatChannelsSubscribe
+  | typeof WS_METHODS.podRuntimeSubscribe
   | typeof WS_METHODS.serverGetStorageCleanupReport
   | typeof WS_METHODS.serverGetDatabaseStorage
   | typeof WS_METHODS.subscribeTerminalEvents

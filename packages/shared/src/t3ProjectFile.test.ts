@@ -35,6 +35,7 @@ describe("buildT3ProjectFileJsonSchema", () => {
       "$schema",
       "defaultThreadEnvMode",
       "iconPath",
+      "pod",
       "scripts",
       "worktreeSubmodules",
     ]);
@@ -87,6 +88,29 @@ describe("parseT3ProjectFile", () => {
     expect(parseT3ProjectFile('{ "defaultThreadEnvMode": "worktree" }')).toEqual({
       defaultThreadEnvMode: "worktree",
     });
+  });
+
+  it("decodes a pod block and rejects a bad name, naming it", () => {
+    expect(
+      parseT3ProjectFile(
+        '{ "pod": { "services": { "web": 3000 }, "up": [" docker compose up -d "], "env": { "APP_ENV": "dev" } } }',
+      ),
+    ).toEqual({
+      pod: { services: { web: 3000 }, up: ["docker compose up -d"], env: { APP_ENV: "dev" } },
+    });
+    for (const [pod, named] of [
+      ['{ "services": { "Web App": 3000 } }', '"Web App" is not a valid service name'],
+      ['{ "services": {}, "env": { "A=B": "x" } }', '"A=B" is not a valid variable name'],
+      ['{ "services": {}, "env": { "DOCKER_HOST": "tcp://x" } }', "T3 Code sets it in the pod"],
+      [
+        '{ "services": {}, "env": { "HTTPS_PROXY": "http://user:pass@proxy:3128" } }',
+        "proxy URL with credentials",
+      ],
+    ] as const) {
+      expect(parseT3ProjectFile(`{ "pod": ${pod} }`)).toBeNull();
+      expect(() => decodeJson(`{ "pod": ${pod} }`)).toThrow(named);
+    }
+    expect(parseT3ProjectFile('{ "pod": { "services": { "web": 70000 } } }')).toBeNull();
   });
 
   it("returns null for malformed or invalid contents", () => {

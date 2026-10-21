@@ -42,6 +42,7 @@ import {
   type BranchToolbarBranchSelectorHandle,
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
+import { ComposerRuntimeSelector } from "./pods/ComposerRuntimeSelector";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { PreviousWorktreeItemContent } from "./PreviousWorktreeItemContent";
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
@@ -659,6 +660,23 @@ export const BranchToolbar = memo(function BranchToolbar({
 
   if (!hasActiveThread || !activeProject) return null;
 
+  // Only a new worktree can still choose; an existing one keeps its runtime.
+  const runtimeSelector =
+    draftThread !== null &&
+    serverThread === null &&
+    effectiveEnvMode === "worktree" &&
+    !envModeLocked &&
+    !forceNewWorktree ? (
+      <ComposerRuntimeSelector
+        environmentId={environmentId}
+        projectId={activeProject.id}
+        value={draftThread.worktreeRuntime ?? "host"}
+        onChange={(worktreeRuntime) =>
+          setDraftThreadContext(draftId ?? threadRef, { worktreeRuntime })
+        }
+      />
+    ) : null;
+
   if (layout === "panel") {
     return (
       <div className="flex w-full flex-col" data-thread-panel-run-context>
@@ -684,6 +702,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             onUsePreviousWorktree={onUsePreviousWorktree}
           />
         ) : null}
+        {panelSection !== "branch" ? runtimeSelector : null}
         {panelSection !== "workspace" ? (
           <BranchToolbarBranchSelector
             displayMode="panel"
@@ -737,6 +756,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
             onUsePreviousWorktree={onUsePreviousWorktree}
           />
+          {runtimeSelector}
         </div>
       ) : null}
       {showGitControls || showEnvironmentIndicator ? (
@@ -778,6 +798,7 @@ export const BranchToolbar = memo(function BranchToolbar({
               onUsePreviousWorktree={onUsePreviousWorktree}
             />
           ) : null}
+          {showGitControls ? runtimeSelector : null}
         </div>
       ) : null}
 

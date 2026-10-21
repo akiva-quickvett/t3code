@@ -1,0 +1,765 @@
+import {
+  PodRuntimeError,
+  PodRuntimeId,
+  type PodRuntimeOpenShellInput,
+  type PodRuntimeOpenShellResult,
+  type PodRuntimeOperation,
+  type PodRuntimeOrphan,
+  type PodRuntimeRemoveInput,
+  type PodRuntimeRequest,
+  type PodRuntimeSnapshot,
+  type PodRuntimeStats,
+  type PodRuntimeStatus,
+  type PodRuntimeStatusInput,
+  type PodRuntimeStreamEvent,
+  type ProjectId,
+  type T3ProjectFilePod,
+} from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Result from "effect/Result";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as TxRef from "effect/TxRef";
+
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as ContainerDriver from "./ContainerDriver.ts";
+import { POD_ENVIRONMENT_LABEL, POD_LABEL, planPod } from "./PodContainerPlan.ts";
+import {
+  runPodOperation,
+  type PodOperationContext,
+  type PodOperationResult,
+} from "./PodOperations.ts";
+import { resolvePodProviderMounts } from "./PodProviderMounts.ts";
+import {
+  isPodTransitional,
+  type PodObservation,
+  planPodCompletion,
+  planPodObservation,
+  planPodRequest,
+  type PodRuntimeEvent,
+  type PodRuntimeRecord,
+} from "./PodRuntimeLifecycle.ts";
+import * as PodRuntimeStore from "./PodRuntimeStore.ts";
+
+export class PodRuntimeService extends Context.Service<
+  PodRuntimeService,
+  {
+    /**
+     * Records a pod for a new worktree and starts creating it. Returns once the
+     * intent is committed; `awaitSettled` waits for the containers.
+     */
+    readonly create: (input: {
+      readonly projectId: ProjectId;
+      readonly worktreePath: string;
+    }) => Effect.Effect<PodRuntimeSnapshot, PodRuntimeError>;
+    readonly start: (podId: PodRuntimeId) => Effect.Effect<PodRuntimeSnapshot, PodRuntimeError>;
+    readonly stop: (podId: PodRuntimeId) => Effect.Effect<PodRuntimeSnapshot, PodRuntimeError>;
+    /** Removes the pod's containers and volume and creates them again: the stack's data is lost. */
+    readonly recreate: (podId: PodRuntimeId) => Effect.Effect<PodRuntimeSnapshot, PodRuntimeError>;
+    /** Replaces only the agent container; the daemon, its volume and the stack keep running. */
+    readonly recreateAgentContainer: (
+      podId: PodRuntimeId,
+    ) => Effect.Effect<PodRuntimeSnapshot, PodRuntimeError>;
+    /** Null when the id named an orphan, which is removed right away. */
+    readonly remove: (
+      input: PodRuntimeRemoveInput,
+    ) => Effect.Effect<PodRuntimeSnapshot | null, PodRuntimeError>;
+    readonly status: (
+      input: PodRuntimeStatusInput,
+    ) => Effect.Effect<PodRuntimeStatus, PodRuntimeError>;
+    readonly subscribe: Stream.Stream<PodRuntimeStreamEvent, PodRuntimeError>;
+    readonly openShell: (
+      input: PodRuntimeOpenShellInput,
+    ) => Effect.Effect<PodRuntimeOpenShellResult, PodRuntimeError>;
+    /**
+     * The pod, not yet removed, whose worktree is `path` or contains it; with
+     * `includeRemoved`, the latest pod the path ever had.
+     */
+    readonly forPath: (
+      path: string,
+      options?: { readonly includeRemoved?: boolean },
+    ) => Effect.Effect<PodRuntimeSnapshot | undefined>;
+    /** Waits until the pod is in no transitional state; a removed pod counts as settled. */
+    readonly awaitSettled: (
+      podId: PodRuntimeId,
+    ) => Effect.Effect<PodRuntimeSnapshot, PodRuntimeError>;
+    /**
+     * Starts the pod when it is stopped or failed and waits; fails unless it
+     * ends up running. Refused with pods turned off, except for a teardown,
+     * which is the way out.
+     */
+    readonly ensureRunning: (
+      podId: PodRuntimeId,
+      options?: { readonly forTeardown?: boolean },
+    ) => Effect.Effect<PodRuntimeSnapshot, PodRuntimeError>;
+    /**
+     * Marks the worktree at `worktreePath` gone for every removed pod that had
+     * it, so a host worktree made later at the same path runs its own teardown.
+     */
+    readonly releaseWorktree: (worktreePath: string) => Effect.Effect<void, PodRuntimeError>;
+    /** Resolves once every queued Docker operation has finished. */
+    readonly drain: Effect.Effect<void>;
+  }
+>()("t3/pod/PodRuntimeService") {}
+
+const POD_SHELL_TERMINAL_ID = "pod-shell";
+const OPERATION_CRASHED = "The pod operation stopped unexpectedly; see the server log.";
+const isPodRuntimeId = Schema.is(PodRuntimeId);
+const EMPTY_POD_CONFIG: T3ProjectFilePod = { services: {} };
+const STARTS_CONTAINERS = new Set<PodRuntimeOperation>([
+  "start",
+  "recreate",
+  "recreateAgentContainer",
+]);
+
+interface QueuedOperation {
+  readonly podId: PodRuntimeId;
+  readonly operation: PodRuntimeOperation;
+  readonly force: boolean;
+}
+
+const make = Effect.gen(function* () {
+  const store = yield* PodRuntimeStore.PodRuntimeStore;
+  const driver = yield* ContainerDriver.ContainerDriver;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const projects = yield* ProjectService.ProjectService;
+  const projectFiles = yield* T3ProjectFileLoader.T3ProjectFileLoader;
+  const git = yield* GitVcsDriver.GitVcsDriver;
+  const terminals = yield* TerminalManager.TerminalManager;
+  const environmentId = yield* (yield* ServerEnvironment.ServerEnvironmentIdentity)
+    .getEnvironmentId;
+  const crypto = yield* Crypto.Crypto;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const homeDirectory = yield* HostProcess.HomeDirectory;
+  const uid = yield* HostProcess.UserId;
+  const gid = yield* HostProcess.GroupId;
+  const services = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
+
+  // Commands read and commit a pod's record under its state lock; its Docker
+  // operations run one at a time under the operation lock, so a Remove asked
+  // for mid-start is recorded at once and runs when the start returns.
+  const stateLocks = yield* KeyedLock.make<PodRuntimeId>();
+  const operationLocks = yield* KeyedLock.make<PodRuntimeId>();
+  const workerScope = yield* Effect.scope;
+  const outstanding = yield* TxRef.make(0);
+  // Kept per Docker host, so a host that cannot answer keeps its last known orphans.
+  let orphans: ReadonlyArray<{ readonly host: string; readonly orphan: PodRuntimeOrphan }> = [];
+
+  const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+  const unavailable = (podId?: PodRuntimeId) => (cause: unknown) =>
+    Effect.logError("pod runtime state could not be read or recorded", cause).pipe(
+      Effect.andThen(
+        Effect.fail(
+          new PodRuntimeError({ reason: "unavailable", ...(podId === undefined ? {} : { podId }) }),
+        ),
+      ),
+    );
+
+  const commit = (podId: PodRuntimeId, events: ReadonlyArray<PodRuntimeEvent>) =>
+    store.commit(podId, events).pipe(Effect.catch(unavailable(podId)));
+
+  const requireRecord = (podId: PodRuntimeId) =>
+    store
+      .get(podId)
+      .pipe(
+        Effect.flatMap((record) =>
+          record === undefined || record.snapshot.state === "removed"
+            ? Effect.fail(new PodRuntimeError({ reason: "not-found", podId }))
+            : Effect.succeed(record),
+        ),
+      );
+
+  const settingsFor = (projectId: ProjectId | null) =>
+    serverSettings.getSettings.pipe(
+      Effect.map((settings) => ({
+        settings,
+        podRuntime: resolveProjectSettings(settings, projectId).settings.podRuntime,
+      })),
+      Effect.catch(unavailable()),
+    );
+
+  const loadPodConfig = (...roots: ReadonlyArray<string>) =>
+    Effect.gen(function* () {
+      for (const root of roots) {
+        const file = yield* projectFiles.load(root);
+        if (Option.isSome(file)) return file.value.pod;
+      }
+      return undefined;
+    });
+
+  const projectRoot = (projectId: ProjectId) =>
+    projects
+      .getById(projectId, { includeDeleted: true })
+      .pipe(
+        Effect.map(Option.map((project) => project.workspaceRoot)),
+        Effect.map(Option.getOrUndefined),
+        Effect.catch(unavailable()),
+      );
+
+  const existingPath = (candidate: string) =>
+    fileSystem.exists(candidate).pipe(
+      Effect.orElseSucceed(() => false),
+      Effect.map((exists) => (exists ? candidate : null)),
+    );
+
+  const seedsFor = (root: string | undefined) => {
+    if (root === undefined) return Effect.succeed(null);
+    const name = path.basename(root);
+    return existingPath(path.join(homeDirectory, "pods", "seeds", name)).pipe(
+      Effect.map((dir) => (dir === null ? null : { dir, name })),
+    );
+  };
+
+  const operationContext = Effect.fn("PodRuntimeService.operationContext")(function* (
+    record: PodRuntimeRecord,
+  ) {
+    const { snapshot } = record;
+    const root = yield* projectRoot(snapshot.projectId);
+    const { settings, podRuntime } = yield* settingsFor(snapshot.projectId);
+    const config =
+      (yield* loadPodConfig(snapshot.worktreePath, ...(root === undefined ? [] : [root]))) ??
+      EMPTY_POD_CONFIG;
+    const gitCommonDir = yield* git
+      .execute({
+        operation: "PodRuntimeService.gitCommonDir",
+        cwd: snapshot.worktreePath,
+        args: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      })
+      .pipe(
+        Effect.map((result) => result.stdout.trim()),
+        Effect.orElseSucceed(() => path.join(root ?? snapshot.worktreePath, ".git")),
+      );
+    const providerMounts = yield* resolvePodProviderMounts(settings, snapshot.projectId).pipe(
+      Effect.provide(services),
+    );
+    const plan = planPod({
+      podId: snapshot.id,
+      environmentId,
+      image: snapshot.image,
+      network: podRuntime.network,
+      worktreePath: snapshot.worktreePath,
+      gitCommonDir,
+      homeDirectory,
+      user: uid === undefined || gid === undefined ? null : { uid, gid },
+      providerMounts,
+      gitConfigPath: yield* existingPath(path.join(homeDirectory, ".gitconfig")),
+      ghConfigDir: yield* existingPath(path.join(homeDirectory, ".config", "gh")),
+      seeds: yield* seedsFor(root),
+      podEnv: config.env ?? {},
+    });
+    return {
+      podId: snapshot.id,
+      environmentId,
+      host: driver.forHost(record.dockerHost),
+      plan,
+      network: podRuntime.network,
+      config,
+      worktreePath: snapshot.worktreePath,
+    } satisfies PodOperationContext;
+  });
+
+  /**
+   * Records how a queued operation ended. Retried, because a transitional
+   * state left behind would have no way out until the next restart.
+   */
+  const complete = (item: QueuedOperation, failure: string | null, result?: PodOperationResult) =>
+    stateLocks
+      .withLock(
+        item.podId,
+        Effect.gen(function* () {
+          const current = yield* store.get(item.podId);
+          if (current === undefined) return;
+          // "Remove anyway": forget the pod even though Docker refused.
+          const forced = failure !== null && item.force && item.operation === "remove";
+          const event = planPodCompletion(
+            current,
+            item.operation,
+            failure === null
+              ? { type: "succeeded", containerIds: [], volumeIds: [], ...result }
+              : forced
+                ? { type: "succeeded", containerIds: [], volumeIds: [], forced: true }
+                : { type: "failed", message: failure },
+            yield* nowIso,
+          );
+          if (event !== null) yield* commit(item.podId, [event]);
+        }),
+      )
+      .pipe(Effect.retry({ schedule: Schedule.exponential("500 millis"), times: 5 }));
+
+  const runQueued = Effect.fn("PodRuntimeService.runQueued")(function* (item: QueuedOperation) {
+    const record = yield* store.get(item.podId);
+    // A later request moved the pod on; this operation no longer applies.
+    if (record === undefined || isStale(record, item.operation)) return;
+    const outcome = yield* operationContext(record).pipe(
+      Effect.flatMap((context) => runPodOperation(item.operation, context)),
+      Effect.result,
+    );
+    if (Result.isFailure(outcome)) {
+      yield* Effect.logWarning("pod operation failed", {
+        podId: item.podId,
+        operation: item.operation,
+        error: outcome.failure._tag,
+      });
+      return yield* complete(item, outcome.failure.message);
+    }
+    yield* complete(item, null, outcome.success);
+  });
+
+  const isStale = (record: PodRuntimeRecord, operation: PodRuntimeOperation) =>
+    planPodCompletion(record, operation, { type: "failed", message: "" }, "") === null;
+
+  /** Runs after the request's commit; a lost process leaves the transitional state for reconcile. */
+  const enqueue = (item: QueuedOperation) =>
+    TxRef.update(outstanding, (count) => count + 1).pipe(
+      Effect.tx,
+      Effect.andThen(
+        operationLocks.withLock(item.podId, runQueued(item)).pipe(
+          // A defect, or a completion that could not be recorded, still ends the
+          // operation as failed so its Retry is offered.
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.void
+              : Effect.logError("pod operation crashed", cause).pipe(
+                  Effect.andThen(complete(item, OPERATION_CRASHED)),
+                  Effect.catchCause((recordCause) =>
+                    Effect.logError("pod operation failure could not be recorded", recordCause),
+                  ),
+                ),
+          ),
+          Effect.ensuring(TxRef.update(outstanding, (count) => count - 1).pipe(Effect.tx)),
+          Effect.forkIn(workerScope),
+        ),
+      ),
+      Effect.asVoid,
+    );
+
+  const request = (
+    podId: PodRuntimeId,
+    operation: PodRuntimeRequest,
+    options: { readonly force?: boolean; readonly allowWhenOff?: boolean } = {},
+  ) =>
+    stateLocks.withLock(
+      podId,
+      Effect.gen(function* () {
+        const force = options.force === true;
+        const record = yield* requireRecord(podId);
+        // Turning pods off stops new containers, never the way out: Stop and
+        // Remove still work, and so does a teardown's start.
+        if (options.allowWhenOff !== true && STARTS_CONTAINERS.has(operation)) {
+          const { podRuntime } = yield* settingsFor(record.snapshot.projectId);
+          if (!podRuntime.enabled) return yield* new PodRuntimeError({ reason: "disabled", podId });
+        }
+        const planned = planPodRequest(record, operation, yield* nowIso);
+        if (Result.isFailure(planned)) return yield* planned.failure;
+        if (planned.success.type === "none") return record.snapshot;
+        const { event } = planned.success;
+        const next = yield* commit(podId, [event]);
+        if (event.type === "pod.operation-requested")
+          yield* enqueue({ podId, operation: event.operation, force });
+        return next?.snapshot ?? record.snapshot;
+      }),
+    );
+
+  const create: PodRuntimeService["Service"]["create"] = Effect.fn("PodRuntimeService.create")(
+    function* (input) {
+      const worktreePath = path.resolve(input.worktreePath);
+      const { podRuntime } = yield* settingsFor(input.projectId);
+      const root = yield* projectRoot(input.projectId);
+      const config = yield* loadPodConfig(worktreePath, ...(root === undefined ? [] : [root]));
+      const suffix = (yield* crypto.randomUUIDv4().pipe(Effect.orDie)).replaceAll("-", "");
+      const podId = PodRuntimeId.make(`pod-${suffix.slice(0, 12)}`);
+      // The lease makes the check and the record one step per worktree, so two
+      // launches cannot record two pods, and storage cleanup, which holds it
+      // while removing, cannot take the checkout from under a new pod.
+      return yield* withWorkspaceLease(
+        worktreePath,
+        Effect.gen(function* () {
+          const existing = yield* store.findByPath(worktreePath);
+          if (existing !== undefined) return existing.snapshot;
+          if (!podRuntime.enabled) return yield* new PodRuntimeError({ reason: "disabled" });
+          if (config === undefined) return yield* new PodRuntimeError({ reason: "not-configured" });
+          const created = yield* stateLocks.withLock(
+            podId,
+            commit(podId, [
+              {
+                type: "pod.created",
+                podId,
+                occurredAt: yield* nowIso,
+                projectId: input.projectId,
+                worktreePath,
+                image: podRuntime.defaultImage,
+                dockerHost: podRuntime.dockerHost,
+                services: Object.entries(config.services).map(([name, port]) => ({ name, port })),
+              },
+            ]),
+          );
+          yield* enqueue({ podId, operation: "create", force: false });
+          return created!.snapshot;
+        }),
+      );
+    },
+  );
+
+  const dockerHosts = Effect.gen(function* () {
+    const hosts = new Set<string>();
+    const environment = yield* settingsFor(null).pipe(Effect.option);
+    if (Option.isSome(environment)) hosts.add(environment.value.podRuntime.dockerHost);
+    for (const record of yield* store.list)
+      if (record.snapshot.state !== "removed") hosts.add(record.dockerHost);
+    return hosts;
+  });
+
+  interface PodGroup {
+    readonly host: string;
+    readonly containers: Array<ContainerDriver.PodContainerInfo>;
+    readonly volumes: Array<ContainerDriver.PodVolumeInfo>;
+  }
+
+  interface Owned {
+    readonly groups: ReadonlyMap<PodRuntimeId, PodGroup>;
+    readonly answered: ReadonlySet<string>;
+  }
+
+  /**
+   * Only what carries this environment's label is ever looked at; other
+   * servers' pods and anything unlabelled stay invisible. `answered` names the
+   * hosts that listed: a host that could not tells nothing about its pods.
+   */
+  const listOwned: Effect.Effect<Owned> = Effect.gen(function* () {
+    const groups = new Map<PodRuntimeId, PodGroup>();
+    const answered = new Set<string>();
+    for (const host of yield* dockerHosts) {
+      const listed = yield* driver
+        .forHost(host)
+        .list(POD_LABEL)
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("could not list pods on a Docker host", {
+              operation: error.operation,
+            }).pipe(Effect.as(undefined)),
+          ),
+        );
+      if (listed === undefined) continue;
+      answered.add(host);
+      const group = (labels: Readonly<Record<string, string>>) => {
+        const podId = labels[POD_LABEL];
+        if (labels[POD_ENVIRONMENT_LABEL] !== environmentId || !isPodRuntimeId(podId))
+          return undefined;
+        const existing = groups.get(podId) ?? { host, containers: [], volumes: [] };
+        groups.set(podId, existing);
+        return existing;
+      };
+      for (const container of listed.containers)
+        group(container.labels)?.containers.push(container);
+      for (const volume of listed.volumes) group(volume.labels)?.volumes.push(volume);
+    }
+    return { groups, answered };
+  });
+
+  const observe = (group: PodGroup | undefined): PodObservation => {
+    const containers = group?.containers ?? [];
+    const byRole = (role: string) =>
+      containers.find((container) => container.labels["t3.role"] === role);
+    const dind = byRole("dind");
+    const agent = byRole("agent");
+    const both = dind !== undefined && agent !== undefined;
+    return {
+      containerIds: containers.map((container) => container.id),
+      volumeIds: (group?.volumes ?? []).map((volume) => volume.name),
+      running: both && dind.status === "running" && agent.status === "running",
+      paused: both && dind.status === "paused" && agent.status === "paused",
+      halted: containers.every(
+        (container) => container.status !== "running" && container.status !== "paused",
+      ),
+    };
+  };
+
+  const refreshOrphans = (owned: Owned) =>
+    Effect.gen(function* () {
+      const found: Array<{ readonly host: string; readonly orphan: PodRuntimeOrphan }> = [];
+      for (const [podId, group] of owned.groups) {
+        const record = yield* store.get(podId);
+        if (record !== undefined && record.snapshot.state !== "removed") continue;
+        found.push({
+          host: group.host,
+          orphan: {
+            podId,
+            containerIds: group.containers.map((container) => container.id),
+            volumeIds: group.volumes.map((volume) => volume.name),
+            running: group.containers.some((container) => container.status === "running"),
+          },
+        });
+      }
+      orphans = [...orphans.filter((entry) => !owned.answered.has(entry.host)), ...found];
+    });
+
+  // What this process found on disk. Reconcile settles only these records,
+  // and only while untouched: a pod a command changed since is this process's own.
+  const startupRecords = (yield* store.list).filter(
+    (record) => record.snapshot.state !== "removed",
+  );
+
+  /**
+   * Startup only: settles each recorded pod against Docker and lists orphans.
+   * Orphans are shown, never deleted; only an explicit Remove takes them.
+   */
+  const reconcile = Effect.gen(function* () {
+    const enabled = (yield* settingsFor(null).pipe(Effect.option)).pipe(
+      Option.map(({ podRuntime }) => podRuntime.enabled),
+      Option.getOrElse(() => false),
+    );
+    // A server that never used pods does not even ask Docker.
+    if (startupRecords.length === 0 && !enabled) return;
+    const owned = yield* listOwned;
+    for (const record of startupRecords) {
+      const podId = record.snapshot.id;
+      // Silence from a daemon that is down is not news that the pod is gone.
+      if (!owned.answered.has(record.dockerHost)) continue;
+      yield* stateLocks.withLock(
+        podId,
+        Effect.gen(function* () {
+          const current = yield* store.get(podId);
+          if (current === undefined || current.snapshot !== record.snapshot) return;
+          const event = planPodObservation(
+            current,
+            observe(owned.groups.get(podId)),
+            yield* nowIso,
+          );
+          if (event !== null) yield* commit(podId, [event]).pipe(Effect.ignore);
+        }),
+      );
+    }
+    yield* refreshOrphans(owned);
+  });
+
+  const removeOrphan = (podId: PodRuntimeId) =>
+    Effect.gen(function* () {
+      const group = (yield* listOwned).groups.get(podId);
+      if (group === undefined) return yield* new PodRuntimeError({ reason: "not-found", podId });
+      const host = driver.forHost(group.host);
+      const failure = (error: ContainerDriver.ContainerDriverError) =>
+        Effect.logWarning("orphan pod removal failed", { podId, operation: error.operation }).pipe(
+          Effect.andThen(Effect.fail(new PodRuntimeError({ reason: "unavailable", podId }))),
+        );
+      for (const container of group.containers)
+        yield* host.removeContainer(container.id).pipe(Effect.catch(failure));
+      for (const volume of group.volumes)
+        yield* host.removeVolume(volume.name).pipe(Effect.catch(failure));
+      orphans = orphans.filter((entry) => entry.orphan.podId !== podId);
+      return null;
+    });
+
+  const remove: PodRuntimeService["Service"]["remove"] = (input) =>
+    store
+      .get(input.podId)
+      .pipe(
+        Effect.flatMap((record) =>
+          record === undefined || record.snapshot.state === "removed"
+            ? operationLocks.withLock(input.podId, removeOrphan(input.podId))
+            : request(input.podId, "remove", { force: input.force === true }),
+        ),
+      );
+
+  const liveSnapshots = store.list.pipe(
+    Effect.map((records) =>
+      records
+        .filter((record) => record.snapshot.state !== "removed")
+        .map((record) => record.snapshot),
+    ),
+  );
+
+  /**
+   * One `docker stats` per Docker host, with only the ids that host just
+   * listed: an id removed outside T3 would fail the whole call.
+   */
+  const stats = (owned: Owned) =>
+    Effect.gen(function* () {
+      const live = (yield* store.list).filter((record) => record.snapshot.state !== "removed");
+      const listedIds = (podId: PodRuntimeId) =>
+        owned.groups.get(podId)?.containers.map((container) => container.id) ?? [];
+      const usage = new Map<string, number>();
+      for (const host of owned.answered) {
+        const ids = live
+          .filter((record) => record.dockerHost === host)
+          .flatMap((record) => listedIds(record.snapshot.id));
+        const measured = yield* driver
+          .forHost(host)
+          .memoryUsage(ids)
+          .pipe(Effect.orElseSucceed(() => new Map<string, number>()));
+        for (const [id, bytes] of measured) usage.set(id, bytes);
+      }
+      return live.map(({ snapshot }): PodRuntimeStats => {
+        const bytes = listedIds(snapshot.id).flatMap((id) => {
+          const value = usage.get(id);
+          return value === undefined ? [] : [value];
+        });
+        return {
+          podId: snapshot.id,
+          memoryBytes: bytes.length === 0 ? null : bytes.reduce((sum, value) => sum + value, 0),
+        };
+      });
+    });
+
+  const status: PodRuntimeService["Service"]["status"] = Effect.fn("PodRuntimeService.status")(
+    function* (input) {
+      const { podRuntime } = yield* settingsFor(input.projectId ?? null);
+      let projectConfigured: boolean | undefined;
+      if (input.projectId !== undefined) {
+        const root = yield* projectRoot(input.projectId);
+        projectConfigured = root !== undefined && (yield* loadPodConfig(root)) !== undefined;
+      }
+      // Docker is asked only when the Diagnostics screen polls.
+      const owned = input.includeStats === true ? yield* listOwned : null;
+      if (owned !== null) yield* refreshOrphans(owned);
+      return {
+        enabled: podRuntime.enabled,
+        pods: yield* liveSnapshots,
+        orphans: orphans.map((entry) => entry.orphan),
+        ...(projectConfigured === undefined ? {} : { projectConfigured }),
+        ...(owned === null ? {} : { stats: yield* stats(owned) }),
+      };
+    },
+  );
+
+  const subscribe: PodRuntimeService["Service"]["subscribe"] = Stream.unwrap(
+    Effect.gen(function* () {
+      const subscription = yield* store.subscribe;
+      const { podRuntime } = yield* settingsFor(null);
+      const snapshot: PodRuntimeStreamEvent = {
+        type: "snapshot",
+        enabled: podRuntime.enabled,
+        pods: yield* liveSnapshots,
+      };
+      return Stream.concat(
+        Stream.make(snapshot),
+        Stream.fromSubscription(subscription).pipe(
+          Stream.map((record): PodRuntimeStreamEvent => ({ type: "upsert", pod: record.snapshot })),
+        ),
+      );
+    }),
+  );
+
+  const awaitSettled: PodRuntimeService["Service"]["awaitSettled"] = (podId) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const subscription = yield* store.subscribe;
+        // A removed pod is settled too: teardown waits for exactly that.
+        const current = yield* store.get(podId);
+        if (current === undefined)
+          return yield* new PodRuntimeError({ reason: "not-found", podId });
+        if (!isPodTransitional(current.snapshot.state)) return current.snapshot;
+        const settled = yield* Stream.fromSubscription(subscription).pipe(
+          Stream.filter(
+            (record) => record.snapshot.id === podId && !isPodTransitional(record.snapshot.state),
+          ),
+          Stream.runHead,
+        );
+        return Option.getOrElse(settled, () => current).snapshot;
+      }),
+    );
+
+  const ensureRunning: PodRuntimeService["Service"]["ensureRunning"] = (podId, options) =>
+    Effect.gen(function* () {
+      const current = yield* requireRecord(podId);
+      if (current.snapshot.state !== "running" && !isPodTransitional(current.snapshot.state))
+        yield* request(podId, "start", { allowWhenOff: options?.forTeardown === true });
+      const settled = yield* awaitSettled(podId);
+      if (settled.state !== "running")
+        return yield* new PodRuntimeError({
+          reason: "invalid-state",
+          podId,
+          state: settled.state,
+          ...(settled.lastError === null ? {} : { lastError: settled.lastError }),
+        });
+      return settled;
+    });
+
+  const openShell: PodRuntimeService["Service"]["openShell"] = (input) =>
+    Effect.gen(function* () {
+      const record = yield* requireRecord(input.podId);
+      if (record.snapshot.state !== "running")
+        return yield* new PodRuntimeError({
+          reason: "invalid-state",
+          podId: input.podId,
+          state: record.snapshot.state,
+        });
+      // The terminal manager runs any terminal on a pod's worktree inside the pod.
+      yield* terminals
+        .open({
+          threadId: input.threadId,
+          terminalId: POD_SHELL_TERMINAL_ID,
+          cwd: record.snapshot.worktreePath,
+          worktreePath: record.snapshot.worktreePath,
+        })
+        .pipe(Effect.catch(unavailable(input.podId)));
+      return { threadId: input.threadId, terminalId: POD_SHELL_TERMINAL_ID };
+    });
+
+  yield* TxRef.update(outstanding, (count) => count + 1).pipe(Effect.tx);
+  yield* reconcile.pipe(
+    Effect.catchCause((cause) => Effect.logWarning("pod reconcile failed", cause)),
+    Effect.ensuring(TxRef.update(outstanding, (count) => count - 1).pipe(Effect.tx)),
+    Effect.forkIn(workerScope),
+  );
+
+  return PodRuntimeService.of({
+    create,
+    start: (podId) => request(podId, "start"),
+    stop: (podId) => request(podId, "stop"),
+    recreate: (podId) => request(podId, "recreate"),
+    recreateAgentContainer: (podId) => request(podId, "recreateAgentContainer"),
+    remove,
+    status,
+    subscribe,
+    openShell,
+    forPath: (target, options) =>
+      store.findByPath(target, options).pipe(Effect.map((record) => record?.snapshot)),
+    awaitSettled,
+    ensureRunning,
+    releaseWorktree: (worktreePath) =>
+      Effect.gen(function* () {
+        const target = path.resolve(worktreePath);
+        for (const record of yield* store.list) {
+          if (path.resolve(record.snapshot.worktreePath) !== target) continue;
+          const podId = record.snapshot.id;
+          yield* stateLocks.withLock(
+            podId,
+            Effect.gen(function* () {
+              const current = yield* store.get(podId);
+              if (current?.snapshot.state !== "removed" || current.worktreeReleased === true)
+                return;
+              yield* commit(podId, [
+                { type: "pod.worktree-released", podId, occurredAt: yield* nowIso },
+              ]);
+            }),
+          );
+        }
+      }),
+    drain: TxRef.get(outstanding).pipe(
+      Effect.flatMap((count) => (count > 0 ? Effect.txRetry : Effect.void)),
+      Effect.tx,
+    ),
+  });
+});
+
+export const layer = Layer.effect(PodRuntimeService, make);

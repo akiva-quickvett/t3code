@@ -15,6 +15,7 @@ import {
   type ScopedThreadRef,
   ThreadId,
   sessionGrantsScope,
+  WorktreePodTeardownError,
 } from "@t3tools/contracts";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import * as Cause from "effect/Cause";
@@ -53,6 +54,7 @@ import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
+import { requestConfirmDialog } from "../confirmDialog";
 import { useClientSettings } from "./useSettings";
 import * as ThreadUndo from "./threadUndo";
 import { showThreadUndoNotice } from "./showThreadUndoNotice";
@@ -569,6 +571,20 @@ export function useThreadActions() {
         : refreshResult?._tag === "Failure"
           ? refreshResult
           : null;
+    const removalError =
+      removeResult._tag === "Failure" ? squashAtomCommandFailure(removeResult) : null;
+    if (isWorktreePodTeardownError(removalError)) {
+      // A pod's worktree is kept when its teardown fails: offer the way out here.
+      offerPodTeardownRecovery({
+        environmentId: threadRef.environmentId,
+        cwd: threadProject.workspaceRoot,
+        path: orphanedWorktreePath,
+        label: displayWorktreePath ?? orphanedWorktreePath,
+        error: removalError,
+        attempt: "retry",
+      });
+      return deleteResult;
+    }
     if (cleanupFailure) {
       const removalFailed = removeResult._tag === "Failure";
       const error = squashAtomCommandFailure(cleanupFailure);
@@ -594,6 +610,69 @@ export function useThreadActions() {
       // failure would make callers incorrectly report a thread deletion error.
     }
     return deleteResult;
+  };
+
+  /**
+   * Retry first; if the teardown fails again, offer Remove anyway, which skips
+   * the script and forgets the pod even if Docker refuses.
+   */
+  const offerPodTeardownRecovery = (failed: {
+    readonly environmentId: EnvironmentId;
+    readonly cwd: string;
+    readonly path: string;
+    readonly label: string;
+    readonly error: WorktreePodTeardownError;
+    readonly attempt: "retry" | "removeAnyway";
+  }) => {
+    const run = async () => {
+      if (
+        failed.attempt === "removeAnyway" &&
+        !(
+          (await requestConfirmDialog(
+            "Remove this worktree anyway?\nIts pod's teardown script is skipped and the pod is removed even if Docker refuses; anything it keeps is listed under Settings → Diagnostics → Pods.",
+            { variant: "destructive" },
+          )) ?? window.confirm("Remove this worktree anyway?")
+        )
+      )
+        return;
+      const result = await removeWorktree({
+        environmentId: failed.environmentId,
+        input: {
+          cwd: failed.cwd,
+          path: failed.path,
+          force: true,
+          ...(failed.attempt === "removeAnyway" ? { skipPodTeardown: true } : {}),
+        },
+      });
+      if (result._tag === "Success") {
+        void refreshVcsStatus({ environmentId: failed.environmentId, input: { cwd: failed.cwd } });
+        return;
+      }
+      const error = squashAtomCommandFailure(result);
+      if (isWorktreePodTeardownError(error)) {
+        offerPodTeardownRecovery({ ...failed, error, attempt: "removeAnyway" });
+        return;
+      }
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Failed to delete worktree",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    };
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Kept the worktree",
+        description: `${failed.label}: ${failed.error.message}`,
+        timeout: 0,
+        actionProps: {
+          children: failed.attempt === "retry" ? "Retry" : "Remove anyway",
+          onClick: () => void run(),
+        },
+      }),
+    );
   };
 
   const unsettleThread = async (target: ScopedThreadRef) => {
@@ -910,3 +989,5 @@ export function useThreadActions() {
     setThreadAutoSettle,
   };
 }
+
+const isWorktreePodTeardownError = Schema.is(WorktreePodTeardownError);

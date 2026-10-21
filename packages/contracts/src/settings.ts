@@ -1,4 +1,5 @@
 import { AgentRolePresetSettings } from "./agentRole.ts";
+import { PodRuntimeSettings, PodRuntimeSettingsPatch } from "./podRuntime.ts";
 import { SshDeviceHostConfigs } from "./device.ts";
 import {
   AuthOrchestrationOperateScope,
@@ -949,6 +950,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "sidebarAutoSettleKeepPullRequests",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
+  "podRuntime",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -993,6 +995,8 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  /** Merged over the environment's, so overriding `enabled` leaves its Docker settings live. */
+  podRuntime: Schema.optionalKey(PodRuntimeSettingsPatch),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1129,6 +1133,9 @@ export const ServerSettings = Schema.Struct({
   ),
   worktreeRemovePolicy: WorktreeRemovePolicy.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(WorktreeRemovePolicy)({}))),
+  ),
+  podRuntime: PodRuntimeSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(PodRuntimeSettings)({}))),
   ),
 
   worktreesDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -1480,6 +1487,7 @@ export const ServerSettingsPatch = Schema.Struct({
   worktreeRemovePolicy: Schema.optionalKey(
     Schema.Struct({ timeoutMs: Schema.optionalKey(WorktreeTeardownTimeoutMs) }),
   ),
+  podRuntime: Schema.optionalKey(PodRuntimeSettingsPatch),
   worktreesDirectory: Schema.optionalKey(TrimmedString),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),

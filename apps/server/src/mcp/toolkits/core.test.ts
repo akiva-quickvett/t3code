@@ -62,6 +62,7 @@ import { AttachmentToolkit } from "./attachment/tools.ts";
 import * as AttachmentHandlers from "./attachment/handlers.ts";
 import { ThreadToolkit } from "./thread/tools.ts";
 import { WorktreeToolkit } from "./worktree/tools.ts";
+import { PodToolkit } from "./pod/tools.ts";
 import { DeviceToolkit } from "./device/tools.ts";
 
 const layerOrchestratorToolkitWithUsage = (
@@ -103,6 +104,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     OrchestratorToolkit,
     PreviewToolkit,
     WorktreeToolkit,
+    PodToolkit,
     ThreadToolkit,
     AttachmentToolkit,
     ProjectToolkit,

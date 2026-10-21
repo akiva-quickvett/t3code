@@ -472,6 +472,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["git submodule init recursive top-level none worktree t3.json"],
   },
   {
+    id: "pod-runtime",
+    title: "Pods",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["pod container docker compose dind runtime stack t3.json"],
+  },
+  {
     id: "start-from-origin",
     title: "Start from origin",
     to: "/settings/general",

@@ -1,5 +1,7 @@
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 import {
+  type PodRuntimeState,
   DEFAULT_TERMINAL_ID,
   TerminalCwdError,
   TerminalCwdNotDirectoryError,
@@ -87,6 +89,14 @@ export {
   TerminalSessionLookupError,
   TerminalWriteError,
 };
+
+const podNotRunningMessage = (state: PodRuntimeState) =>
+  state === "starting" || state === "creating"
+    ? "This worktree's pod is still starting. Restart this terminal once it runs."
+    : "This worktree's pod is not running. Start it from the pod chip or the command palette, then restart this terminal.";
+
+// Images differ; bash when the pod has it. Not a login shell, which would reset PATH.
+const POD_SHELL_COMMAND = "command -v bash >/dev/null 2>&1 && exec bash || exec sh";
 
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
 const DEFAULT_HISTORY_BYTE_LIMIT = 8 * 1024 * 1024;
@@ -1360,6 +1370,15 @@ interface TerminalManagerOptions {
     Record<string, string>,
     TerminalProviderInstanceNotFoundError | TerminalProviderEnvironmentError
   >;
+  /** The host command that opens the shell inside a pod when `cwd` is a pod's worktree. */
+  resolvePodLaunch?: (input: {
+    readonly cwd: string;
+    readonly env: Record<string, string>;
+  }) => Effect.Effect<{
+    readonly command: string;
+    readonly args: ReadonlyArray<string>;
+    readonly env: Readonly<Record<string, string>>;
+  } | null>;
 }
 
 export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
@@ -1421,6 +1440,29 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
       env,
     }),
   );
+  const executionTarget = yield* WorkspaceExecutionTarget.WorkspaceExecutionTarget;
+  const platform = yield* HostProcess.Platform;
+  const resolvePodLaunch = Effect.fn("terminal.resolvePodLaunch")(function* (input: {
+    readonly cwd: string;
+    readonly env: Record<string, string>;
+  }) {
+    const target = yield* executionTarget.resolve(input.cwd);
+    if (target.type === "host") return null;
+    // docker exec would only say the container is not running; say what to do instead.
+    if (target.state !== "running" && platform !== "win32")
+      return {
+        command: "/bin/sh",
+        args: ["-c", 'printf "%s\\r\\n" "$1"; exit 1', "pod", podNotRunningMessage(target.state)],
+        env: {},
+      };
+    // The host's shell and its environment do not exist in the pod; the image's do.
+    return executionTarget.launch(target, {
+      command: ["sh", "-c", POD_SHELL_COMMAND],
+      cwd: input.cwd,
+      env: { TERM: "xterm-256color", LANG: "C.UTF-8", ...input.env },
+      tty: true,
+    });
+  });
   return yield* makeWithOptions({
     logsDir: terminalLogsDir,
     ptyAdapter,
@@ -1434,6 +1476,7 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
     resolveProviderInstanceEnvironment,
+    resolvePodLaunch,
   });
 });
 
@@ -2282,7 +2325,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 }
               }
             }
-            const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
+            const podLaunch =
+              options.resolvePodLaunch === undefined
+                ? null
+                : yield* options.resolvePodLaunch({
+                    cwd: session.cwd,
+                    env: session.runtimeEnv ?? {},
+                  });
+            const spawnResult =
+              podLaunch === null
+                ? yield* trySpawn(shellCandidates, terminalEnv, session)
+                : yield* trySpawn(
+                    [{ shell: podLaunch.command, args: [...podLaunch.args] }],
+                    { ...terminalEnv, ...podLaunch.env },
+                    session,
+                  );
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
 

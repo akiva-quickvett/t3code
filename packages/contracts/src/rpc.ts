@@ -163,6 +163,18 @@ import {
 import { ProviderInstanceId, ProviderInstanceMutation } from "./providerInstance.ts";
 import { PullRequestReviewGuideResult } from "./pullRequestReviewGuide.ts";
 import {
+  PodRuntimeError,
+  PodRuntimeOpenShellInput,
+  PodRuntimeOpenShellResult,
+  PodRuntimeRemoveInput,
+  PodRuntimeSnapshot,
+  PodRuntimeStatus,
+  PodRuntimeStatusInput,
+  PodRuntimeStreamEvent,
+  PodRuntimeTarget,
+  WorktreePodTeardownError,
+} from "./podRuntime.ts";
+import {
   PullRequestActionInput,
   PullRequestActivity,
   PullRequestCommentInput,
@@ -526,6 +538,14 @@ export const WS_METHODS = {
   chatChannelsSubscribe: "chatChannels.subscribe",
   chatChannelsMutate: "chatChannels.mutate",
   chatChannelsGetTemplateStatus: "chatChannels.getTemplateStatus",
+  podRuntimeSubscribe: "podRuntime.subscribe",
+  podRuntimeStatus: "podRuntime.status",
+  podRuntimeStart: "podRuntime.start",
+  podRuntimeStop: "podRuntime.stop",
+  podRuntimeRecreate: "podRuntime.recreate",
+  podRuntimeRecreateAgentContainer: "podRuntime.recreateAgentContainer",
+  podRuntimeOpenShell: "podRuntime.openShell",
+  podRuntimeRemove: "podRuntime.remove",
 
   scheduledTasksList: "scheduledTasks.list",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
@@ -1416,7 +1436,7 @@ const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
 
 const WsVcsRemoveWorktreeRpc = Rpc.make(WS_METHODS.vcsRemoveWorktree, {
   payload: VcsRemoveWorktreeInput,
-  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+  error: Schema.Union([GitCommandError, WorktreePodTeardownError, EnvironmentAuthorizationError]),
 });
 
 const WsVcsCreateRefRpc = Rpc.make(WS_METHODS.vcsCreateRef, {
@@ -1839,6 +1859,56 @@ export const ChatChannelRpcGroup = RpcGroup.make(
   WsChatChannelsGetTemplateStatusRpc,
 );
 
+const PodRuntimeRpcError = Schema.Union([PodRuntimeError, EnvironmentAuthorizationError]);
+
+const WsPodRuntimeSubscribeRpc = Rpc.make(WS_METHODS.podRuntimeSubscribe, {
+  payload: Schema.Struct({}),
+  success: PodRuntimeStreamEvent,
+  error: PodRuntimeRpcError,
+  stream: true,
+});
+
+const WsPodRuntimeStatusRpc = Rpc.make(WS_METHODS.podRuntimeStatus, {
+  payload: PodRuntimeStatusInput,
+  success: PodRuntimeStatus,
+  error: PodRuntimeRpcError,
+});
+
+const WsPodRuntimeStartRpc = Rpc.make(WS_METHODS.podRuntimeStart, {
+  payload: PodRuntimeTarget,
+  success: PodRuntimeSnapshot,
+  error: PodRuntimeRpcError,
+});
+
+const WsPodRuntimeStopRpc = Rpc.make(WS_METHODS.podRuntimeStop, {
+  payload: PodRuntimeTarget,
+  success: PodRuntimeSnapshot,
+  error: PodRuntimeRpcError,
+});
+
+const WsPodRuntimeRecreateRpc = Rpc.make(WS_METHODS.podRuntimeRecreate, {
+  payload: PodRuntimeTarget,
+  success: PodRuntimeSnapshot,
+  error: PodRuntimeRpcError,
+});
+
+const WsPodRuntimeRecreateAgentContainerRpc = Rpc.make(
+  WS_METHODS.podRuntimeRecreateAgentContainer,
+  { payload: PodRuntimeTarget, success: PodRuntimeSnapshot, error: PodRuntimeRpcError },
+);
+
+const WsPodRuntimeOpenShellRpc = Rpc.make(WS_METHODS.podRuntimeOpenShell, {
+  payload: PodRuntimeOpenShellInput,
+  success: PodRuntimeOpenShellResult,
+  error: PodRuntimeRpcError,
+});
+
+const WsPodRuntimeRemoveRpc = Rpc.make(WS_METHODS.podRuntimeRemove, {
+  payload: PodRuntimeRemoveInput,
+  success: Schema.NullOr(PodRuntimeSnapshot),
+  error: PodRuntimeRpcError,
+});
+
 const WsScheduledTasksListRpc = Rpc.make(WS_METHODS.scheduledTasksList, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -1934,6 +2004,18 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
   { error: EnvironmentAuthorizationError },
 ) {}
 
+/** Part of WsRpcGroup, with its own server handler layer, as ChatChannelRpcGroup. */
+export const PodRuntimeRpcGroup = RpcGroup.make(
+  WsPodRuntimeSubscribeRpc,
+  WsPodRuntimeStatusRpc,
+  WsPodRuntimeStartRpc,
+  WsPodRuntimeStopRpc,
+  WsPodRuntimeRecreateRpc,
+  WsPodRuntimeRecreateAgentContainerRpc,
+  WsPodRuntimeOpenShellRpc,
+  WsPodRuntimeRemoveRpc,
+);
+
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
@@ -1993,6 +2075,14 @@ export const WsRpcGroup = RpcGroup.make(
   WsChatChannelsSubscribeRpc,
   WsChatChannelsMutateRpc,
   WsChatChannelsGetTemplateStatusRpc,
+  WsPodRuntimeSubscribeRpc,
+  WsPodRuntimeStatusRpc,
+  WsPodRuntimeStartRpc,
+  WsPodRuntimeStopRpc,
+  WsPodRuntimeRecreateRpc,
+  WsPodRuntimeRecreateAgentContainerRpc,
+  WsPodRuntimeOpenShellRpc,
+  WsPodRuntimeRemoveRpc,
   WsScheduledTasksListRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,
@@ -2138,3 +2228,4 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeThreadRpc,
   WsOrchestrationV2SubscribeCommandOutputRpc,
 ).middleware(RpcScopeAuthorization);
+
