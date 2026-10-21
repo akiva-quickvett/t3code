@@ -202,7 +202,8 @@ Returns:
 - the parent runtime and interaction modes;
 - registered provider instances and advertised models;
 - whether each provider can run a child task; and
-- feature flags for polling, cancellation, and batch thread creation.
+- feature flags for polling, cancellation, batch thread creation, and supervised
+  wakes (`supervisedWakes`, missing on older servers).
 
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
@@ -266,9 +267,16 @@ Each delegated review round uses a new `delegate_task` call with the original br
 prior findings, responses, and unresolved objections. Track each round by its own `taskId` and use
 a distinct `clientRequestId` per round, stable across retries of that round.
 `childThreadId` is backing storage, not a target for another review round through
-`t3_thread_send`. Ordinary thread messaging remains available for user-requested
-conversations; it does not reopen a completed task. There is no task-level follow-up
-API for preserving the same reviewer session.
+`t3_thread_send`.
+
+Sending to `childThreadId` continues the same child session instead. Once the original
+task has its result, a parent `t3_thread_send` that starts a turn there (or restarts a
+turn without a task) records a follow-up task, returns its `taskId`, and wakes the parent
+once when that turn ends, the same way an async task does. The original result does not
+change. The wake is the cost: a follow-up the parent does not care about still starts one
+parent turn, which should end without replying. Only the parent's own sends and the
+user's messages in the child record follow-ups; notifications, scheduled runs, and
+restart continuations never do.
 
 Delegation requires an active parent run owned by the MCP credential's
 provider session. The request becomes the V2 command
@@ -325,7 +333,8 @@ task the child delegated, and disposes automatic parent delivery. Like a user St
 watches. A nonterminal task with no interruptible run is rejected. A terminal task
 returns its existing status, and its child thread still stops, including later
 runs and watch wakes. Published task results remain available. It accepts an
-optional cancellation reason.
+optional cancellation reason. A supervised thread's task is the exception: see
+[Supervised Threads](#supervised-threads).
 
 ### `create_threads`
 
@@ -366,8 +375,14 @@ Pass the task in `message`. Project, model, and modes inherit when omitted;
 workspace does not. `scratch: true` launches without a project, in a folder of
 its own under the environment's Scratch project. For stacked PRs, use the parent branch as `baseRef` with
 `startFromOrigin: false`. The new thread may not run with broader runtime or
-interaction modes than the caller. Launch has no retry key, so inspect existing threads after a failed or lost response before
-launching again. `create_threads` remains the batch option for a shared checkout.
+interaction modes than the caller. A retry with the same `clientRequestId` in the same
+provider session returns the same thread; without one, inspect existing threads after a
+failed or lost response before launching again. `create_threads` remains the batch option
+for a shared checkout.
+
+`supervise: true` makes the caller the thread's supervisor (`lineage.supervisorThreadId`,
+see [Supervised Threads](#supervised-threads)). It needs a calling T3 thread and a message, and
+the result adds the `taskId` of the first run.
 
 ### `t3_thread_list`
 
@@ -429,7 +444,8 @@ Sends a message to any ordinary or delegated thread in the environment:
 
 The target runtime and interaction modes may not be broader than the caller's.
 Stable command and message IDs are derived from `clientRequestId` for
-idempotent retries.
+idempotent retries, so a retried follow-up records one task and one wake. A send to the
+caller's delegated or supervised child that starts a turn returns that turn's `taskId`.
 
 ### `t3_thread_wait`
 
@@ -491,6 +507,40 @@ Stopping or interrupting the parent prevents this catch-up.
 
 A failed run exposes its provider error before any progress text. Successful
 results use the latest assistant content from the final work turn.
+
+## Supervised Threads
+
+A supervised thread is an ordinary top-level thread: it shows in the sidebar, has its
+own composer, watches its own pull requests, and runs its own delegated tasks. Its lineage
+has no parent and only adds `supervisorThreadId`, the launcher. It is not a subagent, so
+the launcher has no node or card for it, and stopping the launcher does not stop it.
+
+Each run the launcher starts there, from the launch message on, is an app-owned task on
+the launcher, bound to the run by `delegatedTaskId` and marked `supervised`. Unlike a
+delegated child there is no original task covering later work, so a message the user
+types in the supervised thread, or a turn its own notifications start, records nothing.
+In `t3_thread_send`, `auto` from the supervisor queues rather than steer into a turn no
+task tracks, so the send still wakes it; with `supervisedWakes` off it steers as before.
+
+Finalization and completion delivery are the delegated-task path unchanged: the
+`subagent_result` transfer deduplicates replays and restarts, and the wake is a delegated
+completion notification read with `task_status`. A child question from a tracked run
+wakes the launcher like a delegated task's question does.
+
+The supervised thread keeps running whatever happens to the launcher, so its wakes are
+handled apart from a delegated child's:
+
+- A turn Stop or interrupt on the launcher holds them. They move to the run the user
+  continues with (their next message from a client, or Resume) and are delivered from it.
+- `thread.stop`, archive, or delete of the launcher disposes them.
+- `task_cancel` on such a task removes the run it tracks only while that run is queued, and
+  drops its wake. A running turn is left to finish: interrupting it would close its own
+  delegated tasks' wakes while their work kept going.
+
+The `supervisedWakes` server setting (on by default) is the switch. Off, `supervise` and
+`thread.create` with a supervisor are refused, and sends to existing supervised threads
+record no new tasks; wakes already recorded still arrive. Delegated-task follow-ups are
+unaffected.
 
 ## Policy And Idempotency
 

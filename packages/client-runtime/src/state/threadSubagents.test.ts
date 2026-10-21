@@ -51,6 +51,20 @@ describe("deriveThreadTurnSubagents", () => {
     expect(deriveThreadTurnSubagents({ runs: [activeRun], subagents: [] })).toBeNull();
   });
 
+  it("leaves supervised threads out of the agents pill", () => {
+    const turn = deriveThreadTurnSubagents({
+      runs: [activeRun],
+      subagents: [subagent({ id: "slice", supervised: true }), subagent({ id: "cell" })],
+    });
+    expect(turn?.subagents.map((entry) => entry.id)).toEqual(["cell"]);
+    expect(
+      deriveThreadTurnSubagents({
+        runs: [activeRun],
+        subagents: [subagent({ id: "slice", supervised: true })],
+      }),
+    ).toBeNull();
+  });
+
   it("scopes the roster to the active run and orders it by start time", () => {
     const turn = deriveThreadTurnSubagents({
       runs: [run("run-0", "completed"), activeRun],

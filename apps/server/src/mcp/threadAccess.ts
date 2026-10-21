@@ -182,3 +182,13 @@ export const newCommandId = Effect.fn("mcp.newCommandId")(function* () {
   const crypto = yield* Crypto.Crypto;
   return CommandId.make(`mcp:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`);
 });
+
+/** A retry with the same clientRequestId in this provider session replays the same command. */
+export const requestCommandId = Effect.fn("mcp.requestCommandId")(function* (
+  operation: string,
+  clientRequestId: string | undefined,
+) {
+  if (clientRequestId === undefined) return yield* newCommandId();
+  const scope = yield* McpInvocationContext.McpInvocationContext;
+  return OrchestrationMcp.stableCommandId({ scope, requestKey: clientRequestId, operation });
+});

@@ -43,7 +43,9 @@ const make = Effect.gen(function* () {
   const onSubagent = (event: SubagentEvent) =>
     Effect.gen(function* () {
       const task = event.payload;
-      if (task.origin !== "app_owned" || !FINAL_STATUSES.has(task.status)) return;
+      if (task.origin !== "app_owned" || task.supervised || !FINAL_STATUSES.has(task.status)) {
+        return;
+      }
       if (reported.has(task.id)) return;
       const parent = yield* orchestrator.getThreadShell(task.threadId);
       const providers = yield* registry.getProviders;

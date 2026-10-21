@@ -2,11 +2,14 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import {
+  OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpThreadDetail,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadListInput,
+  OrchestratorMcpThreadListItem,
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadSendInput,
   OrchestratorMcpThreadWaitInput,
@@ -22,6 +25,44 @@ const decodeThreadSendInput = Schema.decodeUnknownSync(OrchestratorMcpThreadSend
 const decodeThreadWaitInput = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitInput);
 
 describe("orchestrator MCP contracts", () => {
+  it("reports supervised wakes only where the server knows them", () => {
+    const decode = Schema.decodeUnknownSync(OrchestratorMcpCapabilitiesResult);
+    const older = {
+      parentThreadId: null,
+      inheritedProviderInstanceId: null,
+      inheritedModel: null,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      providers: [],
+      features: {
+        appOwnedSubagents: true,
+        asyncPolling: true,
+        cancellation: true,
+        batchThreadCreation: true,
+        threadManagement: true,
+        incrementalThreadRead: true,
+        scheduledTasks: true,
+        maxBatchThreads: 20,
+      },
+    };
+    expect(decode(older).features.supervisedWakes).toBeUndefined();
+    expect(
+      decode({ ...older, features: { ...older.features, supervisedWakes: false } }).features
+        .supervisedWakes,
+    ).toBe(false);
+  });
+
+  it("lists and reads a supervisor without a new relationship", () => {
+    for (const schema of [OrchestratorMcpThreadListItem, OrchestratorMcpThreadDetail]) {
+      expect(Schema.decodeUnknownSync(schema.fields.supervisorThreadId)("thread-meta")).toBe(
+        "thread-meta",
+      );
+      expect(() =>
+        Schema.decodeUnknownSync(schema.fields.relationshipToParent)("supervised"),
+      ).toThrow();
+    }
+  });
+
   it("accepts explicit worktree isolation and keeps shared delegation as the default", () => {
     expect(decodeDelegateTaskInput({ task: "Review changes" }).isolation).toBeUndefined();
     expect(

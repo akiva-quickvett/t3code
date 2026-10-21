@@ -162,6 +162,9 @@ function relationshipLabel(edge: ThreadRelationshipEdge, currentThreadId: Thread
   if (edge.kind === "subagent") {
     return edge.sourceThreadId === currentThreadId ? "Subagent" : "Parent agent";
   }
+  if (edge.kind === "supervised") {
+    return edge.sourceThreadId === currentThreadId ? "Supervised thread" : "Supervisor";
+  }
   return edge.sourceThreadId === currentThreadId ? "Fork" : "Parent thread";
 }
 

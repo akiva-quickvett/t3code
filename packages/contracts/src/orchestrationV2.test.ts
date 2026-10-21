@@ -24,6 +24,7 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2AppThreadLineage,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
   OrchestrationV2Command,
@@ -135,6 +136,45 @@ const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
 const decodeOrchestrationV2SubscribeThreadInput = Schema.decodeUnknownSync(
   OrchestrationV2SubscribeThreadInput,
 );
+
+const historicalThreadShellJson = {
+  createdBy: "user",
+  creationSource: "web",
+  id: "thread-1",
+  projectId: "project-1",
+  title: "Thread",
+  providerInstanceId: "claudeAgent",
+  modelSelection: {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-sonnet",
+  },
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  branch: null,
+  worktreePath: null,
+  lineage: {
+    parentThreadId: null,
+    relationshipToParent: null,
+    rootThreadId: "thread-1",
+  },
+  forkedFrom: null,
+  activeProviderThreadId: "provider-thread-1",
+  latestRunId: "run-1",
+  activeRunId: null,
+  status: "completed",
+  pendingRuntimeRequest: null,
+  latestVisibleMessage: null,
+  latestUserMessageAt: null,
+  hasActionableProposedPlan: false,
+  itemCount: 0,
+  visibleItemCount: 0,
+  createdAt: now,
+  updatedAt: now,
+  archivedAt: null,
+  settledOverride: null,
+  settledAt: null,
+  deletedAt: null,
+};
 
 describe("orchestration V2 contracts", () => {
   it("carries command failure metadata through runtime and JSON schemas without output text", () => {
@@ -1013,6 +1053,46 @@ describe("orchestration V2 contracts", () => {
       "settled_only",
     );
     expect(() => decode({ ...appOwnedSubagent, completionWake: "sometimes" })).toThrow();
+    expect(decode(appOwnedSubagent).supervised).toBeUndefined();
+    expect(decode({ ...appOwnedSubagent, supervised: true }).supervised).toBe(true);
+  });
+
+  it("decodes a supervisor beside the lineages older payloads carry", () => {
+    const decodeLineage = Schema.decodeUnknownSync(OrchestrationV2AppThreadLineage);
+    for (const relationshipToParent of ["fork", "subagent"] as const) {
+      expect(
+        decodeLineage({ parentThreadId: "thread-parent", relationshipToParent, rootThreadId: "t" }),
+      ).toMatchObject({ relationshipToParent });
+    }
+    const topLevel = { parentThreadId: null, relationshipToParent: null, rootThreadId: "t" };
+    expect(decodeLineage(topLevel)).not.toHaveProperty("supervisorThreadId");
+    expect(decodeLineage({ ...topLevel, supervisorThreadId: "thread-meta" })).toMatchObject({
+      relationshipToParent: null,
+      supervisorThreadId: "thread-meta",
+    });
+    expect(() =>
+      decodeLineage({ parentThreadId: "p", relationshipToParent: "supervised", rootThreadId: "t" }),
+    ).toThrow();
+
+    const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
+    const create = {
+      type: "thread.create",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId: "command-create",
+      threadId: "thread-child",
+      projectId: "project-1",
+      title: "Slice",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+    };
+    expect(decodeCommand(create)).not.toHaveProperty("supervisorThreadId");
+    expect(decodeCommand({ ...create, supervisorThreadId: "thread-parent" })).toMatchObject({
+      supervisorThreadId: "thread-parent",
+    });
   });
 
   it("decodes thread projections with an ordered turn item rendering stream", () => {
@@ -1261,45 +1341,32 @@ describe("orchestration V2 contracts", () => {
     expect(runtimeThread.nativeMetadata).toBeNull();
   });
 
-  it("decodes historical thread shell JSON without pendingBackgroundTasks as empty roster", () => {
-    const shell = decodeOrchestrationV2ThreadShell({
-      createdBy: "user",
-      creationSource: "web",
-      id: "thread-1",
-      projectId: "project-1",
-      title: "Thread",
-      providerInstanceId: "claudeAgent",
-      modelSelection: {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
-        model: "claude-sonnet",
-      },
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-      lineage: {
-        parentThreadId: null,
-        relationshipToParent: null,
-        rootThreadId: "thread-1",
-      },
-      forkedFrom: null,
-      activeProviderThreadId: "provider-thread-1",
-      latestRunId: "run-1",
-      activeRunId: null,
-      status: "completed",
-      pendingRuntimeRequest: null,
-      latestVisibleMessage: null,
-      latestUserMessageAt: null,
-      hasActionableProposedPlan: false,
-      itemCount: 0,
-      visibleItemCount: 0,
-      createdAt: now,
-      updatedAt: now,
-      archivedAt: null,
-      settledOverride: null,
-      settledAt: null,
-      deletedAt: null,
+  it("lets clients built before supervisorThreadId decode a supervised shell as top-level", () => {
+    const PreSupervisionShell = Schema.Struct({
+      ...OrchestrationV2ThreadShell.fields,
+      lineage: Schema.Struct({
+        parentThreadId: Schema.NullOr(ThreadId),
+        relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+        rootThreadId: ThreadId,
+      }),
     });
+    const supervised = {
+      ...historicalThreadShellJson,
+      lineage: { ...historicalThreadShellJson.lineage, supervisorThreadId: "thread-meta" },
+    };
+
+    expect(Schema.decodeUnknownSync(PreSupervisionShell)(supervised).lineage).toEqual({
+      parentThreadId: null,
+      relationshipToParent: null,
+      rootThreadId: "thread-1",
+    });
+    expect(decodeOrchestrationV2ThreadShell(supervised).lineage.supervisorThreadId).toBe(
+      "thread-meta",
+    );
+  });
+
+  it("decodes historical thread shell JSON without pendingBackgroundTasks as empty roster", () => {
+    const shell = decodeOrchestrationV2ThreadShell(historicalThreadShellJson);
 
     expect(shell.pendingBackgroundTasks).toEqual([]);
   });

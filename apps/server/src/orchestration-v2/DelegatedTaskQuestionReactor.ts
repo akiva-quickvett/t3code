@@ -103,7 +103,7 @@ const make = Effect.gen(function* () {
         return;
       }
       const child = yield* projections.getThread(event.threadId);
-      const parentThreadId = child.lineage.parentThreadId;
+      const parentThreadId = child.lineage.supervisorThreadId ?? child.lineage.parentThreadId;
       if (parentThreadId === null) return;
       const request = yield* projections.getRuntimeRequest(event.threadId, event.payload.id);
       const key = `${parentThreadId}:${event.payload.id}`;
