@@ -35,6 +35,7 @@ import {
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
+const decodeHeadroomThresholds = Schema.decodeSync(UsageHeadroomThresholds);
 
 const window = {
   id: "five_hour",
@@ -1568,7 +1569,7 @@ describe("Antigravity limit presentation", () => {
 });
 
 describe("agent usage limits", () => {
-  const defaults = Schema.decodeSync(UsageHeadroomThresholds)({});
+  const defaults = decodeHeadroomThresholds({});
   const usageWindow = (
     kind: ServerProviderUsageWindow["kind"],
     usedPercent: number,
