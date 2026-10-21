@@ -431,9 +431,10 @@ export function flattenAgentTree<T extends AgentTreeThread>(
   isExpanded: (key: string) => boolean,
 ): ReadonlyArray<AgentTreeRow<T>> {
   const rows: AgentTreeRow<T>[] = [];
-  const pending: Array<{ readonly thread: T; readonly depth: number }> = roots
-    .map((thread) => ({ thread, depth: 0 }))
-    .toReversed();
+  const pending: Array<{ readonly thread: T; readonly depth: number }> = [];
+  for (let index = roots.length - 1; index >= 0; index -= 1) {
+    pending.push({ thread: roots[index]!, depth: 0 });
+  }
   for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
     const key = agentTreeKey(next.thread);
     const children = tree.childrenByKey.get(key) ?? [];
