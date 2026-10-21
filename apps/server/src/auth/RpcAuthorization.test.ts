@@ -49,6 +49,18 @@ describe("RPC authorization scopes", () => {
     }
   });
 
+  it("lets readers watch messaging settings and only settings writers change or probe them", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.chatChannelsSubscribe)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    for (const method of [
+      WS_METHODS.chatChannelsMutate,
+      WS_METHODS.chatChannelsGetTemplateStatus,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthSettingsWriteScope);
+    }
+  });
+
   it("requires operate access to stop a workflow", () => {
     expect(requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.stopWorkflow)).toBe(
       AuthOrchestrationOperateScope,

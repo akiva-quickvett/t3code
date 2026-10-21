@@ -334,6 +334,14 @@ import {
   AgentRolePresetSaveInput,
 } from "./agentRole.ts";
 import {
+  ChatChannelError,
+  ChatChannelMutation,
+  ChatChannelMutationResult,
+  ChatChannelsSnapshot,
+  ChatTemplateStatus,
+  ChatTemplateStatusInput,
+} from "./chatChannel.ts";
+import {
   StorageCleanupReport,
   DatabaseStorageStatus,
   ServerSettings,
@@ -514,6 +522,10 @@ export const WS_METHODS = {
   agentRolesSave: "agentRoles.save",
   agentRolesRemove: "agentRoles.remove",
   agentRolesReset: "agentRoles.reset",
+
+  chatChannelsSubscribe: "chatChannels.subscribe",
+  chatChannelsMutate: "chatChannels.mutate",
+  chatChannelsGetTemplateStatus: "chatChannels.getTemplateStatus",
 
   scheduledTasksList: "scheduledTasks.list",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
@@ -1795,6 +1807,38 @@ const WsAgentRolesResetRpc = Rpc.make(WS_METHODS.agentRolesReset, {
   error: Schema.Union([AgentRolePresetError, EnvironmentAuthorizationError]),
 });
 
+const ChatChannelRpcError = Schema.Union([ChatChannelError, EnvironmentAuthorizationError]);
+
+const WsChatChannelsSubscribeRpc = Rpc.make(WS_METHODS.chatChannelsSubscribe, {
+  payload: Schema.Struct({}),
+  success: ChatChannelsSnapshot,
+  error: ChatChannelRpcError,
+  stream: true,
+});
+
+const WsChatChannelsMutateRpc = Rpc.make(WS_METHODS.chatChannelsMutate, {
+  payload: ChatChannelMutation,
+  success: ChatChannelMutationResult,
+  error: ChatChannelRpcError,
+});
+
+const WsChatChannelsGetTemplateStatusRpc = Rpc.make(WS_METHODS.chatChannelsGetTemplateStatus, {
+  payload: ChatTemplateStatusInput,
+  success: ChatTemplateStatus,
+  error: ChatChannelRpcError,
+});
+
+/**
+ * Part of WsRpcGroup. The server implements these in their own layer: the main
+ * handler layer's type is at TypeScript's instantiation limit, past which its
+ * requirements silently become `any`.
+ */
+export const ChatChannelRpcGroup = RpcGroup.make(
+  WsChatChannelsSubscribeRpc,
+  WsChatChannelsMutateRpc,
+  WsChatChannelsGetTemplateStatusRpc,
+);
+
 const WsScheduledTasksListRpc = Rpc.make(WS_METHODS.scheduledTasksList, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -1946,6 +1990,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentRolesSaveRpc,
   WsAgentRolesRemoveRpc,
   WsAgentRolesResetRpc,
+  WsChatChannelsSubscribeRpc,
+  WsChatChannelsMutateRpc,
+  WsChatChannelsGetTemplateStatusRpc,
   WsScheduledTasksListRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,

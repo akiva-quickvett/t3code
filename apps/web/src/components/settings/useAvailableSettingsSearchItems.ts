@@ -45,6 +45,10 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
     environments.some(
       (environment) => environment.serverConfig?.environment.capabilities.pullRequestLabelRules,
     ) === true;
+  const hasChatChannels =
+    environments.some(
+      (environment) => environment.serverConfig?.environment.capabilities.chatChannels,
+    ) === true;
   const hasThreadAutoSettlement =
     getThreadAutoSettlementSearchAvailability(environments).eligibleEnvironmentIds.length > 0;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -74,5 +78,6 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
     hasThreadAutoSettlement,
     managedTunnelActive,
     hasPullRequestLabelRules,
+    hasChatChannels,
   });
 }
