@@ -17,6 +17,7 @@ import { serverEnvironment } from "../../state/server";
 import { usePodActions } from "../pods/usePodActions";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsSection } from "./settingsLayout";
 
 const STATS_INPUT = { includeStats: true } as const;
@@ -41,9 +42,12 @@ function PodRow(props: {
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 sm:px-5">
       <div className="min-w-0 flex-1">
-        <div className="truncate font-mono text-xs" title={props.pod.worktreePath}>
-          {props.pod.worktreePath}
-        </div>
+        <Tooltip>
+          <TooltipTrigger
+            render={<div className="truncate font-mono text-xs">{props.pod.worktreePath}</div>}
+          />
+          <TooltipPopup side="top">{props.pod.worktreePath}</TooltipPopup>
+        </Tooltip>
         <div className="text-muted-foreground text-xs">
           {props.pod.id}
           {props.pod.lastError === null ? null : ` · ${props.pod.lastError.message}`}
