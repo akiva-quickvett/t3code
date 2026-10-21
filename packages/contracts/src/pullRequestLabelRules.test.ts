@@ -50,6 +50,18 @@ describe("PullRequestLabelRules", () => {
     expect(() =>
       patch({ pullRequestLabelRules: { labels: { reviewing: READY_FOR_HUMAN_REVIEW_LABEL } } }),
     ).toThrow(/set by people/);
+    // A project's override is refused the same way, rather than read as no override.
+    expect(() =>
+      patch({
+        projectSettingsOverrides: {
+          p1: { pullRequestLabelRules: { labels: { building: "agent done" } } },
+        },
+      }),
+    ).toThrow(/own label name/);
+    expect(
+      patch({ projectSettingsOverrides: { p1: { pullRequestLabelRules: null } } })
+        .projectSettingsOverrides?.[ProjectId.make("p1")]?.pullRequestLabelRules,
+    ).toBeNull();
   });
 });
 

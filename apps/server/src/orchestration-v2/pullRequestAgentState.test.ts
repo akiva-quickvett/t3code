@@ -37,7 +37,7 @@ describe("deriveAgentState", () => {
     readonly doneAtMs?: number;
     readonly nowMs?: number;
     readonly expected: PullRequestAgentState | null;
-    readonly firstDone?: boolean;
+    readonly recordDone?: boolean;
   }> = [
     { name: "linked, nothing run since", tree: [slice()], expected: "investigating" },
     {
@@ -49,7 +49,7 @@ describe("deriveAgentState", () => {
       name: "built and opened in one turn that has ended",
       tree: [slice({ latestRunRequestedAtMs: BEFORE, latestRunCompletedAtMs: AFTER })],
       expected: "done",
-      firstDone: false,
+      recordDone: false,
     },
     {
       name: "the linking turn ended a moment ago",
@@ -82,13 +82,13 @@ describe("deriveAgentState", () => {
       name: "the tree has been quiet since its work",
       tree: [slice(idleWork), node("impl", idleWork)],
       expected: "done",
-      firstDone: true,
+      recordDone: true,
     },
     {
       name: "a run that ended without a completion time counts from its request",
       tree: [slice({ latestRunRequestedAtMs: AFTER })],
       expected: "done",
-      firstDone: true,
+      recordDone: true,
     },
     {
       name: "work after the first done",
@@ -112,11 +112,28 @@ describe("deriveAgentState", () => {
       expected: "reviewing",
     },
     {
-      name: "quiet again after revising",
+      name: "done after a revision records it again",
       tree: [slice({ latestRunRequestedAtMs: DONE_AT + 1, latestRunCompletedAtMs: DONE_AT + 2 })],
       doneAtMs: DONE_AT,
       expected: "done",
-      firstDone: false,
+      recordDone: true,
+    },
+    {
+      name: "done with nothing new since the last done records nothing",
+      tree: [slice(idleWork)],
+      doneAtMs: DONE_AT,
+      expected: "done",
+      recordDone: false,
+    },
+    {
+      name: "the second revision starts as revising, not with the first revision's review",
+      tree: [
+        slice(),
+        reviewer({ latestRunRequestedAtMs: DONE_AT + 1, latestRunCompletedAtMs: DONE_AT + 2 }),
+        node("impl", { running: true, latestRunRequestedAtMs: DONE_AT + 10 }),
+      ],
+      doneAtMs: DONE_AT + 5,
+      expected: "revising",
     },
     {
       name: "a role that only starts with review is not a reviewer",
@@ -134,7 +151,7 @@ describe("deriveAgentState", () => {
         nowMs: testCase.nowMs ?? NOW,
       });
       expect(result?.state ?? null).toBe(testCase.expected);
-      if (testCase.firstDone !== undefined) expect(result?.firstDone).toBe(testCase.firstDone);
+      if (testCase.recordDone !== undefined) expect(result?.recordDone).toBe(testCase.recordDone);
     });
   }
 });

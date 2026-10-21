@@ -11,6 +11,7 @@ import {
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
@@ -27,6 +28,8 @@ const PROJECT_ID = ProjectId.make("label-project");
 const SLICE = ThreadId.make("slice");
 const LINKED_AT = "2026-10-01T00:00:00.000Z";
 const LINKED_MS = Date.parse(LINKED_AT);
+// A recorded done after every fixture's finished work.
+const DONE_AT = "2026-10-01T00:10:00.000Z";
 const NOW_MS = LINKED_MS + 60 * 60_000;
 
 const testCrypto = Crypto.make({
@@ -114,6 +117,7 @@ const quietAfterWork = [
 const makeHarness = Effect.fn("makeLabelHarness")(function* (options: {
   readonly nodes: ReadonlyArray<WorkTreeNode>;
   readonly enabled?: boolean;
+  readonly rejectDispatch?: boolean;
 }) {
   const writes = yield* Ref.make<ReadonlyArray<PullRequestLabelChangeInput>>([]);
   const commands = yield* Ref.make<ReadonlyArray<OrchestrationV2Command["type"] | string>>([]);
@@ -123,7 +127,17 @@ const makeHarness = Effect.fn("makeLabelHarness")(function* (options: {
         Layer.mock(Orchestrator.OrchestratorV2)({
           dispatch: (command) =>
             Ref.update(commands, (recorded) => [...recorded, command.type]).pipe(
-              Effect.as({ sequence: 1, storedEvents: [] }),
+              Effect.andThen(
+                options.rejectDispatch === true
+                  ? Effect.fail(
+                      new Orchestrator.OrchestratorDispatchError({
+                        commandId: command.commandId,
+                        commandType: command.type,
+                        cause: "Command produced no domain events.",
+                      }),
+                    )
+                  : Effect.succeed({ sequence: 1, storedEvents: [] }),
+              ),
             ),
         }),
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
@@ -222,7 +236,7 @@ describe("PullRequestLabelReactor", () => {
 
       const again = yield* makeHarness({ nodes: quietAfterWork });
       yield* applyWith(again, [
-        observation(summary(["Agent Done"]), link({ agentDoneAt: LINKED_AT })),
+        observation(summary(["Agent Done"]), link({ agentDoneAt: DONE_AT })),
       ]);
       assert.deepEqual(yield* Ref.get(again.commands), []);
       assert.deepEqual(yield* Ref.get(again.writes), []);
@@ -233,7 +247,7 @@ describe("PullRequestLabelReactor", () => {
     Effect.gen(function* () {
       const harness = yield* makeHarness({ nodes: building });
       yield* applyWith(harness, [
-        observation(summary(["Agent Done"]), link({ agentDoneAt: LINKED_AT })),
+        observation(summary(["Agent Done"]), link({ agentDoneAt: DONE_AT })),
       ]);
       assert.deepEqual(
         (yield* Ref.get(harness.writes)).map((write) => [write.labels, write.applied]),
@@ -242,6 +256,83 @@ describe("PullRequestLabelReactor", () => {
           [["Agent Done"], false],
         ],
       );
+    }),
+  );
+});
+
+describe("PullRequestLabelReactor revisions", () => {
+  const DONE_1 = LINKED_MS + 10 * 60_000;
+  const iso = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+  const reviewer = (overrides: Partial<WorkTreeNode>) =>
+    sliceNode({
+      threadId: ThreadId.make("reviewer"),
+      parentThreadId: SLICE,
+      rolePresetId: "review-t1",
+      ...overrides,
+    });
+
+  it.effect("records each done cycle, so a second revision starts as revising", () =>
+    Effect.gen(function* () {
+      // Revision 1 was reviewed and has gone quiet: that done is recorded as the latest.
+      const revision1Done = yield* makeHarness({
+        nodes: [
+          sliceNode(),
+          reviewer({
+            latestRunRequestedAtMs: DONE_1 + 60_000,
+            latestRunCompletedAtMs: DONE_1 + 120_000,
+          }),
+        ],
+      });
+      yield* applyWith(revision1Done, [
+        observation(summary(["Agent Reviewing"]), link({ agentDoneAt: iso(DONE_1) })),
+      ]);
+      assert.deepEqual(yield* Ref.get(revision1Done.commands), [
+        "thread.pull-request-link.agent-done",
+      ]);
+
+      // Revision 2's implementor runs; revision 1's reviewer is from before the latest done.
+      const revision2 = yield* makeHarness({
+        nodes: [
+          sliceNode(),
+          reviewer({
+            latestRunRequestedAtMs: DONE_1 + 60_000,
+            latestRunCompletedAtMs: DONE_1 + 120_000,
+          }),
+          sliceNode({
+            threadId: ThreadId.make("impl"),
+            parentThreadId: SLICE,
+            running: true,
+            latestRunRequestedAtMs: NOW_MS - 60_000,
+          }),
+        ],
+      });
+      yield* applyWith(revision2, [
+        observation(summary(["Agent Done"]), link({ agentDoneAt: iso(NOW_MS - 5 * 60_000) })),
+      ]);
+      assert.deepEqual(yield* Ref.get(revision2.commands), []);
+      assert.deepEqual(
+        (yield* Ref.get(revision2.writes)).map((write) => [write.labels, write.applied]),
+        [
+          [["Agent Revising"], true],
+          [["Agent Done"], false],
+        ],
+      );
+    }),
+  );
+
+  it.effect("backs off from a pull request whose done could not be recorded", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ nodes: quietAfterWork, rejectDispatch: true });
+      yield* Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const reactor = yield* PullRequestLabelReactor.PullRequestLabelReactor;
+        const observations = [observation(summary(["Agent Building"]))];
+        yield* reactor.apply(observations);
+        yield* reactor.apply(observations);
+      }).pipe(Effect.provide(harness.layer));
+      // One attempt, no label written without the fact behind it, and no retry on the next sweep.
+      assert.deepEqual(yield* Ref.get(harness.commands), ["thread.pull-request-link.agent-done"]);
+      assert.deepEqual(yield* Ref.get(harness.writes), []);
     }),
   );
 });
@@ -259,7 +350,7 @@ describe("PullRequestLabelReactor shared links", () => {
     },
     link: threadLink,
   });
-  const childDone = entry(SLICE, link({ agentDoneAt: LINKED_AT }));
+  const childDone = entry(SLICE, link({ agentDoneAt: DONE_AT }));
   const parentLater = entry(PARENT, link({ linkedAt: "2026-10-01T00:30:00.000Z" }));
   const tree = (sliceOverrides: Partial<WorkTreeNode>) => [
     sliceNode({ threadId: PARENT }),

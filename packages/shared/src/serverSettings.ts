@@ -13,6 +13,7 @@ import {
   type ProjectId,
   type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
+  type ProjectSettingsOverridesPatch,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -257,15 +258,15 @@ function mergeSettingsEntries<Value>(
 }
 
 /**
- * `projectSettingsOverrides` entries otherwise replace whole (see the field's
- * doc comment in contracts), but `providerInstances` was added after clients
- * already round-trip a project's entry on every edit. A client built before
- * that addition sends an entry that never mentions the key, and a whole replace
- * would silently wipe it.
+ * `projectSettingsOverrides` entries otherwise replace whole (see the field's doc comment in
+ * contracts), but `providerInstances` and `pullRequestLabelRules` were added after clients
+ * already round-trip a project's entry on every edit. A client built before that addition sends
+ * an entry that never mentions the key, and a whole replace would silently wipe it, so an absent
+ * key keeps the stored value. Label rules clear with an explicit null.
  */
 function mergeProjectSettingsOverridesPatch(
   current: Readonly<Record<string, ProjectSettingsOverrides>>,
-  patch: Readonly<Record<string, ProjectSettingsOverrides | null>>,
+  patch: Readonly<Record<string, ProjectSettingsOverridesPatch | null>>,
 ): Record<string, ProjectSettingsOverrides> {
   const next = new Map(Object.entries(current));
   for (const [projectId, entry] of Object.entries(patch)) {
@@ -273,13 +274,18 @@ function mergeProjectSettingsOverridesPatch(
       next.delete(projectId);
       continue;
     }
-    const storedProviderInstances = current[projectId]?.providerInstances;
-    next.set(projectId, {
-      ...entry,
-      ...(Object.hasOwn(entry, "providerInstances") || storedProviderInstances === undefined
+    const stored = current[projectId];
+    const { pullRequestLabelRules, ...rest } = entry;
+    const labelRules =
+      pullRequestLabelRules === undefined ? stored?.pullRequestLabelRules : pullRequestLabelRules;
+    const merged: ProjectSettingsOverrides = {
+      ...rest,
+      ...(Object.hasOwn(entry, "providerInstances") || stored?.providerInstances === undefined
         ? {}
-        : { providerInstances: storedProviderInstances }),
-    });
+        : { providerInstances: stored.providerInstances }),
+      ...(labelRules == null ? {} : { pullRequestLabelRules: labelRules }),
+    };
+    next.set(projectId, merged);
   }
   return Object.fromEntries(next);
 }
@@ -326,22 +332,24 @@ function translateLegacyProjectOverridePatch(
   }
   const currentEntries: Readonly<Record<string, ProjectSettingsOverrides>> =
     current.projectSettingsOverrides;
-  const entries = new Map<string, ProjectSettingsOverrides | null>(
+  const entries = new Map<string, ProjectSettingsOverridesPatch | null>(
     Object.entries(rest.projectSettingsOverrides ?? {}),
   );
   // A canonical entry in the same patch is the newer representation; a legacy
   // map must not resurrect a key that entry deliberately omits.
   const canonicalProjectIds = new Set(Object.keys(rest.projectSettingsOverrides ?? {}));
-  const applyKey = <K extends ProjectScopedServerSettingKey>(
+  const applyKey = <
+    K extends "enableAgentBrowserAccess" | "defaultAutoPull" | "defaultProjectScripts",
+  >(
     map: Readonly<Record<string, ProjectSettingsOverrides[K] | null>> | undefined,
     key: K,
   ) => {
     if (map === undefined) return;
     for (const [projectId, value] of Object.entries(map)) {
       if (canonicalProjectIds.has(projectId)) continue;
-      const entry: ProjectSettingsOverrides = {
+      const entry = {
         ...(entries.get(projectId) ?? currentEntries[projectId] ?? {}),
-      };
+      } as ProjectSettingsOverridesPatch;
       if (value === null || value === undefined) {
         delete entry[key];
       } else {

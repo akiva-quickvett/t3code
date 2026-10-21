@@ -56,15 +56,18 @@ export function workTreeOf(
 export interface AgentStateInput {
   readonly tree: ReadonlyArray<WorkTreeNode>;
   readonly linkedAtMs: number;
-  /** When the tree was first seen done for this pull request; null until then. */
+  /** When the tree was last seen done for this pull request; null until then. */
   readonly doneAtMs: number | null;
   readonly nowMs: number;
 }
 
 export interface AgentStateResult {
   readonly state: PullRequestAgentState;
-  /** Done after work since the link: the fact that turns all later work into Revising. */
-  readonly firstDone: boolean;
+  /**
+   * Done after work the last recorded done has not seen. Recording it turns later work into
+   * Revising, and starts the next revision's review phase after it.
+   */
+  readonly recordDone: boolean;
 }
 
 const requestedSince = (node: WorkTreeNode, sinceMs: number) =>
@@ -86,21 +89,21 @@ export function deriveAgentState(input: AgentStateInput): AgentStateResult | nul
       (node) => isReviewerRole(node.rolePresetId) && requestedSince(node, phaseStartMs),
     );
     const state = reviewed ? "reviewing" : doneBefore ? "revising" : "building";
-    return { state, firstDone: false };
+    return { state, recordDone: false };
   }
   // Only a run from before the link is going: the turn that is opening the pull request.
   if (input.tree.some((node) => node.running)) {
-    return doneBefore ? null : { state: "investigating", firstDone: false };
+    return doneBefore ? null : { state: "investigating", recordDone: false };
   }
   // The turn that linked it counts once it ends, so a pull request built and opened in one turn
-  // reaches Done; it does not record the first done, since no work followed the link.
+  // reaches Done; it records no done, since no work followed the link.
   const finished = input.tree.filter(
     (node) =>
       requestedSince(node, input.linkedAtMs) ||
       (node.latestRunCompletedAtMs !== null && node.latestRunCompletedAtMs >= input.linkedAtMs),
   );
   if (finished.length === 0) {
-    return { state: doneBefore ? "done" : "investigating", firstDone: false };
+    return { state: doneBefore ? "done" : "investigating", recordDone: false };
   }
   // A run that ended without a completion time counts from its request.
   const quietSinceMs = Math.max(
@@ -109,5 +112,6 @@ export function deriveAgentState(input: AgentStateInput): AgentStateResult | nul
     ),
   );
   if (input.nowMs - quietSinceMs < AGENT_DONE_SETTLE_MS) return null;
-  return { state: "done", firstDone: !doneBefore && work.length > 0 };
+  const unseenWork = input.doneAtMs === null ? work.length > 0 : input.doneAtMs < quietSinceMs;
+  return { state: "done", recordDone: unseenWork };
 }

@@ -1000,6 +1000,26 @@ export const ProjectSettingsOverrides = Schema.Struct({
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
 
 /**
+ * A project's override entry as a settings patch sends it. Clients round-trip the whole entry on
+ * every edit, and ones built before label rules never send them, so an entry without them keeps
+ * the stored ones; `null` clears them. Unlike the stored decode, a value the rules cannot apply
+ * is refused here.
+ */
+export const ProjectSettingsOverridesPatch = Schema.Struct({
+  ...ProjectSettingsOverrides.fields,
+  // Undefined, as a stored entry may hold it, counts as absent.
+  pullRequestLabelRules: Schema.optionalKey(
+    Schema.UndefinedOr(Schema.NullOr(PullRequestLabelRules)),
+  ),
+});
+export type ProjectSettingsOverridesPatch = typeof ProjectSettingsOverridesPatch.Type;
+
+/** A patch entry keeps this key when it leaves it out, so removing its override sends null. */
+export function projectOverrideClearsWithNull(key: ProjectScopedServerSettingKey): boolean {
+  return key === "pullRequestLabelRules";
+}
+
+/**
  * Whether `null` is a stored override value for this key rather than "unset".
  * Clients writing a project override treat null for every other key as a
  * request to remove the override, so a picker's "Inherit" item and the row's
@@ -1488,7 +1508,7 @@ export const ServerSettingsPatch = Schema.Struct({
    * field existed cannot wipe it by editing another key.
    */
   projectSettingsOverrides: Schema.optionalKey(
-    Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverrides)),
+    Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverridesPatch)),
   ),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
   enableDeviceSupport: Schema.optionalKey(Schema.Boolean),

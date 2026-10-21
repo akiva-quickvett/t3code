@@ -65,15 +65,13 @@ export function agentLabelChange(
 
 type LinkEntry = PullRequestLabelObservation["entries"][number];
 
-const earliest = (values: ReadonlyArray<string | undefined>) => {
-  const times = values.flatMap((value) => (value === undefined ? [] : [Date.parse(value)]));
-  return times.length === 0 ? null : Math.min(...times);
-};
+const timesOf = (values: ReadonlyArray<string | undefined>) =>
+  values.flatMap((value) => (value === undefined ? [] : [Date.parse(value)]));
 
 /**
  * Every thread that links a pull request decides it together, so a link added later (a
  * supervisor linking the same pull request) cannot move the state back: the tree is all their
- * trees, the phase starts at the earliest link, and one done on any of them counts.
+ * trees, work counts from the earliest link, and the latest done on any of them counts.
  */
 export function pullRequestWork(
   entries: ReadonlyArray<LinkEntry>,
@@ -83,14 +81,15 @@ export function pullRequestWork(
   readonly linkedAtMs: number;
   readonly doneAtMs: number | null;
 } {
+  const doneTimes = timesOf(entries.map((entry) => entry.link.agentDoneAt));
   const tree = new Map<WorkTreeNode["threadId"], WorkTreeNode>();
   for (const entry of entries) {
     for (const node of workTreeOf(entry.thread.id, nodes)) tree.set(node.threadId, node);
   }
   return {
     tree: [...tree.values()],
-    linkedAtMs: earliest(entries.map((entry) => entry.link.linkedAt))!,
-    doneAtMs: earliest(entries.map((entry) => entry.link.agentDoneAt)),
+    linkedAtMs: Math.min(...timesOf(entries.map((entry) => entry.link.linkedAt))),
+    doneAtMs: doneTimes.length === 0 ? null : Math.max(...doneTimes),
   };
 }
 
@@ -146,15 +145,14 @@ export const make = Effect.gen(function* () {
     const result = deriveAgentState({ ...work, nowMs });
     if (result === null) return;
     const { state } = result;
-    // Every link carries the done, so unlinking the one that saw it first keeps Revising. It is
-    // recorded before the labels change, so a failed write cannot lose it.
-    const doneAtMs = result.firstDone ? nowMs : work.doneAtMs;
-    if (doneAtMs !== null) {
-      const doneAt = DateTime.formatIso(DateTime.makeUnsafe(doneAtMs));
-      for (const entry of observation.entries) {
-        if (entry.link.agentDoneAt === undefined) yield* recordDone(entry, doneAt);
-      }
-    }
+    // Every link carries the latest done, so unlinking the one that saw it keeps Revising.
+    const doneAtMs = result.recordDone ? nowMs : work.doneAtMs;
+    const doneAt = doneAtMs === null ? null : DateTime.formatIso(DateTime.makeUnsafe(doneAtMs));
+    const behind = observation.entries.filter(
+      (entry) =>
+        doneAtMs !== null &&
+        (entry.link.agentDoneAt === undefined || Date.parse(entry.link.agentDoneAt) < doneAtMs),
+    );
     const change = agentLabelChange(
       labels,
       state,
@@ -166,6 +164,8 @@ export const make = Effect.gen(function* () {
       number: summary.number,
     };
     const write = Effect.gen(function* () {
+      // Recorded before the labels change, so a failed label write cannot lose the done.
+      for (const entry of behind) yield* recordDone(entry, doneAt!);
       if (change.add.length > 0) {
         yield* pullRequests.setLabels(
           { ...ref, labels: change.add, applied: true },

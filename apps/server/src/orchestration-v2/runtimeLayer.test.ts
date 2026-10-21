@@ -6388,7 +6388,7 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
 );
 
 it.layer(Layer.fresh(layerSharedApplicationDataPlaneTest))("PR label rule facts", (it) => {
-  it.effect("keeps the first agent done on a link and reads the supervised tree with roles", () =>
+  it.effect("moves a link's agent done only forward and reads the supervised tree with roles", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const sql = yield* SqlClient.SqlClient;
@@ -6434,11 +6434,15 @@ it.layer(Layer.fresh(layerSharedApplicationDataPlaneTest))("PR label rule facts"
           doneAt,
         });
       yield* markDone("label-rules-done-1", "2026-10-13T12:00:00.000Z");
-      // A later done would move the fact forward, so it changes nothing and records no event.
-      const again = yield* markDone("label-rules-done-2", "2026-10-13T13:00:00.000Z").pipe(
-        Effect.flip,
-      );
-      assert.instanceOf(again, Orchestrator.OrchestratorDispatchError);
+      yield* markDone("label-rules-done-2", "2026-10-13T13:00:00.000Z");
+      // An older or replayed done changes nothing, so it records no event.
+      for (const [commandId, doneAt] of [
+        ["label-rules-done-old", "2026-10-13T12:30:00.000Z"],
+        ["label-rules-done-same", "2026-10-13T13:00:00.000Z"],
+      ] as const) {
+        const stale = yield* markDone(commandId, doneAt).pipe(Effect.flip);
+        assert.instanceOf(stale, Orchestrator.OrchestratorDispatchError);
+      }
       yield* orchestrator.dispatch({
         type: "thread.pull-request-link.sync",
         commandId: CommandId.make("label-rules-sync"),
@@ -6456,7 +6460,7 @@ it.layer(Layer.fresh(layerSharedApplicationDataPlaneTest))("PR label rule facts"
         stack: null,
       });
       const link = (yield* orchestrator.getThreadShell(sliceId))?.pullRequests?.[0];
-      assert.equal(link?.agentDoneAt, "2026-10-13T12:00:00.000Z");
+      assert.equal(link?.agentDoneAt, "2026-10-13T13:00:00.000Z");
       assert.equal(link?.snapshot?.title, "Open PR");
 
       const treeReads: Array<readonly [string, ReadonlyArray<unknown>]> = [];

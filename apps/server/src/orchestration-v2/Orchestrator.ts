@@ -3204,8 +3204,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           const key = normalizeThreadPullRequestKey(command);
           const links = threadPullRequestsOf(thread);
           const existing = links.find((link) => threadPullRequestKeysEqual(link, key));
-          // The first done is the one that counts; later ones would move it forward.
-          if (existing === undefined || existing.agentDoneAt !== undefined) return thread;
+          // Each done cycle moves it forward once; a replayed or stale one changes nothing.
+          if (
+            existing === undefined ||
+            (existing.agentDoneAt !== undefined &&
+              Date.parse(command.doneAt) <= Date.parse(existing.agentDoneAt))
+          ) {
+            return thread;
+          }
           return {
             ...thread,
             pullRequests: links.map((link) =>
