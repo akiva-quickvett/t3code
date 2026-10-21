@@ -1767,6 +1767,132 @@ it.effect("shows a pod's failure in the run, and Retry starts the pod again befo
   }).pipe(Effect.provide(harness.layer));
 });
 
+it.effect("retries a host worktree launch without touching pods", () => {
+  let fetchFailures = 1;
+  const create = vi.fn(() => Effect.die("a host launch must not create a pod"));
+  const ensureRunning = vi.fn(() => Effect.die("a host launch must not start a pod"));
+  const harness = makeHarness({
+    fetchRemote: () =>
+      fetchFailures-- > 0
+        ? Effect.fail(
+            new GitCommandError({
+              operation: "GitVcsDriver.fetchRemote",
+              command: "git",
+              cwd: project.workspaceRoot,
+              detail: "Git could not update a local reference.",
+              exitCode: 1,
+            }),
+          )
+        : Effect.void,
+    pods: { create, ensureRunning },
+  });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:launch:host-retry",
+        thread: "thread:launch:host-retry",
+        message: "On the host",
+        workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
+      }),
+    );
+    yield* waitUntil(() =>
+      threads
+        .getThreadProjection(launched.threadId)
+        .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
+    );
+    const failed = yield* threads.getThreadProjection(launched.threadId);
+    yield* launches.retryPreparation({
+      commandId: CommandId.make("command:launch:host-retry:1"),
+      threadId: launched.threadId,
+      runId: failed.runs[0]!.id,
+    });
+    yield* waitUntil(() =>
+      threads
+        .getThreadProjection(launched.threadId)
+        .pipe(Effect.map((projection) => projection.runs[0]?.status === "starting")),
+    );
+    assert.equal(create.mock.calls.length, 0);
+    assert.equal(ensureRunning.mock.calls.length, 0);
+    assert.equal(harness.runSetup.mock.calls.length, 1);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("fails a container launch retry at the pod while pods are off, starting nothing", () => {
+  const podId = PodRuntimeId.make("pod-launch2");
+  const failure = (reason: "invalid-state" | "disabled") =>
+    new PodRuntimeError({
+      reason,
+      podId,
+      ...(reason === "invalid-state" ? { state: "start_failed" as const } : {}),
+    });
+  let attempts = 0;
+  const harness = makeHarness({
+    pods: {
+      create: () =>
+        Effect.succeed({
+          id: podId,
+          projectId: project.id,
+          worktreePath: "/repo-worktrees/feature",
+          state: "start_failed",
+          services: [],
+          image: "image",
+          startedAt: null,
+          lastError: null,
+          containerIds: [],
+          volumeIds: [],
+          updatedAt: "2026-10-21T00:00:00.000Z",
+        }),
+      // The real service refuses a launch's start once pods are off.
+      ensureRunning: () => Effect.fail(failure(attempts++ === 0 ? "invalid-state" : "disabled")),
+    },
+  });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:launch:pod-off",
+        thread: "thread:launch:pod-off",
+        message: "Run in a pod",
+        workspace: { type: "worktree", baseRef: "main", runtime: "container" },
+      }),
+    );
+    const failedRun = () =>
+      waitUntil(() =>
+        threads
+          .getThreadProjection(launched.threadId)
+          .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
+      );
+    yield* failedRun();
+    const first = yield* threads.getThreadProjection(launched.threadId);
+    yield* launches.retryPreparation({
+      commandId: CommandId.make("command:launch:pod-off:1"),
+      threadId: launched.threadId,
+      runId: first.runs[0]!.id,
+    });
+    yield* waitUntil(() =>
+      threads
+        .getThreadProjection(launched.threadId)
+        .pipe(
+          Effect.map(
+            (projection) =>
+              projection.runs[0]?.status === "failed" &&
+              projection.turnItems.some(
+                (item) =>
+                  item.type === "error" &&
+                  item.status === "failed" &&
+                  item.failure.message.includes("turned off"),
+              ),
+          ),
+        ),
+    );
+    assert.equal(attempts, 2);
+    assert.equal(harness.runSetup.mock.calls.length, 0);
+  }).pipe(Effect.provide(harness.layer));
+});
+
 it.effect.each(["fails", "is interrupted"] as const)(
   "holds a message queued during setup when the workspace preparation %s",
   (ending) =>
