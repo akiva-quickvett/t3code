@@ -82,6 +82,45 @@ To reach the services from other tailnet devices directly, set `podRuntime.publi
 `true` in the server settings. Pods created or recreated after that are also published on this
 machine's tailnet address, which Diagnostics shows next to each service.
 
+## Serve a pod's services on hostnames
+
+Some stacks only work over HTTPS on a real hostname, for example when their CORS, cookies or
+WebSocket URLs are built from it. Add `"hostnames": true` to the project's `pod` block and each
+service is served at `https://<pod>-<service>.pods.internal` instead of a port: the pod chip,
+**Settings → Diagnostics → Pods**, the local servers list and `{web.url}` in `env` all use that
+address.
+
+Hostname mode uses the pods proxy that `orch` runs on this machine: a Caddy container
+(`pods-proxy`) with its own certificate authority, and DNS servers that answer `*.pods.internal`.
+T3 Code adds one route file per pod beside orch's, removes it when the pod stops, and checks every
+route with the proxy before reloading it, so a bad route never affects other pods. Set it up once
+on the machine running T3 Code:
+
+1. Start the proxy, for example by bringing up any orch pod once.
+2. `orch pod host-dns` sends `*.pods.internal` lookups on this machine to the proxy's DNS server.
+3. `orch pod trust` adds the proxy's certificate authority to the system trust store, which
+   browsers and T3 Code's own browser use. On a distribution whose NSS does not read the system
+   store (stock Debian or Ubuntu without p11-kit's `libnssckbi.so`), also import it for your user:
+   `certutil -A -d sql:$HOME/.pki/nssdb -n "Caddy Local Authority" -t "C,," -i ~/.local/state/herdr-orch/caddy/root.crt`.
+4. If T3 Code uses Tailscale Serve, keep it off port 443: the proxy serves the hostnames to your
+   other devices on 443 of this machine's tailnet address, and Tailscale Serve on the same port
+   takes it over. Start T3 Code with `--tailscale-serve-port 8443` (or
+   `T3CODE_TAILSCALE_SERVE_PORT=8443`), or pick another port when you turn on Tailscale HTTPS in
+   **Settings → Connections**. Both that screen and Diagnostics warn while the ports clash.
+
+Inside the pod, the stack's containers resolve `*.pods.internal` too, and the agent container
+trusts the proxy's certificates, so commands there can reach any pod's hostname.
+
+If the proxy is missing when a pod is created, the pod still starts on ports and Diagnostics says
+why; **Recreate pod** once the proxy is back moves it to hostnames. If only its route cannot be put
+in place, its links use ports until it starts again. The proxy's container names, network, domain,
+routes directory and certificate are orch's defaults; change them under `podRuntime.hostnameProxy`
+in the server settings if your setup differs.
+
+If image pulls inside a pod fail with `server misbehaving`, Docker's DNS is failing on the pods
+network: set `podRuntime.dnsServers` in the server settings (for example `["192.168.1.1"]`) and
+recreate the pod.
+
 ## Removing a pod's worktree
 
 Removing the worktree, by deleting its thread or by storage cleanup, first runs the project's

@@ -22,7 +22,7 @@ const PodToolResult = Schema.Struct({ pod: Schema.NullOr(PodRuntimeSnapshot) });
 
 const PodStatusTool = Tool.make("t3_pod_status", {
   description:
-    "Report the pod of a thread's worktree: its state (creating, running, stopping, stopped, starting, frozen, stop_failed, start_failed, removing, removed), services and last error. A pod runs the project's compose stack in a private Docker daemon, and every terminal and script on that worktree runs inside it. pod is null when the worktree runs on the host.",
+    "Report the pod of a thread's worktree: its state (creating, running, stopping, stopped, starting, frozen, stop_failed, start_failed, removing, removed), services (each url is its https hostname when the project serves pods on hostnames, else its port on the T3 server's host) and last error. A pod runs the project's compose stack in a private Docker daemon, and every terminal and script on that worktree runs inside it. pod is null when the worktree runs on the host.",
   parameters: PodToolParameters,
   success: PodToolResult,
   failure: OrchestratorMcpFailure,

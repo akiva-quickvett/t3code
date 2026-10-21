@@ -293,6 +293,27 @@ effectIt.effect("keeps a full configured URL when the discovered server root fai
   }).pipe(Effect.provide(layer));
 });
 
+effectIt.effect("probes a pod hostname the server registers, never one a client names", () => {
+  const requests: string[] = [];
+  const fetchFn = ((input: Parameters<typeof globalThis.fetch>[0]) => {
+    requests.push(String(input));
+    return Promise.resolve(new Response("pod", { headers: { "content-type": "text/html" } }));
+  }) as typeof globalThis.fetch;
+  const layer = layerLsofScanner({ pid: () => 1234, fetch: fetchFn });
+  const podUrl = "https://t3-envtest-pod-abc123-web.pods.internal/";
+
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.scan(["https://client-chosen.example/"]);
+    expect(requests).not.toContain("https://client-chosen.example/");
+    yield* scanner.registerConfiguredUrls({ owner: "pod:pod-abc123", urls: [podUrl] });
+    const servers = yield* scanner.scan();
+    expect(servers.find((server) => server.url === podUrl)?.host).toBe(
+      "t3-envtest-pod-abc123-web.pods.internal",
+    );
+  }).pipe(Effect.provide(layer));
+});
+
 effectIt.effect("probes configured custom ports through a canonical loopback host", () => {
   const customPort = 43_124;
   const configuredUrl = `http://0.0.0.0:${customPort}/docs`;

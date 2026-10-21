@@ -15,6 +15,7 @@ import { formatBytes } from "../../lib/formatBytes";
 import { useEnvironmentSupportsPodRuntime } from "../../state/podRuntime";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
+import { PodRuntimeWarningList } from "../pods/PodRuntimeWarnings";
 import { usePodActions } from "../pods/usePodActions";
 import { useOpenPodService } from "../pods/useOpenPodService";
 import { Badge } from "../ui/badge";
@@ -84,6 +85,9 @@ function PodRow(props: {
           {props.pod.id}
           {props.pod.lastError === null ? null : ` · ${props.pod.lastError.message}`}
         </div>
+        {props.pod.hostnameProblem === undefined ? null : (
+          <div className="text-warning text-xs">{props.pod.hostnameProblem}</div>
+        )}
         <PodServices environmentId={props.environmentId} pod={props.pod} />
       </div>
       <Badge
@@ -180,6 +184,11 @@ export function PodDiagnostics(props: { readonly environmentId: EnvironmentId | 
   };
   return (
     <SettingsSection title="Pods">
+      {data?.warnings === undefined ? null : (
+        <div className="px-4 pt-3 sm:px-5">
+          <PodRuntimeWarningList warnings={data.warnings} />
+        </div>
+      )}
       {data === null ? (
         <p className="px-4 py-3 text-muted-foreground text-xs sm:px-5">
           {status.error ?? "Loading pods…"}

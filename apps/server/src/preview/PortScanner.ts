@@ -121,11 +121,15 @@ const terminalOwnerKey = (owner: {
   readonly terminalId: string;
 }): string => `${owner.threadId}\u0000${owner.terminalId}`;
 
-const parseConfiguredUrl = (raw: string): URL | null => {
+/**
+ * A client may name only loopback URLs, or it could make the server probe any
+ * host. The server's own registrations, such as a pod's hostnames, may name others.
+ */
+const parseConfiguredUrl = (raw: string, anyHost = false): URL | null => {
   try {
     const url = new URL(raw);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    if (!isLoopbackHost(url.hostname)) return null;
+    if (!anyHost && !isLoopbackHost(url.hostname)) return null;
     return url;
   } catch {
     return null;
@@ -144,12 +148,15 @@ const webProbeCacheKey = (raw: string): string => {
   return url.href;
 };
 
-const normalizeConfiguredUrls = (urls: ReadonlyArray<string>): ReadonlyArray<string> => [
+const normalizeConfiguredUrls = (
+  urls: ReadonlyArray<string>,
+  options: { readonly anyHost?: boolean } = {},
+): ReadonlyArray<string> => [
   ...new Set(
     urls
       .slice(0, CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS)
       .filter((raw) => raw.length <= PREVIEW_URL_MAX_LENGTH)
-      .map(parseConfiguredUrl)
+      .map((raw) => parseConfiguredUrl(raw, options.anyHost))
       .filter((url): url is URL => url !== null && url.href.length <= PREVIEW_URL_MAX_LENGTH)
       .map((url) => {
         if (url.hostname === "0.0.0.0") url.hostname = "localhost";
@@ -902,7 +909,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   const registerConfiguredUrls: PortDiscovery["Service"]["registerConfiguredUrls"] = (input) =>
     Ref.update(stateRef, (state) => {
       const registeredUrls = new Map(state.registeredUrls);
-      const urls = normalizeConfiguredUrls(input.urls);
+      const urls = normalizeConfiguredUrls(input.urls, { anyHost: true });
       if (urls.length === 0) registeredUrls.delete(input.owner);
       else registeredUrls.set(input.owner, urls);
       return { ...state, registeredUrls };

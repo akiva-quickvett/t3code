@@ -3,13 +3,20 @@ import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
-import type {
-  ContainerDriverError,
-  ContainerHost,
-  PodContainerInfo,
-  PodContainerSpec,
+import {
+  type ContainerDriverError,
+  type ContainerHost,
+  outputTail,
+  type PodContainerInfo,
+  type PodContainerSpec,
 } from "./ContainerDriver.ts";
-import { POD_ENVIRONMENT_LABEL, POD_LABEL, type PodPlan, podSafeEnv } from "./PodContainerPlan.ts";
+import {
+  POD_ENVIRONMENT_LABEL,
+  POD_LABEL,
+  POD_PROXY_CA_PATH,
+  type PodPlan,
+  podSafeEnv,
+} from "./PodContainerPlan.ts";
 
 /** A pod operation stopped at a step; the message is shown on the pod as its last error. */
 export class PodStepError extends Schema.TaggedError<PodStepError>()("PodStepError", {
@@ -17,14 +24,20 @@ export class PodStepError extends Schema.TaggedError<PodStepError>()("PodStepErr
   exitCode: Schema.NullOr(Schema.Number),
   timedOut: Schema.Boolean,
   daemonMessage: Schema.NullOr(Schema.String),
+  /** The end of what a command printed, such as compose's reason for failing. */
+  outputTail: Schema.optional(Schema.String),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
     if (this.daemonMessage !== null) return `${this.step} failed: ${this.daemonMessage}`;
     if (this.timedOut) return `${this.step} timed out.`;
-    return this.exitCode === null
-      ? `${this.step} failed.`
-      : `${this.step} failed (exit ${this.exitCode}).`;
+    const failed =
+      this.exitCode === null
+        ? `${this.step} failed`
+        : `${this.step} failed (exit ${this.exitCode})`;
+    return this.outputTail === undefined || this.outputTail.length === 0
+      ? `${failed}.`
+      : `${failed}: ${this.outputTail}`;
   }
 }
 
@@ -38,6 +51,8 @@ export interface PodOperationContext {
   readonly worktreePath: string;
   /** Fails naming the port when something else now holds one the daemon publishes. */
   readonly checkHostPorts: Effect.Effect<void, PodStepError>;
+  /** In hostname mode: the proxy's network, which the daemon joins so the proxy reaches its services. */
+  readonly proxyNetwork: string | null;
 }
 
 export interface PodOperationResult {
@@ -118,6 +133,7 @@ const execIn = (
                 exitCode: result.exitCode,
                 timedOut: result.timedOut,
                 daemonMessage: null,
+                outputTail: result.outputTail,
               }),
             ),
       ),
@@ -125,16 +141,6 @@ const execIn = (
 
 const DAEMON_LOG_LINES = 5;
 const DAEMON_EXITED_STEP = "Starting the pod's Docker daemon";
-
-/** The last lines the daemon printed, one line, within the failure message's bound. */
-const logTail = (logs: string) =>
-  logs
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .slice(-DAEMON_LOG_LINES)
-    .join(" | ")
-    .slice(-300);
 
 /**
  * A daemon that exited will never answer; failing at once, with what it
@@ -150,7 +156,7 @@ const failIfDaemonExited = (context: PodOperationContext) =>
         : yield* context.host
             .logs(dind.id, DAEMON_LOG_LINES * 4)
             .pipe(Effect.orElseSucceed(() => ""));
-    const tail = logTail(logs);
+    const tail = outputTail(logs);
     return yield* new PodStepError({
       step: DAEMON_EXITED_STEP,
       exitCode: null,
@@ -223,6 +229,32 @@ const startIfStopped = (
       ? context.host.unpause(id).pipe(step(name))
       : context.host.start(id).pipe(step(name));
 
+/**
+ * Adds the mounted proxy CA to the agent image's system store, as root, so
+ * curl, git and gh in the pod trust its hostnames. An image without the tool
+ * still runs; only its TLS to the hostnames fails, so this never fails the pod.
+ */
+const trustProxyCa = (context: PodOperationContext, agentId: string) =>
+  context.host
+    .exec(agentId, { command: ["update-ca-certificates"], user: "0", timeoutMs: 120_000 })
+    .pipe(
+      Effect.flatMap((result) =>
+        result.exitCode === 0
+          ? Effect.void
+          : Effect.logWarning("the agent image could not trust the hostname proxy's CA", {
+              podId: context.podId,
+              exitCode: result.exitCode,
+              output: result.outputTail,
+            }),
+      ),
+      Effect.catch((error) =>
+        Effect.logWarning("the agent image could not trust the hostname proxy's CA", {
+          podId: context.podId,
+          operation: error.operation,
+        }),
+      ),
+    );
+
 /** Creates whatever of the pod is missing and starts it; `fresh` also brings the stack up. */
 const bringUp = (context: PodOperationContext, fresh: boolean) =>
   Effect.gen(function* () {
@@ -241,6 +273,11 @@ const bringUp = (context: PodOperationContext, fresh: boolean) =>
       context.plan.dind,
       "Creating the pod's Docker daemon",
     );
+    // Before it starts, so its stack's DNS reaches the proxy's resolver from the outset.
+    if (context.proxyNetwork !== null)
+      yield* context.host
+        .connectNetwork(context.proxyNetwork, dindId)
+        .pipe(step("Joining the hostname proxy's network"));
     yield* startIfStopped(context, dindId, found.dind?.status, "Starting the pod's Docker daemon");
     yield* awaitDaemon(context, dindId);
     const agentId = yield* ensureContainer(
@@ -250,6 +287,8 @@ const bringUp = (context: PodOperationContext, fresh: boolean) =>
       "Creating the agent container",
     );
     yield* startIfStopped(context, agentId, found.agent?.status, "Starting the agent container");
+    if (context.plan.agent.mounts.some((mount) => mount.target === POD_PROXY_CA_PATH))
+      yield* trustProxyCa(context, agentId);
     if (fresh) {
       yield* requireCompose(context, agentId);
       const up = context.config.up?.map((command) => ["sh", "-c", command]) ?? [

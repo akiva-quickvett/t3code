@@ -25,6 +25,8 @@ const input: PodPlanInput = {
     ANTHROPIC_API_KEY: "sk-ant",
     CLAUDE_CODE_OAUTH_TOKEN: "oauth",
   },
+  dns: [],
+  proxyCaRoot: null,
   publish: [],
 };
 
@@ -103,5 +105,24 @@ describe("pod container plan", () => {
     for (const labels of [plan.dind.labels, plan.agent.labels, plan.volume.labels]) {
       expect(labels).toMatchObject({ "t3.pod": "pod-abc123", "t3.environment": "env-1" });
     }
+  });
+
+  it("resolves through the given servers and trusts the proxy CA only when given one", () => {
+    expect(planPod(input).dind).not.toHaveProperty("dns");
+    expect(planPod(input).agent.env).not.toHaveProperty("NODE_EXTRA_CA_CERTS");
+    const plan = planPod({
+      ...input,
+      dns: ["172.21.0.2", "192.168.1.1"],
+      proxyCaRoot: "/home/dev/.local/state/herdr-orch/caddy/root.crt",
+    });
+    expect(plan.dind.dns).toEqual(["172.21.0.2", "192.168.1.1"]);
+    // The daemon passes them on to the stack's containers.
+    expect(plan.dind.command.slice(3)).toEqual(["--dns", "172.21.0.2", "--dns", "192.168.1.1"]);
+    expect(mountList(plan.agent.mounts)).toContain(
+      "bind /home/dev/.local/state/herdr-orch/caddy/root.crt:/usr/local/share/ca-certificates/t3-pods-proxy.crt ro",
+    );
+    expect(plan.agent.env.NODE_EXTRA_CA_CERTS).toBe(
+      "/usr/local/share/ca-certificates/t3-pods-proxy.crt",
+    );
   });
 });
