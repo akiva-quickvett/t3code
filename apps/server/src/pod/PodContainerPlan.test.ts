@@ -25,6 +25,7 @@ const input: PodPlanInput = {
     ANTHROPIC_API_KEY: "sk-ant",
     CLAUDE_CODE_OAUTH_TOKEN: "oauth",
   },
+  publish: [],
 };
 
 const mountList = (

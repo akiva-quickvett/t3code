@@ -25,10 +25,19 @@ export interface PodContainerSpec {
     | { readonly mode: "container"; readonly container: string };
   readonly mounts: ReadonlyArray<PodContainerMount>;
   readonly env: Readonly<Record<string, string>>;
+  /** TCP ports published on the host, as `docker create -p`. */
+  readonly publish?: ReadonlyArray<PodPublishedPort>;
   /** `uid:gid`; the image's user when absent. */
   readonly user?: string;
   readonly workdir?: string;
   readonly command: ReadonlyArray<string>;
+}
+
+export interface PodPublishedPort {
+  /** An IPv4 address of the host; never a wildcard. */
+  readonly hostIp: string;
+  readonly hostPort: number;
+  readonly containerPort: number;
 }
 
 export type PodContainerStatus =
@@ -396,6 +405,10 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
         "--network",
         spec.network.mode === "bridge" ? spec.network.name : `container:${spec.network.container}`,
         ...spec.mounts.flatMap((mount) => ["--mount", mountArgument(mount)]),
+        ...(spec.publish ?? []).flatMap((port) => [
+          "--publish",
+          `${port.hostIp}:${port.hostPort}:${port.containerPort}/tcp`,
+        ]),
         ...env.args,
         ...(spec.user === undefined ? [] : ["--user", spec.user]),
         ...(spec.workdir === undefined ? [] : ["--workdir", spec.workdir]),

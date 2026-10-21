@@ -54,6 +54,7 @@ const plan = planPod({
   ghConfigDir: null,
   seeds: null,
   podEnv: { DATABASE_URL: "postgres://secret@db" },
+  publish: [{ hostIp: "127.0.0.1", hostPort: 20000, containerPort: 3000 }],
 });
 
 describe("Docker container driver", () => {
@@ -68,6 +69,11 @@ describe("Docker container driver", () => {
         expect(dind?.args).toEqual(expect.arrayContaining(["--init", "--privileged"]));
         expect(agent?.args).toContain("--init");
         expect(agent?.args).not.toContain("--privileged");
+        // Only the daemon publishes, on the planned host address alone.
+        expect(dind?.args).toEqual(
+          expect.arrayContaining(["--publish", "127.0.0.1:20000:3000/tcp"]),
+        );
+        expect(agent?.args).not.toContain("--publish");
         const mounts = (args: ReadonlyArray<string>) =>
           args.flatMap((arg, index) => (args[index - 1] === "--mount" ? [arg] : []));
         expect(mounts(agent!.args)).toEqual([

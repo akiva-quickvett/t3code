@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  EnvironmentId,
   PodRuntimeId,
   type PodRuntimeOperation,
   type PodRuntimeSnapshot,
@@ -7,9 +8,12 @@ import {
   ProjectId,
 } from "@t3tools/contracts";
 
+import type { EnvironmentThreadShell } from "./models.ts";
 import {
   EMPTY_POD_RUNTIME_STATE,
+  podBrowsingThread,
   podForWorktree,
+  podServiceLinks,
   podRuntimeActions,
   reducePodRuntimeEvent,
 } from "./podRuntime.ts";
@@ -111,5 +115,47 @@ describe("pod runtime actions", () => {
     for (const state of ["creating", "starting", "stopping"] as const)
       expect(labels(pod(state))).toEqual(["Remove pod"]);
     expect(labels(pod("removing"))).toEqual([]);
+  });
+});
+
+describe("pod service links", () => {
+  const environmentId = EnvironmentId.make("env-1");
+  const thread = (
+    id: string,
+    overrides: Partial<EnvironmentThreadShell> = {},
+  ): EnvironmentThreadShell =>
+    ({
+      environmentId,
+      id,
+      worktreePath: "/work/trees/feature",
+      archivedAt: null,
+      updatedAt: "2026-10-21T10:00:00.000Z",
+      ...overrides,
+    }) as EnvironmentThreadShell;
+
+  it("offers only the services published while the pod runs", () => {
+    const running: PodRuntimeSnapshot = {
+      ...pod("running"),
+      services: [
+        { name: "web", port: 3000, url: "http://127.0.0.1:20000" },
+        { name: "api", port: 8000, url: null },
+      ],
+    };
+    expect(podServiceLinks(running)).toEqual([{ name: "web", url: "http://127.0.0.1:20000" }]);
+  });
+
+  it("opens them in the latest live thread on the pod's worktree in its environment", () => {
+    const threads = [
+      thread("older", { updatedAt: "2026-10-21T09:00:00.000Z" }),
+      thread("latest", { worktreePath: "/work/trees/feature/" }),
+      thread("archived", { updatedAt: "2026-10-21T11:00:00.000Z", archivedAt: "t" }),
+      thread("elsewhere", { updatedAt: "2026-10-21T11:00:00.000Z", worktreePath: "/work/other" }),
+      thread("other-env", {
+        updatedAt: "2026-10-21T11:00:00.000Z",
+        environmentId: EnvironmentId.make("env-2"),
+      }),
+    ];
+    expect(podBrowsingThread(threads, environmentId, pod("running"))?.id).toBe("latest");
+    expect(podBrowsingThread([], environmentId, pod("running"))).toBeUndefined();
   });
 });

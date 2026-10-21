@@ -209,6 +209,34 @@ effectIt.layer(layerTestPortDiscovery)("PortDiscovery integration (configured UR
       expect(received).toContain(port);
     }),
   );
+
+  it.effect(
+    "probes a server-registered URL for every scan and subscriber until it is removed",
+    Effect.fn("PortScannerTest.registeredUrls")(function* () {
+      const { port } = yield* commonDevServer;
+      const scanner = yield* PortScanner.PortDiscovery;
+      const url = `http://127.0.0.1:${port}`;
+      yield* scanner.registerConfiguredUrls({ owner: "pod:pod-a", urls: [url] });
+      expect((yield* scanner.scan()).map((server) => server.port)).toEqual([port]);
+      // A client's full list of its own URLs does not crowd it out.
+      const clientUrls = Array.from(
+        { length: CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS },
+        (_, index) => `http://localhost:1/client-${index}`,
+      );
+      expect((yield* scanner.scan(clientUrls)).map((server) => server.port)).toEqual([port]);
+      const received: Array<ReadonlyArray<number>> = [];
+      yield* scanner.subscribe({ configuredUrls: [], initialSnapshot: [] }, (servers) =>
+        Effect.sync(() => {
+          received.push(servers.map((server) => server.port));
+        }),
+      );
+      yield* scanner.retain;
+      expect(received.at(-1)).toEqual([port]);
+
+      yield* scanner.registerConfiguredUrls({ owner: "pod:pod-a", urls: [] });
+      expect(yield* scanner.scan()).toEqual([]);
+    }),
+  );
 });
 
 effectIt.effect("revalidates a successful HTML probe after its cache entry expires", () => {

@@ -36,6 +36,8 @@ export interface PodOperationContext {
   readonly network: string;
   readonly config: T3ProjectFilePod;
   readonly worktreePath: string;
+  /** Fails naming the port when something else now holds one the daemon publishes. */
+  readonly checkHostPorts: Effect.Effect<void, PodStepError>;
 }
 
 export interface PodOperationResult {
@@ -171,6 +173,9 @@ const bringUp = (context: PodOperationContext, fresh: boolean) =>
       yield* context.host
         .createVolume(context.plan.volume)
         .pipe(step("Creating the pod's Docker volume"));
+    // A running or paused daemon already holds its ports.
+    if (found.dind?.status !== "running" && found.dind?.status !== "paused")
+      yield* context.checkHostPorts;
     const dindId = yield* ensureContainer(
       context,
       found.dind,

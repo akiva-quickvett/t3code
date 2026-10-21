@@ -1,4 +1,5 @@
 import {
+  type EnvironmentId,
   POD_RUNTIME_REQUESTS,
   podRuntimeRetryRequest,
   type PodRuntimeRequest,
@@ -6,6 +7,8 @@ import {
   type PodRuntimeState,
   type PodRuntimeStreamEvent,
 } from "@t3tools/contracts";
+
+import type { EnvironmentThreadShell } from "./models.ts";
 
 export interface PodRuntimeLiveState {
   readonly enabled: boolean;
@@ -37,6 +40,41 @@ export function podForWorktree(
   if (worktreePath == null) return undefined;
   const target = trimTrailingSeparators(worktreePath);
   return pods.find((pod) => trimTrailingSeparators(pod.worktreePath) === target);
+}
+
+export interface PodServiceLink {
+  readonly name: string;
+  /** The service on the environment host's loopback, for its server-side browser. */
+  readonly url: string;
+  /** The same service on the host's tailnet address, when the environment publishes there. */
+  readonly tailnetUrl?: string;
+}
+
+/** The pod's services that can be opened now: published only while the pod runs. */
+export function podServiceLinks(pod: PodRuntimeSnapshot): ReadonlyArray<PodServiceLink> {
+  return pod.services.flatMap(({ name, url, tailnetUrl }) =>
+    url === null ? [] : [{ name, url, ...(tailnetUrl === undefined ? {} : { tailnetUrl }) }],
+  );
+}
+
+/**
+ * The thread a pod's service opens in when asked from outside any thread: the
+ * most recently active one, not archived, on the pod's worktree.
+ */
+export function podBrowsingThread(
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+  environmentId: EnvironmentId,
+  pod: PodRuntimeSnapshot,
+): EnvironmentThreadShell | undefined {
+  const target = trimTrailingSeparators(pod.worktreePath);
+  let latest: EnvironmentThreadShell | undefined;
+  for (const thread of threads) {
+    if (thread.environmentId !== environmentId || thread.archivedAt !== null) continue;
+    if (thread.worktreePath === null || trimTrailingSeparators(thread.worktreePath) !== target)
+      continue;
+    if (latest === undefined || thread.updatedAt > latest.updatedAt) latest = thread;
+  }
+  return latest;
 }
 
 export type PodRuntimeTone = "running" | "busy" | "idle" | "failed";

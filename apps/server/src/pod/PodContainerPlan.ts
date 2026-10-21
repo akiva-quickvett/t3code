@@ -1,10 +1,21 @@
 import type { PodRuntimeId } from "@t3tools/contracts";
 
-import type { PodContainerMount, PodContainerSpec } from "./ContainerDriver.ts";
+import type { PodContainerMount, PodContainerSpec, PodPublishedPort } from "./ContainerDriver.ts";
 
 export const POD_LABEL = "t3.pod";
 export const POD_ENVIRONMENT_LABEL = "t3.environment";
 const POD_ROLE_LABEL = "t3.role";
+/**
+ * The host ports a pod's daemon publishes, comma-separated. Every T3 server on
+ * the Docker host reads it, so pods of different servers never share a port.
+ */
+export const POD_PORTS_LABEL = "t3.ports";
+
+export const parsePodPortsLabel = (value: string | undefined): ReadonlyArray<number> =>
+  (value ?? "")
+    .split(",")
+    .map(Number)
+    .filter((port) => Number.isInteger(port) && port > 0);
 
 export const DIND_IMAGE = "docker:27-dind";
 /** Inside the shared network namespace only; nothing outside the pod reaches it. */
@@ -33,6 +44,8 @@ export interface PodPlanInput {
   readonly environmentId: string;
   readonly image: string;
   readonly network: string;
+  /** The daemon publishes the pod's services on host ports; the stack serves them on its network. */
+  readonly publish: ReadonlyArray<PodPublishedPort>;
   readonly worktreePath: string;
   /** The source checkout's `.git`, which a linked worktree's objects and refs live in. */
   readonly gitCommonDir: string;
@@ -108,7 +121,14 @@ export const planPod = (input: PodPlanInput): PodPlan => {
   const dind: PodContainerSpec = {
     name: names.dind,
     image: DIND_IMAGE,
-    labels: labels("dind"),
+    labels: {
+      ...labels("dind"),
+      ...(input.publish.length === 0
+        ? {}
+        : {
+            [POD_PORTS_LABEL]: [...new Set(input.publish.map((port) => port.hostPort))].join(","),
+          }),
+    },
     init: true,
     // Docker-in-Docker cannot run its daemon otherwise.
     privileged: true,
@@ -120,6 +140,7 @@ export const planPod = (input: PodPlanInput): PodPlan => {
       ...seeds,
     ],
     env: { DOCKER_TLS_CERTDIR: "" },
+    publish: input.publish,
     command: ["--host=unix:///var/run/docker.sock", `--host=${POD_DOCKER_HOST}`],
   };
 

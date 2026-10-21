@@ -99,6 +99,7 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ContainerDriver from "./pod/ContainerDriver.ts";
+import * as PodHostPorts from "./pod/PodHostPorts.ts";
 import * as PodRuntimeService from "./pod/PodRuntimeService.ts";
 import * as PodRuntimeStore from "./pod/PodRuntimeStore.ts";
 import * as WorkspaceExecutionTarget from "./pod/WorkspaceExecutionTarget.ts";
@@ -414,6 +415,8 @@ const layerTerminal = TerminalManager.layer.pipe(
 const layerPodRuntime = PodRuntimeService.layer.pipe(
   Layer.provideMerge(layerWorkspaceExecutionTarget),
   Layer.provide(layerTerminal),
+  Layer.provide(layerPortScanner),
+  Layer.provide(PodHostPorts.layer),
   Layer.provide(T3ProjectFileLoader.layer),
   Layer.provide(RuntimeLayer.layerProjectService),
   Layer.provide(GitVcsDriver.layer),
