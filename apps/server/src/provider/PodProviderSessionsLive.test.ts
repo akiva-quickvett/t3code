@@ -13,6 +13,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -20,6 +21,7 @@ import * as Stream from "effect/Stream";
 
 import * as PodMcpListener from "../mcp/PodMcpListener.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import { ContainerDriverError } from "../pod/ContainerDriver.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import * as PodRuntimeStore from "../pod/PodRuntimeStore.ts";
 import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
@@ -341,15 +343,14 @@ const spawnMarked = (mark: string, script: string) =>
     stdio: ["ignore", "pipe", "ignore"],
   });
 
-/** A /proc of only these processes: each pid's real environment, copied. */
+/** A /proc of only these processes, linked to their real, live entries. */
 const fakeProc = (root: string, children: ReadonlyArray<NodeChildProcess.ChildProcess>) => {
   for (const child of children) {
     const pids = [String(child.pid), ...descendants(child.pid!)];
     for (const pid of pids) {
       NodeFS.mkdirSync(`${root}/${pid}`, { recursive: true });
-      // /proc reports a size of 0, so a file copy would copy nothing.
       for (const file of ["environ", "stat"])
-        NodeFS.writeFileSync(`${root}/${pid}/${file}`, NodeFS.readFileSync(`/proc/${pid}/${file}`));
+        NodeFS.symlinkSync(`/proc/${pid}/${file}`, `${root}/${pid}/${file}`);
     }
   }
 };
@@ -398,6 +399,15 @@ describe.skipIf(process.platform !== "linux")("pod provider process", () => {
         `/tmp/t3-pod-session-${firstEnv?.[POD_SESSION_ENV]}.pid`,
         "claude",
       ]);
+      // An image without a writable /tmp still starts the launch.
+      const wrapper = commands[0]![2]!;
+      expect(
+        NodeChildProcess.execFileSync(
+          "sh",
+          ["-c", wrapper, "t3-pod-launch", "/nonexistent/t3/launch.pid", "echo", "started"],
+          { encoding: "utf8" },
+        ),
+      ).toBe("started\n");
       expect(firstEnv?.[POD_SESSION_ENV]).toBeDefined();
       expect(firstEnv?.[POD_SESSION_ENV]).not.toBe(secondEnv?.[POD_SESSION_ENV]);
 
@@ -492,7 +502,7 @@ describe.skipIf(process.platform !== "linux")("pod provider process", () => {
     }).pipe(Effect.scoped, Effect.provide(layer));
   });
 
-  it.effect("stops the children a launch started without its mark", () => {
+  it.live("stops the children a launch started without its mark", () => {
     const procRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fake-proc-"));
     const { layer, launched, stops } = localProcessLayer(procRoot);
     return Effect.gen(function* () {
@@ -522,7 +532,9 @@ describe.skipIf(process.platform !== "linux")("pod provider process", () => {
       NodeFS.writeFileSync(NodePath.join(procRoot, "launch.pid"), `${session.pid}\n`);
       const sessionExited = exited(session);
 
-      yield* launch.stop;
+      const [stopTook] = yield* Effect.timed(launch.stop);
+      // Everything went on TERM, so the stop did not wait out its 2 s grace.
+      expect(Duration.toMillis(stopTook)).toBeLessThan(1500);
       expect(yield* sessionExited).toBe("SIGTERM");
       expect(NodeFS.existsSync(`/proc/${child[0]}/stat`) ? stateOf(child[0]!) : "gone").toMatch(
         /gone|Z/,
@@ -537,3 +549,91 @@ describe.skipIf(process.platform !== "linux")("pod provider process", () => {
 /** A process's state letter; Z once it is dead and awaits its parent. */
 const stateOf = (pid: string) =>
   NodeFS.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.charAt(0) ?? "gone";
+
+describe("pod sweep", () => {
+  it.effect("tries a failed sweep again, and a done one never", () => {
+    const attempts: Array<() => void> = [];
+    const sweeps: Array<string> = [];
+    const nextSweep = () => new Promise<void>((resolve) => attempts.push(resolve));
+    const targets = WorkspaceExecutionTarget.WorkspaceExecutionTarget.of({
+      resolve: () => Effect.succeed({ type: "host" }),
+      launch: () => ({ command: "docker", args: [], env: {} }),
+      exec: (target, spec) =>
+        Effect.suspend(() => {
+          sweeps.push(`${target.podId} ${spec.command[4]}`);
+          attempts.shift()?.();
+          // The daemon is down for the first sweep.
+          return sweeps.length === 1
+            ? Effect.fail(
+                new ContainerDriverError({
+                  operation: "exec",
+                  exitCode: null,
+                  daemonMessage: null,
+                }),
+              )
+            : Effect.succeed({ exitCode: 3, timedOut: false });
+        }),
+    });
+    const observed = (occurredAt: string) =>
+      ({
+        type: "pod.observed",
+        podId,
+        occurredAt,
+        state: "running",
+        failedOperation: null,
+        message: null,
+        containerIds: [],
+        volumeIds: [],
+      }) as const;
+    return Effect.gen(function* () {
+      const store = yield* PodRuntimeStore.PodRuntimeStore;
+      const firstSweep = nextSweep();
+      yield* store.commit(podId, [
+        {
+          type: "pod.created",
+          podId,
+          occurredAt: "2026-10-21T00:00:00.000Z",
+          projectId: ProjectId.make("project-1"),
+          worktreePath: POD_WORKTREE,
+          image: "image",
+          dockerHost: "",
+          services: [],
+        },
+        observed("2026-10-21T00:00:01.000Z"),
+      ]);
+      yield* Effect.promise(() => firstSweep);
+      const secondSweep = nextSweep();
+      yield* store.commit(podId, [observed("2026-10-21T00:00:02.000Z")]);
+      yield* Effect.promise(() => secondSweep);
+      // Swept now: a third event for the same start leaves the pod alone.
+      // Events are handled in order, so another pod's sweep marks its turn.
+      yield* store.commit(podId, [observed("2026-10-21T00:00:03.000Z")]);
+      const otherPod = PodRuntimeId.make("pod-placement2");
+      const otherSweep = nextSweep();
+      yield* store.commit(otherPod, [
+        {
+          type: "pod.created",
+          podId: otherPod,
+          occurredAt: "2026-10-21T00:00:04.000Z",
+          projectId: ProjectId.make("project-1"),
+          worktreePath: "/work/trees/other",
+          image: "image",
+          dockerHost: "",
+          services: [],
+        },
+        { ...observed("2026-10-21T00:00:05.000Z"), podId: otherPod },
+      ]);
+      yield* Effect.promise(() => otherSweep);
+      expect(sweeps).toEqual([`${podId} others`, `${podId} others`, `${otherPod} others`]);
+    }).pipe(
+      Effect.provide(
+        layerProcess.pipe(
+          Layer.provideMerge(PodRuntimeStore.layer),
+          Layer.provide(Layer.succeed(WorkspaceExecutionTarget.WorkspaceExecutionTarget, targets)),
+          Layer.provide(SqlitePersistence.layerMemory),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+  });
+});

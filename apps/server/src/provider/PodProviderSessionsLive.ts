@@ -46,7 +46,8 @@ export const POD_SESSION_ENV = "T3_POD_SESSION";
  * started that dropped the mark (a child given a cleaned environment, such
  * as Codex's stdio MCP servers). `exec` keeps the pid.
  */
-const LAUNCH_SCRIPT = 'echo "$$" > "$1" && shift && exec "$@"';
+// Without a writable /tmp the launch still starts; its mark alone then stops it.
+const LAUNCH_SCRIPT = '{ echo "$$" > "$1"; } 2>/dev/null; shift; exec "$@"';
 
 /** Inside the container, never the host's /tmp, which a pod does not mount. */
 const launchPidFile = (mark: string) => `/tmp/t3-pod-session-${mark}.pid`;
@@ -57,8 +58,9 @@ const launchPidFile = (mark: string) => `/tmp/t3-pod-session-${mark}.pid`;
  * process, while it still runs with the mark: a reused pid carries none.
  * `others <prefix> -` takes those marked by an earlier server, whose stops
  * never ran. Marks rather than pids where possible: a child that left the
- * process group keeps its mark. The KILL pass signals a pid only while its
- * start time is the one the TERM pass saw. Exits 3 when nothing matched, so a
+ * process group keeps its mark. After TERM it waits up to 2 s for the targets
+ * to go, then KILLs what is left, signalling a pid only while its start time
+ * is the one the TERM pass saw. Exits 3 when nothing matched, so a
  * stop that found nothing shows. A fourth argument replaces /proc, so a test
  * on a shared machine scans only its own processes.
  */
@@ -112,15 +114,22 @@ const STOP_SCRIPT = [
   "  fi",
   'rm -f "$pidfile"',
   "fi",
+  'same() { [ "$(stat_field "${1%%:*}" 22)" = "${1#*:}" ]; }',
   "signal() {",
   "  for target in $targets; do",
-  "    pid=${target%%:*}",
-  '    [ "$(stat_field "$pid" 22)" = "${target#*:}" ] && kill "-$1" "$pid" 2>/dev/null && found=$((found + 1))',
+  '    same "$target" && kill "-$1" "${target%%:*}" 2>/dev/null && found=$((found + 1))',
   "  done",
+  "}",
+  "alive() {",
+  "  for target in $targets; do",
+  '    same "$target" && [ "$(stat_field "${target%%:*}" 3)" != Z ] && return 0',
+  "  done",
+  "  return 1",
   "}",
   "signal TERM",
   '[ "$found" -gt 0 ] || exit 3',
-  "sleep 2",
+  "tries=0",
+  'while alive && [ "$tries" -lt 20 ]; do sleep 0.1; tries=$((tries + 1)); done',
   "signal KILL",
   "true",
 ].join("\n");
@@ -185,7 +194,6 @@ export const layerProcess = Layer.effect(
       const { snapshot } = record;
       const key = `${snapshot.id}\u0000${snapshot.startedAt ?? ""}`;
       if (snapshot.state !== "running" || swept.has(key)) return Effect.void;
-      swept.add(key);
       const target: WorkspaceExecutionTarget.PodExecutionTarget = {
         type: "pod",
         podId: snapshot.id,
@@ -193,7 +201,13 @@ export const layerProcess = Layer.effect(
         worktreePath: snapshot.worktreePath,
         dockerHost: record.dockerHost,
       };
+      // A failed sweep (the daemon was down) is tried again on the next event.
       return stopMarked(target, "others", markPrefix, "-").pipe(
+        Effect.tap((outcome) =>
+          Effect.sync(() => {
+            if (outcome !== "failed") swept.add(key);
+          }),
+        ),
         Effect.flatMap((outcome) =>
           outcome === "stopped"
             ? Effect.logInfo("stopped an earlier server's sessions left in a pod", {
