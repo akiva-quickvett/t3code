@@ -1,5 +1,6 @@
 // @effect-diagnostics globalDate:off
 import type {
+  ThreadId,
   UsageBucket,
   UsageCategoryCost,
   UsageDay,
@@ -64,7 +65,10 @@ interface MutableBucket {
   unpricedRecords: number;
   providerReportedRecords: number;
   sessions: Set<string>;
+  threadId: ThreadId | undefined;
 }
+
+export type AttributedUsageBucket = UsageBucket & { readonly threadId?: ThreadId };
 
 export interface AggregateOptions {
   readonly timeZone: string;
@@ -76,6 +80,11 @@ export interface AggregateOptions {
   readonly resolution?: UsageResolution;
   readonly sinceTimeMs?: number;
   readonly untilTimeMs?: number;
+  /**
+   * Splits buckets by the thread a record ran in and drops records it attributes to none, before
+   * de-duplication: a dropped copy then cannot shadow an attributed one.
+   */
+  readonly attribute?: (record: UsageRecord) => ThreadId | undefined;
 }
 
 export function resolveModelAliases(
@@ -95,7 +104,7 @@ export function resolveModelAliases(
 }
 
 export interface AggregateResult {
-  readonly buckets: readonly UsageBucket[];
+  readonly buckets: readonly AttributedUsageBucket[];
   readonly duplicatesDropped: number;
   readonly outOfWindow: number;
 }
@@ -117,6 +126,7 @@ export class UsageAggregator {
     readonly provider: string;
     readonly model: string;
     readonly source: string;
+    readonly threadId: ThreadId | undefined;
     readonly bucket: MutableBucket;
   } | null = null;
   #duplicatesDropped = 0;
@@ -140,6 +150,9 @@ export class UsageAggregator {
 
   add(input: UsageRecord, sourcePath?: string): boolean {
     const record = this.#mapModel(input);
+    const attribute = this.#options.attribute;
+    const threadId = attribute?.(record);
+    if (attribute !== undefined && threadId === undefined) return false;
     if (record.dedupeKey !== null) {
       if (this.#seen.has(record.dedupeKey)) {
         this.#duplicatesDropped += 1;
@@ -170,7 +183,14 @@ export class UsageAggregator {
       this.#hourlyWindow === null
         ? -1
         : Math.floor((record.timestampMs - this.#hourlyWindow.sinceTimeMs) / HOUR_MS);
-    const bucket = this.#bucketFor(day, hourIndex, record.provider, record.model, sourcePath ?? "");
+    const bucket = this.#bucketFor(
+      day,
+      hourIndex,
+      record.provider,
+      record.model,
+      sourcePath ?? "",
+      threadId,
+    );
 
     const priced = priceUsage(this.#options.rates, record, this.#options.priceOverrides);
 
@@ -228,6 +248,7 @@ export class UsageAggregator {
     provider: string,
     model: string,
     source: string,
+    threadId: ThreadId | undefined,
   ): MutableBucket {
     const last = this.#lastBucket;
     if (
@@ -236,14 +257,15 @@ export class UsageAggregator {
       last.hourIndex === hourIndex &&
       last.provider === provider &&
       last.model === model &&
-      last.source === source
+      last.source === source &&
+      last.threadId === threadId
     ) {
       return last.bucket;
     }
     const window = this.#hourlyWindow;
     const hourStart =
       window === null ? "" : new Date(window.sinceTimeMs + hourIndex * HOUR_MS).toISOString();
-    const key = `${day}\u0000${hourStart}\u0000${provider}\u0000${model}\u0000${source}`;
+    const key = `${day}\u0000${hourStart}\u0000${provider}\u0000${model}\u0000${source}\u0000${threadId ?? ""}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
@@ -258,15 +280,16 @@ export class UsageAggregator {
         unpricedRecords: 0,
         providerReportedRecords: 0,
         sessions: new Set<string>(),
+        threadId,
       };
       this.#buckets.set(key, bucket);
     }
-    this.#lastBucket = { day, hourIndex, provider, model, source, bucket };
+    this.#lastBucket = { day, hourIndex, provider, model, source, threadId, bucket };
     return bucket;
   }
 
   finish(): AggregateResult {
-    const buckets: UsageBucket[] = [];
+    const buckets: AttributedUsageBucket[] = [];
     for (const [key, bucket] of this.#buckets) {
       const [day = "", hourStart = "", provider = "", model = "", sourcePath = ""] =
         key.split("\u0000");
@@ -300,6 +323,7 @@ export class UsageAggregator {
         records: bucket.records,
         unpricedRecords: bucket.unpricedRecords,
         sessions: bucket.sessions.size,
+        ...(bucket.threadId === undefined ? {} : { threadId: bucket.threadId }),
       });
     }
     buckets.sort(
@@ -318,7 +342,7 @@ export class UsageAggregator {
   }
 }
 
-function roundUsd(value: number): number {
+export function roundUsd(value: number): number {
   return Math.round(value * 1e6) / 1e6;
 }
 

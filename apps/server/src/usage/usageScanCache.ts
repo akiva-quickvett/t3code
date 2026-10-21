@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 
-const USAGE_SCAN_CACHE_VERSION = 5 as const;
+const USAGE_SCAN_CACHE_VERSION = 6 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
@@ -16,8 +16,9 @@ const SPEED_COMPATIBLE_SINCE_VERSION = 4;
  * replace it, dropping saved usage for deleted transcripts. Separate files keep
  * both.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v5.json";
-export const LEGACY_SCAN_CACHE_FILE_NAME = "usage-scan-cache.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v6.json";
+/** Read in order when the current file is missing, newest first. */
+export const PREVIOUS_SCAN_CACHE_FILE_NAMES = ["usage-scan-cache-v5.json", "usage-scan-cache.json"];
 
 const SPEEDS: readonly UsageSpeed[] = ["standard", "fast", "ultrafast"];
 
@@ -284,11 +285,11 @@ export function decodeScanCache(
     ) {
       continue;
     }
-    // v4 records of stateful formats (Codex) predate service tiers, so they
-    // all priced as standard. Keep them, because the rollout may be gone, but
-    // make a live rollout re-parse whole: no file has size -1, and a zero
-    // position cannot resume.
-    const legacy = format.state !== undefined && version < USAGE_SCAN_CACHE_VERSION;
+    // Records from an older version may be wrong: v4 Codex records predate service tiers, and v5
+    // Claude records give a fork's copies the fork's session. Keep them, because the transcript
+    // may be gone, but make a live one re-parse whole: no file has size -1, and a zero position
+    // cannot resume.
+    const legacy = version < USAGE_SCAN_CACHE_VERSION;
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
     if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { ThreadId } from "@t3tools/contracts";
 
 import { resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
 import type { RateTable } from "./usagePricing.ts";
@@ -275,6 +276,56 @@ describe("UsageAggregator", () => {
     ]);
 
     expect(result.buckets).toHaveLength(3);
+  });
+
+  it("splits buckets by thread and drops records attributed to no thread", () => {
+    const owners = new Map([
+      ["session-slice", ThreadId.make("slice")],
+      ["session-cell", ThreadId.make("cell")],
+    ]);
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      attribute: (item) => owners.get(item.sessionId),
+    });
+    aggregator.add(record({ sessionId: "session-slice", dedupeKey: "msg-1" }));
+    aggregator.add(record({ sessionId: "session-cell", dedupeKey: "msg-2" }));
+    aggregator.add(record({ sessionId: "session-cell", dedupeKey: "msg-3" }));
+    aggregator.add(record({ sessionId: "session-elsewhere", dedupeKey: "msg-4" }));
+    const result = aggregator.finish();
+
+    expect(result.buckets.map(({ threadId, records }) => ({ threadId, records }))).toEqual(
+      expect.arrayContaining([
+        { threadId: "slice", records: 1 },
+        { threadId: "cell", records: 2 },
+      ]),
+    );
+    expect(result.buckets).toHaveLength(2);
+  });
+  it("does not let a copy outside the tree shadow the tree's own record", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      attribute: (item) =>
+        item.sessionId === "session-in-tree" ? ThreadId.make("slice") : undefined,
+    });
+    expect(aggregator.add(record({ sessionId: "session-outside", dedupeKey: "msg-1" }))).toBe(
+      false,
+    );
+    expect(aggregator.add(record({ sessionId: "session-in-tree", dedupeKey: "msg-1" }))).toBe(true);
+    expect(aggregator.add(record({ sessionId: "session-in-tree", dedupeKey: "msg-1" }))).toBe(
+      false,
+    );
+    const result = aggregator.finish();
+
+    expect(result.duplicatesDropped).toBe(1);
+    expect(result.buckets.map(({ threadId, records }) => ({ threadId, records }))).toEqual([
+      { threadId: "slice", records: 1 },
+    ]);
   });
 });
 

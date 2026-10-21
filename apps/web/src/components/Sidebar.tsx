@@ -11,6 +11,7 @@ import {
 } from "./chat/threadContextDrag";
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
+import { canReadThreadUsage, openThreadUsageDialog } from "../state/threadUsage";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
 import { useAtomValue } from "@effect/atom-react";
@@ -4491,6 +4492,7 @@ export default function Sidebar() {
                 pinning: supportsPinning,
                 titleRegeneration: supportsTitleRegeneration,
                 rolePresets: supportsRolePresets,
+                threadUsage: canReadThreadUsage(threadRef.environmentId),
               },
               snoozePresets,
             }),
@@ -4627,6 +4629,9 @@ export default function Sidebar() {
             return;
           case "copy-thread-id":
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
+            return;
+          case "usage-cost":
+            openThreadUsageDialog(threadRef);
             return;
           case "archive": {
             if (confirmThreadArchive) {

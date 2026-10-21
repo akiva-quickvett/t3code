@@ -279,6 +279,8 @@ const layerUsage = UsageService.layer.pipe(
     ).pipe(Layer.provide(ProviderHostLive.layer.pipe(Layer.provide(ServerSecretStore.layer)))),
   ),
   Layer.provide(layerServerSettings),
+  // Thread usage reads the projections to attribute records to threads.
+  Layer.provide(SqlitePersistence.layerConfig),
 );
 
 const layerResourceDiagnostics = Layer.mergeAll(
