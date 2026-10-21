@@ -11,7 +11,6 @@ import {
   isProviderTextGenerationCapable,
   type ModelSelection,
   type ProjectId,
-  type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
   type ProjectSettingsOverridesPatch,
   ProviderDriverKind,
@@ -348,7 +347,7 @@ function translateLegacyProjectOverridePatch(
     for (const [projectId, value] of Object.entries(map)) {
       if (canonicalProjectIds.has(projectId)) continue;
       const entry = {
-        ...(entries.get(projectId) ?? currentEntries[projectId] ?? {}),
+        ...(entries.get(projectId) ?? currentEntries[projectId]),
       } as ProjectSettingsOverridesPatch;
       if (value === null || value === undefined) {
         delete entry[key];

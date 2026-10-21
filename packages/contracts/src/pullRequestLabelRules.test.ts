@@ -11,12 +11,12 @@ import { ServerSettings, ServerSettingsPatch } from "./settings.ts";
 import { ThreadPullRequestLink } from "./threadPullRequest.ts";
 
 const decodeRules = Schema.decodeUnknownSync(PullRequestLabelRules);
+const decodeSettings = Schema.decodeUnknownSync(ServerSettings);
+const decodeLink = Schema.decodeUnknownSync(ThreadPullRequestLink);
 
 describe("PullRequestLabelRules", () => {
   it("is off with the Agent label names when settings never mention it", () => {
-    expect(Schema.decodeUnknownSync(ServerSettings)({}).pullRequestLabelRules).toEqual(
-      DEFAULT_PULL_REQUEST_LABEL_RULES,
-    );
+    expect(decodeSettings({}).pullRequestLabelRules).toEqual(DEFAULT_PULL_REQUEST_LABEL_RULES);
     expect(decodeRules({ enabled: true, labels: { done: "Shipped" } }).labels).toMatchObject({
       investigating: "Agent Investigating",
       done: "Shipped",
@@ -24,7 +24,7 @@ describe("PullRequestLabelRules", () => {
   });
 
   it("turns off a hand-edited file's rules it cannot apply, keeping the rest of the file", () => {
-    const settings = Schema.decodeUnknownSync(ServerSettings)({
+    const settings = decodeSettings({
       removeAgentCreditsOnMerge: true,
       pullRequestLabelRules: { enabled: true, labels: { building: "Agent Done" } },
       projectSettingsOverrides: {
@@ -67,7 +67,7 @@ describe("PullRequestLabelRules", () => {
 
 describe("ThreadPullRequestLink", () => {
   it("decodes links saved before the done fact", () => {
-    const link = Schema.decodeUnknownSync(ThreadPullRequestLink)({
+    const link = decodeLink({
       host: "github.com",
       repository: "owner/repo",
       number: 1,

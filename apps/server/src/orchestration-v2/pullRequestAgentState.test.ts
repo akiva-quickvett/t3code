@@ -142,18 +142,16 @@ describe("deriveAgentState", () => {
     },
   ];
 
-  for (const testCase of cases) {
-    it(testCase.name, () => {
-      const result = deriveAgentState({
-        tree: testCase.tree,
-        linkedAtMs: LINKED,
-        doneAtMs: testCase.doneAtMs ?? null,
-        nowMs: testCase.nowMs ?? NOW,
-      });
-      expect(result?.state ?? null).toBe(testCase.expected);
-      if (testCase.recordDone !== undefined) expect(result?.recordDone).toBe(testCase.recordDone);
+  it.each(cases)("$name", (testCase) => {
+    const result = deriveAgentState({
+      tree: testCase.tree,
+      linkedAtMs: LINKED,
+      doneAtMs: testCase.doneAtMs ?? null,
+      nowMs: testCase.nowMs ?? NOW,
     });
-  }
+    expect(result?.state ?? null).toBe(testCase.expected);
+    if (testCase.recordDone !== undefined) expect(result?.recordDone).toBe(testCase.recordDone);
+  });
 });
 
 describe("workTreeOf", () => {

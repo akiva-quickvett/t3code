@@ -10,6 +10,10 @@ import {
 
 const decodeSchedule = Schema.decodeUnknownSync(ScheduledTaskSchedule);
 const decodeUpsertSchedule = Schema.decodeUnknownSync(ScheduledTaskUpsertSchedule);
+const decodeTask = Schema.decodeUnknownSync(ScheduledTask);
+// The task as a client built before actions decodes it.
+const { action: _action, ...stockTaskFields } = ScheduledTask.fields;
+const decodeStockTask = Schema.decodeUnknownSync(Schema.Struct(stockTaskFields));
 
 describe("ScheduledTaskSchedule", () => {
   it("keeps legacy sub-minute persisted schedules readable", () => {
@@ -77,13 +81,13 @@ describe("ScheduledTask action", () => {
   };
 
   it("reads a task without an action as before, which means an agent turn", () => {
-    const decoded = Schema.decodeUnknownSync(ScheduledTask)(storedTask);
+    const decoded = decodeTask(storedTask);
     expect(decoded.action).toBeUndefined();
     expect(decoded.prompt).toBe(storedTask.prompt);
   });
 
   it("reads a script action", () => {
-    const decoded = Schema.decodeUnknownSync(ScheduledTask)({
+    const decoded = decodeTask({
       ...storedTask,
       action: { type: "script", scriptId: "board-sync" },
     });
@@ -91,8 +95,7 @@ describe("ScheduledTask action", () => {
   });
 
   it("stays decodable for a stock client that has no action field", () => {
-    const { action: _action, ...stockFields } = ScheduledTask.fields;
-    const decoded = Schema.decodeUnknownSync(Schema.Struct(stockFields))({
+    const decoded = decodeStockTask({
       ...storedTask,
       action: { type: "script", scriptId: "board-sync" },
     });
