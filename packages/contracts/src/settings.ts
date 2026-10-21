@@ -1,3 +1,4 @@
+import { AgentRolePresetSettings } from "./agentRole.ts";
 import { SshDeviceHostConfigs } from "./device.ts";
 import {
   AuthOrchestrationOperateScope,
@@ -1271,6 +1272,14 @@ export const ServerSettings = Schema.Struct({
 
   usageModelAliases: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+
+  /**
+   * Only user edits are stored; the server merges them over the seeded
+   * defaults. Written through the agent role RPCs, never a settings patch.
+   */
+  agentRolePresets: AgentRolePresetSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(AgentRolePresetSettings)({}))),
   ),
 });
 export type ServerSettings = typeof ServerSettings.Type;

@@ -3,6 +3,7 @@ import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled"
 
 export type ThreadActionMenuId =
   | "new-thread-on-branch"
+  | "new-ticket"
   | "filter-by-project"
   | "project-settings"
   | "pin"
@@ -84,6 +85,7 @@ export interface ThreadActionMenuState {
     readonly snooze: boolean;
     readonly pinning: boolean;
     readonly titleRegeneration: boolean;
+    readonly rolePresets: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
 }
@@ -92,6 +94,7 @@ export interface ThreadActionMenuState {
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
   return ![
     "new-thread-on-branch",
+    "new-ticket",
     "project-settings",
     "mark-unread",
     "copy",
@@ -113,6 +116,9 @@ export function buildThreadActionMenuItems(
             icon: "message-square-plus",
           },
         ]
+      : []),
+    ...(state.supports.rolePresets
+      ? [{ id: "new-ticket" as const, label: "New ticket", icon: "message-square-plus" }]
       : []),
     ...(state.supports.pinning
       ? [

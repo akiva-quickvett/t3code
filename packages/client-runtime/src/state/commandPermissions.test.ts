@@ -85,6 +85,34 @@ describe("command permissions", () => {
     ),
   );
 
+  it.effect.each([
+    WS_METHODS.agentRolesSave,
+    WS_METHODS.agentRolesRemove,
+    WS_METHODS.agentRolesReset,
+  ])("requires the destination settings grant to edit role presets (%s)", (method) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const edit = createCommandPermissions(runtime, method);
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(edit.permissionAtom(env))).toBe(false);
+        expect((yield* edit.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthSettingsWriteScope],
+            permissions: [AuthSettingsWriteScope],
+          }),
+        );
+        expect(registry.get(edit.permissionAtom(env))).toBe(true);
+        yield* edit.authorize(registry, env);
+      }),
+    ),
+  );
+
   it.effect("requires the destination settings grant to check OTLP endpoints", () =>
     Effect.scoped(
       Effect.gen(function* () {

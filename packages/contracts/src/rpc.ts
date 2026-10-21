@@ -326,6 +326,14 @@ import {
 } from "./providerUsageLimits.ts";
 import { UsagePricing, UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
 import {
+  AgentRolePresetError,
+  AgentRolePresetList,
+  AgentRolePresetListInput,
+  AgentRolePresetRemoveInput,
+  AgentRolePresetResetInput,
+  AgentRolePresetSaveInput,
+} from "./agentRole.ts";
+import {
   StorageCleanupReport,
   DatabaseStorageStatus,
   ServerSettings,
@@ -501,6 +509,11 @@ export const WS_METHODS = {
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
+
+  agentRolesSubscribe: "agentRoles.subscribe",
+  agentRolesSave: "agentRoles.save",
+  agentRolesRemove: "agentRoles.remove",
+  agentRolesReset: "agentRoles.reset",
 
   scheduledTasksList: "scheduledTasks.list",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
@@ -1757,6 +1770,31 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
   stream: true,
 });
 
+const WsAgentRolesSubscribeRpc = Rpc.make(WS_METHODS.agentRolesSubscribe, {
+  payload: AgentRolePresetListInput,
+  success: AgentRolePresetList,
+  error: Schema.Union([AgentRolePresetError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsAgentRolesSaveRpc = Rpc.make(WS_METHODS.agentRolesSave, {
+  payload: AgentRolePresetSaveInput,
+  success: AgentRolePresetList,
+  error: Schema.Union([AgentRolePresetError, EnvironmentAuthorizationError]),
+});
+
+const WsAgentRolesRemoveRpc = Rpc.make(WS_METHODS.agentRolesRemove, {
+  payload: AgentRolePresetRemoveInput,
+  success: AgentRolePresetList,
+  error: Schema.Union([AgentRolePresetError, EnvironmentAuthorizationError]),
+});
+
+const WsAgentRolesResetRpc = Rpc.make(WS_METHODS.agentRolesReset, {
+  payload: AgentRolePresetResetInput,
+  success: AgentRolePresetList,
+  error: Schema.Union([AgentRolePresetError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksListRpc = Rpc.make(WS_METHODS.scheduledTasksList, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -1904,6 +1942,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
+  WsAgentRolesSubscribeRpc,
+  WsAgentRolesSaveRpc,
+  WsAgentRolesRemoveRpc,
+  WsAgentRolesResetRpc,
   WsScheduledTasksListRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,

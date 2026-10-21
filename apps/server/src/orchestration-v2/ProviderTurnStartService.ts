@@ -3,6 +3,7 @@ import { projectComposerContextForProvider } from "@t3tools/shared/composerConte
 import {
   CommandId,
   latestProviderTurnForAttempt,
+  type OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
@@ -52,6 +53,8 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
+import { adapterRole, rolePromptNote } from "./RoleInstructions.ts";
+import { findAgentRolePreset } from "../agentRoles/AgentRolePresetService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import {
   isRestartNoteContinuation,
@@ -132,6 +135,29 @@ export const layer: Layer.Layer<
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
     const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+    // What each provider thread was last told about its role, for providers that
+    // take it in the prompt. A restart forgets this, so the role is repeated once.
+    const deliveredRoleKeys = new Map<string, string>();
+    const resolveThreadRole = (thread: OrchestrationV2AppThread) => {
+      const rolePreset = thread.rolePreset;
+      if (rolePreset == null) return Effect.succeed(undefined);
+      return serverSettings.getSettings.pipe(
+        Effect.map((settings) => {
+          const preset = findAgentRolePreset({
+            settings,
+            projectId: thread.projectId,
+            id: rolePreset.id,
+          });
+          return preset === undefined ? undefined : adapterRole(preset);
+        }),
+        Effect.catch((cause) =>
+          Effect.logWarning("Could not read the thread's role preset.", {
+            threadId: thread.id,
+            cause,
+          }).pipe(Effect.as(undefined)),
+        ),
+      );
+    };
     // Only Claude logins carry an organization for now; other drivers keep handing off silently.
     const instanceOrganization = (instanceId: ProviderInstanceId) =>
       providerAdapters.getMetadata === undefined
@@ -1048,6 +1074,12 @@ export const layer: Layer.Layer<
         text: message.text,
         records: message.context?.records ?? [],
       });
+      const role = yield* resolveThreadRole(projection.thread);
+      // A slash command must stay at the start of the prompt; the role waits a turn.
+      const promptRole =
+        session.readsRoleInstructions === true || userText.trimStart().startsWith("/")
+          ? { note: "", key: deliveredRoleKeys.get(providerThread.id) }
+          : rolePromptNote({ role, deliveredKey: deliveredRoleKeys.get(providerThread.id) });
       // Delivered once: this run's provider turn marks the work as told. A
       // restart continuation is prompted by its own text or resumes natively.
       const noteContinuation = isRestartNoteContinuation(
@@ -1222,7 +1254,9 @@ export const layer: Layer.Layer<
               return handoffBudget({
                 tokenCap,
                 modelContextWindow,
-                userText: turnNote === "" ? userText : `${turnNote}\n\n${userText}`,
+                userText: [promptRole.note, turnNote, userText]
+                  .filter((part) => part !== "")
+                  .join("\n\n"),
                 attachments: message.attachments,
                 providerThread: budgetProviderThread,
                 nativeContextEstimate:
@@ -1263,7 +1297,9 @@ export const layer: Layer.Layer<
           });
           if (!(yield* isCurrentAttemptInStatus("running"))) return;
           const start = compact ? session.compactThread! : session.startTurn;
-          const context = [delivery.context, turnNote].filter((part) => part !== "").join("\n\n");
+          const context = [promptRole.note, delivery.context, turnNote]
+            .filter((part) => part !== "")
+            .join("\n\n");
           const { restartContinuationOfRunId: _resumedRunId, ...promptedInput } = turnInput;
           yield* start({
             ...(noteContinuation ? promptedInput : turnInput),
@@ -1286,6 +1322,8 @@ export const layer: Layer.Layer<
                 : Effect.void,
             ),
           );
+          if (promptRole.key === undefined) deliveredRoleKeys.delete(providerThread.id);
+          else deliveredRoleKeys.set(providerThread.id, promptRole.key);
           // The provider already accepted the turn. A stale pending marker
           // can force a fresh thread later, but must not stop live ingestion.
           yield* delivery.delivered.pipe(
@@ -1313,6 +1351,7 @@ export const layer: Layer.Layer<
         effectiveHandoffs.length === 0 &&
         missedItems.length === 0 &&
         turnNote === "" &&
+        promptRole.note === "" &&
         !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
@@ -1364,6 +1403,7 @@ export const layer: Layer.Layer<
         },
         modelSelection: run.modelSelection,
         runtimePolicy: resolvedRuntimePolicy,
+        ...(role === undefined || session.readsRoleInstructions !== true ? {} : { role }),
       });
     });
 

@@ -17,7 +17,8 @@ agent can use this endpoint to:
 These are T3 orchestration operations, not provider-native sub-agent APIs.
 Delegated tasks always create a T3 child thread and run. The child receives
 only the supplied task prompt, plus an optional role instruction supplied in
-the same tool call. Parent conversation history is not copied into the child.
+the same tool call or the instructions of its role preset. Parent conversation
+history is not copied into the child.
 
 `ThreadManagementService` is the shared server application boundary for V2
 WebSocket commands and MCP. It owns thread lookup, listing, send-mode
@@ -201,7 +202,10 @@ Returns:
 - the inherited provider instance and model;
 - the parent runtime and interaction modes;
 - registered provider instances and advertised models;
-- whether each provider can run a child task; and
+- whether each provider can run a child task;
+- the role presets in effect for the caller's project: id, label, model target,
+  `runsIn`, the roles it may delegate to (advisory), and why one cannot start
+  here. Instructions stay on the server; and
 - feature flags for polling, cancellation, and batch thread creation.
 
 Unavailable providers include model-visible constraints such as missing V2
@@ -222,6 +226,7 @@ type DelegateTaskInput = {
   };
   title?: string;
   role?: "implementation" | "research" | "review" | "design" | "test" | "general";
+  preset?: string; // role preset id
   isolation?: "shared" | "worktree";
   branch?: string; // worktree only
   baseRef?: string; // worktree only
@@ -239,6 +244,21 @@ when it can run child tasks, and otherwise selects an available instance of
 that driver; an explicit `providerInstanceId` is honored exactly and fails
 when unavailable. Selecting a different provider without a model uses that
 provider's first advertised model.
+
+`preset` names a role preset (case and padding are forgiven). It supplies the
+target, runtime and interaction modes, isolation, and the child's role; any
+field passed explicitly wins. A target that names a provider instance or driver
+replaces the preset's; one that names only a model keeps the preset's provider,
+and the preset's model options apply only to the preset's own model. Options the
+model does not offer are dropped rather than refused. A preset's modes never
+exceed the caller's: a broader one runs at the caller's mode, while an explicit
+mode is checked as before. An unknown id is `invalid_request` and lists the known
+ids; a preset whose provider or model is unavailable fails as an explicit target
+would. The child records the preset id and a label snapshot. Its instructions,
+skills and allowed child roles are read when each turn starts: Claude gets them in its system prompt, Codex as turn
+context, and other providers as a prefix to the provider's prompt on the first
+turn of a provider thread and again after the role changes. None of these appear
+in the timeline. `contextWindow` applies to Claude only.
 
 A provider runs a runtime mode it does not offer as `approval-required`, so a
 child would ask for approval on every command. `orchestrator_capabilities`
@@ -341,6 +361,7 @@ type CreateThreadsInput = {
       driverKind?: string;
       model?: string;
     };
+    preset?: string; // as for delegate_task, without isolation
     runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
     interactionMode?: "inherit" | "plan" | "default";
   }>;
@@ -363,7 +384,8 @@ before the agent starts. Creating a worktree in the task prompt does not update
 this binding.
 
 Pass the task in `message`. Project, model, and modes inherit when omitted;
-workspace does not. `scratch: true` launches without a project, in a folder of
+workspace does not. `preset` starts the thread with a role preset's model, modes,
+and role, under the same rules as `delegate_task`. `scratch: true` launches without a project, in a folder of
 its own under the environment's Scratch project. For stacked PRs, use the parent branch as `baseRef` with
 `startFromOrigin: false`. The new thread may not run with broader runtime or
 interaction modes than the caller. Launch has no retry key, so inspect existing threads after a failed or lost response before
@@ -397,7 +419,8 @@ link carries only the id, which resolves in the environment of the message that
 holds it. Clients show the thread's current title rather than the label, so a
 rename never leaves a stale link.
 
-List and read results report `snoozed` and `snoozedUntil`, and
+List and read results report a thread's `rolePreset` when it has one, and
+`snoozed` and `snoozedUntil`, and
 `t3_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
 client's `effectiveSnoozed`, so agents and the sidebar agree: a snoozed thread
 wakes early when it has a pending request, fails, or completes after the snooze.

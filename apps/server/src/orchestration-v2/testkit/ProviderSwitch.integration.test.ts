@@ -54,6 +54,7 @@ import * as ProjectionMaintenance from "../ProjectionMaintenance.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import { MIXED_ORGANIZATION_NOTE, MIXED_ORGANIZATION_NOTICE } from "../MixedOrganizationNote.ts";
+import { ROLE_CLEARED_NOTE } from "../RoleInstructions.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   CLAUDE_MODEL_SELECTION,
@@ -68,6 +69,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const threadId = ThreadId.make("thread:provider-switch");
+const encodeJsonText = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const projectId = ProjectId.make("project:provider-switch");
 const firstPrompt = "Respond with exactly: codex before switch";
 const claudePrompt = "Respond with exactly: claude switched response";
@@ -86,6 +88,7 @@ interface CapturedTurn {
   readonly nativeThreadId?: string | null;
   readonly providerTurnOrdinal?: number;
   readonly nativeThreadHasTurns?: boolean;
+  readonly role?: ProviderAdapter.ProviderAdapterV2Role;
 }
 
 function unimplemented(driver: ProviderDriverKind, detail: string) {
@@ -118,6 +121,7 @@ function makeTestAdapter(input: {
   readonly holdRunOrdinal?: number;
   readonly holdFirstTurn?: Deferred.Deferred<void>;
   readonly releaseFirstTurn?: Deferred.Deferred<void>;
+  readonly readsRoleInstructions?: true;
   /** Records `open:<instance>` and `close:<instance>` in the order sessions open and close. */
   readonly sessionLifecycle?: Array<string>;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
@@ -162,6 +166,9 @@ function makeTestAdapter(input: {
           ...(input.canReuseContextUsage === undefined
             ? {}
             : { canReuseContextUsage: input.canReuseContextUsage }),
+          ...(input.readsRoleInstructions === undefined
+            ? {}
+            : { readsRoleInstructions: input.readsRoleInstructions }),
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
               const createdAt = yield* DateTime.now;
@@ -259,6 +266,7 @@ function makeTestAdapter(input: {
                   ...(turnInput.nativeThreadHasTurns === undefined
                     ? {}
                     : { nativeThreadHasTurns: turnInput.nativeThreadHasTurns }),
+                  ...(turnInput.role === undefined ? {} : { role: turnInput.role }),
                 },
               ]);
               if (
@@ -3875,6 +3883,154 @@ describe("orchestration v2 provider switching", () => {
           assert.lengthOf(mixedOrganizationNotices, 0);
           assert.lengthOf(handoffTurnTexts, 1);
           assert.notInclude(handoffTurnTexts[0], MIXED_ORGANIZATION_NOTE);
+        }),
+      ),
+    );
+  });
+
+  describe("role presets at turn start", () => {
+    const SCOUT = { id: "scout", label: "Scout" };
+
+    /** Two turns on a thread created with the scout role; the role can be cleared between them. */
+    const runTwoTurns = (input: {
+      readonly name: string;
+      readonly readsRoleInstructions?: true;
+      readonly clearRoleBeforeSecondTurn?: boolean;
+    }) =>
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace(input.name);
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+          makeTestAdapter({
+            instanceId: CURSOR_MODEL_SELECTION.instanceId,
+            driver: CURSOR_DRIVER,
+            capabilities: CursorProviderCapabilitiesV2,
+            modelSelection: CURSOR_MODEL_SELECTION,
+            responseByRunOrdinal: { 1: "First answer", 2: "Second answer" },
+            capturedTurns,
+            ...(input.readsRoleInstructions === undefined
+              ? {}
+              : { readsRoleInstructions: input.readsRoleInstructions }),
+          }),
+        ]);
+        const projection = yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const dispatch = (ordinal: number, text: string) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`${input.name}:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`${input.name}:${ordinal}`),
+              createdBy: "user",
+              creationSource: "web",
+              text,
+              attachments: [],
+              modelSelection: CURSOR_MODEL_SELECTION,
+              dispatchMode: { type: "start_immediately" },
+            });
+          const completed = (ordinal: number) =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.updated" &&
+                  event.payload.ordinal === ordinal &&
+                  event.payload.status === "completed",
+              ),
+              Stream.runHead,
+              Effect.andThen(worker.drain()),
+            );
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${input.name}:create`),
+            threadId,
+            projectId,
+            createdBy: "user",
+            creationSource: "web",
+            title: "Scout",
+            modelSelection: CURSOR_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            rolePreset: SCOUT,
+          });
+          yield* dispatch(1, "First request");
+          yield* completed(1);
+          if (input.clearRoleBeforeSecondTurn === true) {
+            yield* orchestrator.dispatch({
+              type: "thread.metadata.update",
+              commandId: CommandId.make(`${input.name}:clear-role`),
+              threadId,
+              rolePreset: null,
+            });
+          }
+          yield* dispatch(2, "Second request");
+          yield* completed(2);
+          return yield* orchestrator.getThreadProjection(threadId);
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: input.name,
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: { type: "readOnly" },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+        // The role reaches the provider but never the timeline.
+        const projected = yield* encodeJsonText({
+          messages: projection.messages,
+          turnItems: projection.turnItems,
+          visibleTurnItems: projection.visibleTurnItems,
+        });
+        assert.include(projected, "First request");
+        assert.notInclude(projected, "<t3_role_instructions");
+        assert.notInclude(projected, ROLE_CLEARED_NOTE);
+        return yield* Ref.get(capturedTurns);
+      });
+
+    it.live("prefixes the role to the provider's first prompt only", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const turns = yield* runTwoTurns({ name: "role-prefix" });
+          assert.include(turns[0]?.text, '<t3_role_instructions role="scout">');
+          assert.include(turns[0]?.text, "First request");
+          assert.equal(turns[1]?.text, "Second request");
+          assert.isUndefined(turns[0]?.role);
+        }),
+      ),
+    );
+
+    it.live("hands the role to an adapter that delivers it itself, outside the prompt", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const turns = yield* runTwoTurns({ name: "role-native", readsRoleInstructions: true });
+          assert.deepEqual(
+            turns.map((turn) => [turn.text, turn.role?.presetId]),
+            [
+              ["First request", "scout"],
+              ["Second request", "scout"],
+            ],
+          );
+        }),
+      ),
+    );
+
+    it.live("tells the provider once when the role is cleared", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const turns = yield* runTwoTurns({
+            name: "role-cleared",
+            clearRoleBeforeSecondTurn: true,
+          });
+          assert.include(turns[1]?.text, ROLE_CLEARED_NOTE);
+          assert.include(turns[1]?.text, "Second request");
         }),
       ),
     );

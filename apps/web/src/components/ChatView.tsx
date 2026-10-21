@@ -37,7 +37,9 @@ import {
   latestExecutedRun,
   latestRootProviderFailure,
 } from "@t3tools/shared/orchestrationV2ThreadError";
-import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import type { EffectiveAgentRolePreset, UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import { applyRolePresetToDraft } from "../lib/rolePresetDraft";
+import { useEnvironmentSupportsRolePresets } from "../state/agentRoles";
 import { isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
@@ -6647,6 +6649,9 @@ export default function ChatView(props: ChatViewProps) {
                         branch: activeThreadBranch,
                         worktreePath: null,
                         createdAt: messageCreatedAt,
+                        ...(draftThread?.rolePreset == null
+                          ? {}
+                          : { rolePreset: draftThread.rolePreset }),
                       },
                       prepareWorktree: {
                         projectCwd: activeProject.workspaceRoot,
@@ -6927,6 +6932,9 @@ export default function ChatView(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      ...(draftThread?.rolePreset == null
+                        ? {}
+                        : { rolePreset: draftThread.rolePreset }),
                     },
                   }
                 : {}),
@@ -7506,6 +7514,14 @@ export default function ChatView(props: ChatViewProps) {
     if (options?.focusComposer !== false) scheduleComposerFocus();
   };
   const onProviderModelSelectStable = useStableCallback(onProviderModelSelect);
+  const supportsRolePresets = useEnvironmentSupportsRolePresets(environmentId);
+  const rolePresetProjectId =
+    supportsRolePresets && isLocalDraftThread && draftThread ? draftThread.projectId : null;
+  const onRolePresetSelect = (preset: EffectiveAgentRolePreset | null) => {
+    applyRolePresetToDraft(composerDraftTarget, preset);
+    scheduleComposerFocus();
+  };
+  const onRolePresetSelectStable = useStableCallback(onRolePresetSelect);
   const onEnvModeChange = (mode: DraftThreadEnvMode) => {
     if (multipleModelSelections !== null) return;
     if (canOverrideServerThreadEnvMode) {
@@ -8302,6 +8318,9 @@ export default function ChatView(props: ChatViewProps) {
                               onProviderModelSelect={onProviderModelSelectStable}
                               onOpenProviderSetup={openProviderSetupStable}
                               getModelDisabledReason={getModelDisabledReason}
+                              rolePresetProjectId={rolePresetProjectId}
+                              draftRolePreset={draftThread?.rolePreset ?? null}
+                              onRolePresetSelect={onRolePresetSelectStable}
                               toggleInteractionMode={toggleInteractionModeStable}
                               handleRuntimeModeChange={handleRuntimeModeChangeStable}
                               handleInteractionModeChange={handleInteractionModeChangeStable}

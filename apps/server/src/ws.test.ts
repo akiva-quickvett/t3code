@@ -1,7 +1,9 @@
 import { assert, it } from "@effect/vitest";
 import {
+  DEFAULT_SERVER_SETTINGS,
   ORCHESTRATION_PROTOCOL_VERSION,
   ProjectId,
+  ProviderDriverKind,
   ThreadId,
   type OrchestrationV2StoredEvent,
   type OrchestrationProjectShell,
@@ -35,6 +37,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ProjectEnrichment from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import {
+  clientSettingsUpdates,
   hasCompatibleOrchestrationProtocol,
   resolveAvailableEditorsForConfig,
   shouldUseBoundedThreadSnapshot,
@@ -453,4 +456,45 @@ it.effect("thread resume across compacted history keeps message order and final 
       ),
     ),
   ),
+);
+
+it.effect("pushes no settings update for a change only role presets see", () =>
+  Effect.gen(function* () {
+    const withRole = {
+      ...DEFAULT_SERVER_SETTINGS,
+      agentRolePresets: {
+        environment: {
+          overrides: {
+            scout: {
+              id: "scout",
+              label: "Field scout",
+              target: {
+                driverKind: ProviderDriverKind.make("claudeAgent"),
+                model: "claude-sonnet-5-5",
+                options: [],
+              },
+              instructions: "Report briefly.",
+            },
+          },
+          removed: [],
+        },
+        projects: {},
+      },
+    };
+    const events = yield* clientSettingsUpdates(
+      Stream.make(DEFAULT_SERVER_SETTINGS, withRole, {
+        ...withRole,
+        enableProviderUpdateChecks: false,
+      }),
+    ).pipe(Stream.runCollect);
+
+    assert.deepEqual(
+      Array.from(events, (event) => event.payload.settings.enableProviderUpdateChecks),
+      [true, false],
+    );
+    assert.deepEqual(
+      Array.from(events, (event) => event.payload.settings.agentRolePresets),
+      [DEFAULT_SERVER_SETTINGS.agentRolePresets, DEFAULT_SERVER_SETTINGS.agentRolePresets],
+    );
+  }),
 );

@@ -14,6 +14,7 @@ import {
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { newDraftId, newThreadId } from "../lib/utils";
+import { DEFAULT_INTERACTION_MODE } from "../types";
 import { orderItemsByPreferredIds } from "../components/Sidebar.logic";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -91,6 +92,8 @@ export function useNewThreadHandler() {
       setDraftThreadContext,
       setLogicalProjectDraftThreadId,
       setModelSelection,
+      setRuntimeMode,
+      setInteractionMode,
     } = useComposerDraftStore.getState();
     const requestingRouteHref = router.state.location.href;
     const routeChangedSinceRequest = () => router.state.location.href !== requestingRouteHref;
@@ -110,12 +113,17 @@ export function useNewThreadHandler() {
     const composerModelSelection = composerActiveProvider
       ? (carrySourceComposer?.modelSelectionByProvider[composerActiveProvider] ?? null)
       : null;
-    const carryModelSelection = composerModelSelection ?? carrySourceShell?.modelSelection ?? null;
-    const carryInteractionMode =
-      carrySourceComposer?.interactionMode ??
-      carrySourceShell?.interactionMode ??
-      carrySourceDraft?.interactionMode ??
-      null;
+    // A draft a role was applied to carries none of the role's model or modes into a plain thread.
+    const carrySourceHasRole = carrySourceDraft?.rolePreset != null;
+    const carryModelSelection = carrySourceHasRole
+      ? null
+      : (composerModelSelection ?? carrySourceShell?.modelSelection ?? null);
+    const carryInteractionMode = carrySourceHasRole
+      ? null
+      : (carrySourceComposer?.interactionMode ??
+        carrySourceShell?.interactionMode ??
+        carrySourceDraft?.interactionMode ??
+        null);
     const project = projects.find(
       (candidate) =>
         candidate.id === projectRef.projectId &&
@@ -138,6 +146,19 @@ export function useNewThreadHandler() {
           currentRouteTarget?.kind === "draft" ? currentRouteTarget.draftId : null,
         destinationDraftId,
       });
+    const applyDefaultModel = (draftId: DraftId) => {
+      applyStickyState(draftId);
+      const modelSelectionOverride = resolveModelSelectionOverride(draftId);
+      if (modelSelectionOverride) {
+        setModelSelection(draftId, modelSelectionOverride, { replaceOptions: true });
+      }
+    };
+    // A plain new thread drops a role left on a reused draft, with the model and modes it set.
+    const dropDraftRole = (draftId: DraftId) => {
+      setRuntimeMode(draftId, null);
+      setInteractionMode(draftId, null);
+      applyDefaultModel(draftId);
+    };
     const resolveDefaultEnvMode = async (): Promise<DraftThreadEnvMode> => {
       const consultProjectFile =
         project !== undefined && projectSettings.settings.defaultThreadEnvMode === null;
@@ -238,25 +259,27 @@ export function useNewThreadHandler() {
             }),
           };
         }
+        const droppingRole = emptyStoredDraftThread.rolePreset != null;
+        const reusedModes = {
+          ...(!isDraftAlreadyOpen || droppingRole ? { runtimeMode: defaultRuntimeMode } : {}),
+          ...(carryInteractionMode
+            ? { interactionMode: carryInteractionMode }
+            : droppingRole
+              ? { interactionMode: DEFAULT_INTERACTION_MODE }
+              : {}),
+        };
         if (workspaceContext) {
           setDraftThreadContext(emptyStoredDraftThread.draftId, {
             ...workspaceContext,
-            ...(!isDraftAlreadyOpen ? { runtimeMode: defaultRuntimeMode } : {}),
-            ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
+            ...reusedModes,
           });
         }
         const storedDraft = getComposerDraft(emptyStoredDraftThread.draftId);
         const storedDraftHasExplicitModelPick = hasExplicitComposerModelSelection(storedDraft);
-        if (!storedDraftHasExplicitModelPick) {
-          applyStickyState(emptyStoredDraftThread.draftId);
-          const modelSelectionOverride = resolveModelSelectionOverride(
-            emptyStoredDraftThread.draftId,
-          );
-          if (modelSelectionOverride) {
-            setModelSelection(emptyStoredDraftThread.draftId, modelSelectionOverride, {
-              replaceOptions: true,
-            });
-          }
+        if (droppingRole) {
+          dropDraftRole(emptyStoredDraftThread.draftId);
+        } else if (!storedDraftHasExplicitModelPick) {
+          applyDefaultModel(emptyStoredDraftThread.draftId);
         }
         // The workspace context must also ride along here: when projectRef
         // targets a different physical member of the logical project,
@@ -269,8 +292,8 @@ export function useNewThreadHandler() {
           {
             threadId: emptyStoredDraftThread.threadId,
             ...workspaceContext,
-            ...(!isDraftAlreadyOpen ? { runtimeMode: defaultRuntimeMode } : {}),
-            ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
+            ...reusedModes,
+            rolePreset: null,
           },
         );
         const opened = {
@@ -311,10 +334,16 @@ export function useNewThreadHandler() {
       setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, currentRouteTarget.draftId, {
         threadId: latestActiveDraftThread.threadId,
         createdAt: latestActiveDraftThread.createdAt,
-        runtimeMode: latestActiveDraftThread.runtimeMode,
-        interactionMode: latestActiveDraftThread.interactionMode,
+        ...(latestActiveDraftThread.rolePreset == null
+          ? {
+              runtimeMode: latestActiveDraftThread.runtimeMode,
+              interactionMode: latestActiveDraftThread.interactionMode,
+            }
+          : { runtimeMode: defaultRuntimeMode, interactionMode: DEFAULT_INTERACTION_MODE }),
         ...pickExplicitWorkspaceOptions(options),
+        rolePreset: null,
       });
+      if (latestActiveDraftThread.rolePreset != null) dropDraftRole(currentRouteTarget.draftId);
       return Promise.resolve({
         draftId: currentRouteTarget.draftId,
         threadId: latestActiveDraftThread.threadId,
@@ -368,11 +397,7 @@ export function useNewThreadHandler() {
         runtimeMode: defaultRuntimeMode,
         ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
       });
-      applyStickyState(draftId);
-      const modelSelectionOverride = resolveModelSelectionOverride(draftId);
-      if (modelSelectionOverride) {
-        setModelSelection(draftId, modelSelectionOverride, { replaceOptions: true });
-      }
+      applyDefaultModel(draftId);
       await router.navigate({
         to: "/draft/$draftId",
         params: { draftId },

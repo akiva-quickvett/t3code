@@ -146,6 +146,7 @@ import {
 import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
+import { roleInstructionsBlock } from "../RoleInstructions.ts";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import {
   mcpToolPresentation,
@@ -1095,6 +1096,19 @@ function claudeLiveSelectionFlagSettings(
   };
 }
 
+/**
+ * Claude Code reads its context window from the environment at start: 200k
+ * sets the opt-out, and 1m removes one the instance's environment may carry.
+ */
+function claudeRoleEnvironment(
+  environment: NodeJS.ProcessEnv | undefined,
+  contextWindow: "200k" | "1m" | undefined,
+): NodeJS.ProcessEnv | undefined {
+  if (contextWindow === undefined) return environment;
+  const { CLAUDE_CODE_DISABLE_1M_CONTEXT: _inherited, ...rest } = environment ?? process.env;
+  return contextWindow === "200k" ? { ...rest, CLAUDE_CODE_DISABLE_1M_CONTEXT: "1" } : rest;
+}
+
 export function makeClaudeQueryOptions(input: {
   readonly modelSelection: ModelSelection;
   readonly nativeThreadId: string;
@@ -1114,8 +1128,11 @@ export function makeClaudeQueryOptions(input: {
   readonly onUserDialog?: ClaudeQueryOptions["onUserDialog"];
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
   readonly allowDangerouslySkipPermissions?: boolean;
+  readonly role?: ProviderAdapter.ProviderAdapterV2Role;
 }): ClaudeAgentSdkQueryOptions {
   const compiledSelection = compileClaudeModelSelection(input.modelSelection);
+  const environment = claudeRoleEnvironment(input.environment, input.role?.contextWindow);
+  const roleBlock = input.role === undefined ? "" : roleInstructionsBlock(input.role);
   const {
     "permission-mode": launchArgPermissionMode,
     "dangerously-skip-permissions": launchArgSkipPermissions,
@@ -1191,14 +1208,15 @@ export function makeClaudeQueryOptions(input: {
     ...(input.settings?.binaryPath
       ? { pathToClaudeCodeExecutable: input.settings.binaryPath }
       : {}),
-    ...(input.environment === undefined ? {} : { env: input.environment }),
+    ...(environment === undefined ? {} : { env: environment }),
     ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }),
     systemPrompt: {
       type: "preset" as const,
       preset: "claude_code" as const,
       append:
         buildRuntimeInstructions({ harness: "Claude Code" }) +
-        (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS),
+        (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS) +
+        (roleBlock === "" ? "" : `\n\n${roleBlock}`),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };
@@ -8436,7 +8454,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ? {}
               : { allowedTools: queryPolicy.allowedTools }),
           });
-          const queryPolicyKey = claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides);
+          // The role is fixed when the process starts, so a changed role opens a new one.
+          const queryPolicyKey = [
+            claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides),
+            ...(turnInput.role === undefined
+              ? []
+              : [turnInput.role.contextWindow ?? "", roleInstructionsBlock(turnInput.role)]),
+          ].join("\u0000");
           const compiledSelection = compileClaudeModelSelection(turnInput.modelSelection);
           const resumeSessionAt = yield* getNativeConversationHeadId(turnInput.providerThread);
           const existing = yield* Ref.get(queryContext);
@@ -8542,6 +8566,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             canUseTool,
             onUserDialog,
             supportedDialogKinds: ["resume_return"],
+            ...(turnInput.role === undefined ? {} : { role: turnInput.role }),
           });
           const querySession = yield* queryRunner
             .open({
@@ -9178,6 +9203,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             resolveClaudeCatalogContextWindowTokens(BUNDLED_CLAUDE_MODEL_CATALOG, selection),
           events: Stream.fromEffectRepeat(Queue.take(events)),
           backgroundTasksEndWithProcess: true,
+          readsRoleInstructions: true,
           hasPendingBackgroundWork: Effect.gen(function* () {
             for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
               if (roster.size > 0) {

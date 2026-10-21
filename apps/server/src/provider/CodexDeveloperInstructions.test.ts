@@ -9,8 +9,36 @@ import { describe, it } from "vite-plus/test";
 import {
   buildCodexAdditionalContext,
   buildCodexDeveloperInstructions,
+  buildCodexRoleContext,
   CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES,
 } from "./CodexDeveloperInstructions.ts";
+
+describe("buildCodexRoleContext", () => {
+  it("splits long role instructions into ordered entries within Codex's cap", () => {
+    const instructions = "Réviseur 🦊 ".repeat(700);
+    const context = buildCodexRoleContext({ presetId: "review", label: "Review", instructions });
+    const keys = Object.keys(context);
+    NodeAssert.ok(keys.length > 1);
+    NodeAssert.deepEqual(keys, keys.toSorted());
+    for (const entry of Object.values(context)) {
+      NodeAssert.equal(entry.kind, "application");
+      NodeAssert.ok(Buffer.byteLength(entry.value) <= CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES);
+    }
+    NodeAssert.ok(
+      Object.values(context)
+        .map((entry) => entry.value)
+        .join("")
+        .includes(instructions),
+    );
+  });
+
+  it("sends nothing for a role without instructions", () => {
+    NodeAssert.deepEqual(
+      buildCodexRoleContext({ presetId: "review", label: "Review", instructions: "" }),
+      {},
+    );
+  });
+});
 
 describe("buildCodexAdditionalContext", () => {
   describe.each([
