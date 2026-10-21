@@ -121,6 +121,17 @@ export const makeFakeContainerDriver = () => {
         ),
       ensureNetwork: (name) => record("network", name).pipe(Effect.asVoid),
       engineOperatingSystem: Effect.sync(() => engineOperatingSystem),
+      requireEngineOperatingSystem: Effect.suspend(() =>
+        engineOperatingSystem === null
+          ? Effect.fail(
+              new ContainerDriverError({
+                operation: "info",
+                exitCode: null,
+                daemonMessage: "Docker info timed out.",
+              }),
+            )
+          : Effect.succeed(engineOperatingSystem),
+      ),
       ensureImage: ({ tag }) =>
         record("image", tag).pipe(
           Effect.map(() => {

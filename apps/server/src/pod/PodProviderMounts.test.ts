@@ -268,6 +268,43 @@ describe("pod provider mounts for npm-installed CLIs", () => {
   );
 });
 
+describe("pod config dir bounds through symlinks", () => {
+  it.effect("judges a config dir where its link points, as Docker's bind does", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fileSystem.realPath(
+        yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-pod-home-" }),
+      );
+      const link = path.join(home, "pi-agent");
+      yield* fileSystem.symlink(home, link);
+      const own = path.join(home, ".pi", "agent");
+      yield* fileSystem.makeDirectory(own, { recursive: true });
+      const unsafe = (dir: string) =>
+        unsafePodConfigDirs(
+          {
+            ...DEFAULT_SERVER_SETTINGS,
+            providerInstances: {
+              [ProviderInstanceId.make("pi")]: {
+                driver: ProviderDriverKind.make("pi"),
+                enabled: true,
+                config: {},
+                environment: [{ name: "PI_CODING_AGENT_DIR", value: dir, sensitive: false }],
+              },
+            },
+          },
+          ProviderInstanceId.make("pi"),
+          undefined,
+        ).pipe(
+          Effect.provideService(HostProcess.HomeDirectory, home),
+          Effect.provideService(HostProcess.Environment, {}),
+        );
+      expect(yield* unsafe(link)).toEqual([link]);
+      expect(yield* unsafe(own)).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
 describe("pod config dir bounds", () => {
   it.effect(
     "never mounts a config dir that is the home, an ancestor of it or the T3 home, or a system dir",
@@ -295,7 +332,23 @@ describe("pod config dir bounds", () => {
             Effect.provideService(HostProcess.HomeDirectory, home),
             Effect.provideService(HostProcess.Environment, {}),
           );
-        for (const dir of ["/", "/home", home, "~", "/home/dev/.t3", "/etc/pi"])
+        for (const dir of [
+          "/",
+          "/home",
+          home,
+          "~",
+          "/home/dev/.t3",
+          "/etc/pi",
+          "/run",
+          "/var/run",
+          "/proc/self",
+          "/sys",
+          "/dev",
+          "/root/.pi",
+          "/boot",
+          "/home/dev/.docker",
+          "/home/dev/.docker/run",
+        ])
           expect(yield* unsafe(dir), dir).not.toEqual([]);
         for (const dir of ["/home/dev/.pi/agent", "/home/dev/.t3/codex-shadow"])
           expect(yield* unsafe(dir), dir).toEqual([]);

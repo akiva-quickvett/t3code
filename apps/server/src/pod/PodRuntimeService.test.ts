@@ -254,6 +254,24 @@ describe("PodRuntimeService", () => {
     );
   });
 
+  it.effect(
+    "fails a start on Linux when Docker cannot say which engine it is, rather than guess",
+    () => {
+      const driver = makeFakeContainerDriver();
+      driver.setEngineOperatingSystem(null);
+      return withPods(driver, (pods) =>
+        Effect.gen(function* () {
+          const { id } = yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          const failed = yield* pods.awaitSettled(id);
+          expect(failed.state).toBe("start_failed");
+          expect(failed.lastError?.message).toContain("docker info");
+          expect(operations(driver).some((step) => step.startsWith("createContainer"))).toBe(false);
+        }),
+      ).pipe(Effect.provideService(HostProcess.Platform, "linux"));
+    },
+  );
+
   it.effect("leaves a configured agent image to Docker", () => {
     const driver = makeFakeContainerDriver();
     return withPods(
@@ -495,8 +513,9 @@ describe("PodRuntimeService", () => {
       Effect.gen(function* () {
         const { id } = yield* pods.create({ projectId, worktreePath });
         const settled = yield* Effect.forkChild(pods.awaitSettled(id));
-        // Readiness probes are spaced a second apart; run the clock past all of them.
-        for (let second = 0; second < 90; second++) yield* TestClock.adjust("1 second");
+        // Readiness probes are spaced a second apart; run the clock past all of
+        // them, however long the operation's real file reads take to reach them.
+        while (settled.pollUnsafe() === undefined) yield* TestClock.adjust("1 second");
         expect(yield* Fiber.join(settled)).toMatchObject({
           state: "start_failed",
           lastError: {

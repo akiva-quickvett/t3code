@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import { PodRuntimeId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -210,16 +211,27 @@ describe("Docker container driver", () => {
     ),
   );
 
-  it.effect("builds T3's image from its Dockerfile only when the host lacks it", () =>
+  it.live("builds T3's image from its Dockerfile only when the host lacks it", () =>
     Effect.scoped(
       Effect.gen(function* () {
         let present = false;
         const { runs, host } = recordingDriver((input) =>
-          input.args[0] === "image" && input.args[1] === "inspect" && !present
+          input.args[1] === "inspect" && input.args[3] === "{{.Id}}" && !present
             ? { code: 1, stderr: "Error: No such image: t3.invalid/pod-agent:1" }
             : input.args[1] === "ls"
-              ? { stdout: "t3.invalid/pod-agent:0\nt3.invalid/pod-agent:1\n" }
-              : {},
+              ? {
+                  stdout:
+                    "t3.invalid/pod-agent:0\nt3.invalid/pod-agent:other\nt3.invalid/pod-agent:1\n",
+                }
+              : input.args[1] === "inspect" && input.args[3] === "{{.Created}}"
+                ? {
+                    // :other is another server's build from today, which stays.
+                    stdout:
+                      input.args[4] === "t3.invalid/pod-agent:0"
+                        ? "2020-01-01T00:00:00Z\n"
+                        : `${DateTime.formatIso(DateTime.nowUnsafe())}\n`,
+                  }
+                : {},
         );
         const driver = yield* host;
         const image = { tag: "t3.invalid/pod-agent:1", dockerfile: "FROM scratch\n", labels: {} };
@@ -227,7 +239,7 @@ describe("Docker container driver", () => {
         const build = runs.find((run) => run.args[0] === "build");
         expect(build?.args).toEqual(["build", "--tag", "t3.invalid/pod-agent:1", "-"]);
         expect(build?.stdin).toBe("FROM scratch\n");
-        // Then the earlier builds go; Docker keeps those a container still uses.
+        // Then the week-old earlier builds go; Docker keeps those a container still uses.
         expect(runs.filter((run) => run.args[1] === "rm").map((run) => run.args[2])).toEqual([
           "t3.invalid/pod-agent:0",
         ]);

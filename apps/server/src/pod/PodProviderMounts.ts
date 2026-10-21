@@ -176,23 +176,40 @@ const installDir = (path: Path.Path, real: string) => {
 };
 
 /**
- * A config dir is mounted read-write, so one that is `/`, a system dir, the
- * home itself or anything holding it or the T3 home would hand the pod far
- * more than a provider's login.
+ * Host trees no provider keeps its login in, whose read-write bind would hand
+ * the pod the machine: `/run` and `/var` hold the Docker socket, `/proc`,
+ * `/sys` and `/dev` the kernel's own.
+ */
+const HOST_ONLY_DIR = /^\/(var|run|proc|sys|dev|root|boot|srv|mnt|media)(\/|$)/;
+
+/**
+ * A config dir is mounted read-write, so one that is `/`, a system or host
+ * dir, the home itself or anything holding it or the T3 home would hand the
+ * pod far more than a provider's login. Judged where it really is, since
+ * Docker's bind follows a symlink.
  */
 const unsafeConfigDir = (hostPaths: PodHostPaths | undefined) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
-    const home = path.resolve(yield* HostProcess.HomeDirectory);
-    const guarded = [home, ...(hostPaths === undefined ? [] : [path.resolve(hostPaths.t3Home)])];
-    return (dir: string) => {
-      const resolved = path.resolve(dir);
-      return (
-        SYSTEM_DIR.test(resolved) ||
-        guarded.some((kept) => kept === resolved || kept.startsWith(`${resolved}/`)) ||
-        resolved === path.parse(resolved).root
+    const fileSystem = yield* FileSystem.FileSystem;
+    const real = (dir: string) =>
+      fileSystem.realPath(dir).pipe(Effect.orElseSucceed(() => path.resolve(dir)));
+    const home = yield* real(yield* HostProcess.HomeDirectory);
+    const guarded = [home, ...(hostPaths === undefined ? [] : [yield* real(hostPaths.t3Home)])];
+    // Docker's own config: its registry logins and, with Docker Desktop, its socket.
+    const docker = path.join(home, ".docker");
+    return (dir: string) =>
+      real(dir).pipe(
+        Effect.map(
+          (resolved) =>
+            resolved === path.parse(resolved).root ||
+            SYSTEM_DIR.test(resolved) ||
+            HOST_ONLY_DIR.test(resolved) ||
+            resolved === docker ||
+            resolved.startsWith(`${docker}/`) ||
+            guarded.some((kept) => kept === resolved || kept.startsWith(`${resolved}/`)),
+        ),
       );
-    };
   });
 
 /** The instance's config dirs that a pod must not mount; placement refuses it while any is. */
@@ -204,7 +221,10 @@ export const unsafePodConfigDirs = Effect.fn("unsafePodConfigDirs")(function* (
   const instance = deriveProviderInstanceConfigMap(settings)[instanceId];
   if (instance === undefined) return [];
   const paths = yield* instanceMountPaths(instance, hostPaths?.toolsDir);
-  return [...paths.configDirs, ...paths.codexHomes].filter(yield* unsafeConfigDir(hostPaths));
+  return yield* Effect.filter(
+    [...paths.configDirs, ...paths.codexHomes],
+    yield* unsafeConfigDir(hostPaths),
+  );
 });
 
 /** A registry agent id becomes a path segment; anything that could leave the cache is ignored. */
@@ -254,7 +274,8 @@ export const resolvePodProviderMounts = Effect.fn("resolvePodProviderMounts")(fu
       continue;
     const paths = yield* instanceMountPaths(instance, toolsDir);
     // Placement refuses such an instance with the reason; nothing of it is mounted.
-    if ([...paths.configDirs, ...paths.codexHomes].some(unsafe)) continue;
+    if ((yield* Effect.filter([...paths.configDirs, ...paths.codexHomes], unsafe)).length > 0)
+      continue;
     configDirs.push(...paths.configDirs);
     homeSeeds.push(...paths.homeSeeds);
     codexHomes.push(...paths.codexHomes);

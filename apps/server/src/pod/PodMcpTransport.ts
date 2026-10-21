@@ -36,11 +36,26 @@ export const selectPodMcpTransport = (engine: PodEngine): PodMcpTransport =>
 
 export const POD_MCP_LOOPBACK_ADDRESS = "127.0.0.1";
 
-/** The transport for pods on this Docker host. */
+/** The transport for pods on this Docker host, guessing from the host while the engine cannot say. */
 export const podMcpTransportFor = (host: ContainerHost) =>
   Effect.gen(function* () {
     return selectPodMcpTransport({
       hostPlatform: yield* HostProcess.Platform,
       operatingSystem: yield* host.engineOperatingSystem,
+    });
+  });
+
+/**
+ * The same for containers about to be made, which keep it until a recreate:
+ * on Linux only the engine can tell Docker Desktop's VM apart, so it must answer.
+ */
+export const requirePodMcpTransport = (host: ContainerHost) =>
+  Effect.gen(function* () {
+    const hostPlatform = yield* HostProcess.Platform;
+    if (hostPlatform !== "linux")
+      return selectPodMcpTransport({ hostPlatform, operatingSystem: null });
+    return selectPodMcpTransport({
+      hostPlatform,
+      operatingSystem: yield* host.requireEngineOperatingSystem,
     });
   });

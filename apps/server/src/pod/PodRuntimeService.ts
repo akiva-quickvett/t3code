@@ -66,7 +66,7 @@ import {
   PodStepError,
 } from "./PodOperations.ts";
 import { podAgentImageTag } from "./PodAgentImage.ts";
-import { podMcpTransportFor } from "./PodMcpTransport.ts";
+import { podMcpTransportFor, requirePodMcpTransport } from "./PodMcpTransport.ts";
 import { podFilesDir, PodPaths } from "./PodPaths.ts";
 import { resolvePodProviderMounts } from "./PodProviderMounts.ts";
 import {
@@ -662,7 +662,23 @@ const make = Effect.gen(function* () {
       ),
       proxyCaRoot: hostnameMode ? proxy.caRootPath : null,
       filesDir,
-      mcpTransport: yield* podMcpTransportFor(driver.forHost(record.dockerHost)),
+      // Stop and remove make no container, so they need no answer.
+      mcpTransport: yield* (
+        operation === "stop" || operation === "remove"
+          ? podMcpTransportFor(driver.forHost(record.dockerHost))
+          : requirePodMcpTransport(driver.forHost(record.dockerHost))
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new PodStepError({
+              step: "Asking Docker which engine it runs (`docker info`)",
+              exitCode: cause.exitCode,
+              timedOut: false,
+              daemonMessage: cause.daemonMessage ?? "Docker did not answer.",
+              cause,
+            }),
+        ),
+      ),
     });
     if (operation !== "stop" && operation !== "remove")
       yield* Effect.forEach(plan.homeSeeds, snapshotHomeSeed, { discard: true });

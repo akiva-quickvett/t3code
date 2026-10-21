@@ -1944,8 +1944,8 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
                 if ((yield* fileSystem.readDirectory(versionRoot)).length === 0)
                   yield* fileSystem.remove(versionRoot, { recursive: true });
               }
-              if ((yield* fileSystem.readDirectory(agentRoot)).length === 0)
-                yield* fileSystem.remove(agentRoot, { recursive: true });
+              // The agent's own directory stays, empty: a running pod binds it, and
+              // a reinstall must land in the directory that bind still shows.
             }).pipe(
               Effect.mapError(
                 (cause) =>

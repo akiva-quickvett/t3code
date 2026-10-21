@@ -158,6 +158,8 @@ export interface ContainerHost {
   readonly ensureNetwork: (name: string) => Effect.Effect<void, ContainerDriverError>;
   /** `docker info`'s OperatingSystem, read once; null while the daemon cannot be asked. */
   readonly engineOperatingSystem: Effect.Effect<string | null>;
+  /** The same, waiting as long as any Docker command, for a decision that must not be a guess. */
+  readonly requireEngineOperatingSystem: Effect.Effect<string, ContainerDriverError>;
   /** Builds the image from `dockerfile` unless the host has it; true when it built. */
   readonly ensureImage: (input: {
     readonly tag: string;
@@ -213,6 +215,7 @@ const DOCKER_TIMEOUT_MS = 120_000;
 /** A first build pulls its base images and installs the provider CLIs. */
 const IMAGE_BUILD_TIMEOUT_MS = 20 * 60_000;
 const ENGINE_INFO_TIMEOUT_MS = 5_000;
+const EARLIER_BUILD_KEPT_MS = 7 * 24 * 60 * 60_000;
 const ENGINE_INFO_RETRY_MS = 30_000;
 const DOCKER_OUTPUT_BYTES = 4 * 1024 * 1024;
 
@@ -597,21 +600,25 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
   };
 
   // A daemon that cannot answer is asked again only after a while: the
-  // listener asks for every pod on every pod event. Nothing is created on a
-  // daemon that cannot answer, so a guess made meanwhile never sticks.
+  // listener asks for every pod on every pod event. Its guess meanwhile is
+  // never built into a container: the plan asks with `require…`, and a known
+  // answer is kept for good, so the listener cannot flip once it has one.
   let operatingSystem: string | undefined;
   let unreadableUntil = 0;
-  const engineOperatingSystem: ContainerHost["engineOperatingSystem"] = Effect.gen(function* () {
-    if (operatingSystem !== undefined) return operatingSystem;
-    const now = yield* Clock.currentTimeMillis;
-    if (now < unreadableUntil) return null;
-    return yield* run("info", ["info", "--format", "{{.OperatingSystem}}"], {
-      timeoutMs: ENGINE_INFO_TIMEOUT_MS,
+  const readOperatingSystem = (timeoutMs?: number) =>
+    run("info", ["info", "--format", "{{.OperatingSystem}}"], {
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
     }).pipe(
       Effect.map((stdout) => {
         operatingSystem = stdout.trim();
         return operatingSystem;
       }),
+    );
+  const engineOperatingSystem: ContainerHost["engineOperatingSystem"] = Effect.gen(function* () {
+    if (operatingSystem !== undefined) return operatingSystem;
+    const now = yield* Clock.currentTimeMillis;
+    if (now < unreadableUntil) return null;
+    return yield* readOperatingSystem(ENGINE_INFO_TIMEOUT_MS).pipe(
       Effect.catch(() =>
         Effect.sync(() => {
           unreadableUntil = now + ENGINE_INFO_RETRY_MS;
@@ -620,30 +627,45 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
       ),
     );
   });
+  const requireEngineOperatingSystem: ContainerHost["requireEngineOperatingSystem"] =
+    Effect.suspend(() =>
+      operatingSystem !== undefined ? Effect.succeed(operatingSystem) : readOperatingSystem(),
+    );
 
   /**
    * Earlier builds of the same image, each as large as this one. Docker
    * refuses to remove one a container still uses, even a stopped one, so a pod
-   * keeps its image until it is recreated, and a later build removes it then.
+   * keeps its image until it is recreated. Only builds a week old go: another
+   * T3 server on this daemon, at another version, may build its own and would
+   * otherwise rebuild it each time this one removed it.
    */
   const removeEarlierBuilds = (tag: string) =>
-    run("image", [
-      "image",
-      "ls",
-      "--filter",
-      `reference=${tag.slice(0, tag.lastIndexOf(":"))}`,
-      "--format",
-      "{{.Repository}}:{{.Tag}}",
-    ]).pipe(
-      Effect.flatMap((stdout) =>
-        Effect.forEach(
-          lines(stdout).filter((other) => other !== tag),
-          (other) => run("image", ["image", "rm", other]).pipe(Effect.ignore),
-          { discard: true },
-        ),
-      ),
-      Effect.ignore,
-    );
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      const others = lines(
+        yield* run("image", [
+          "image",
+          "ls",
+          "--filter",
+          `reference=${tag.slice(0, tag.lastIndexOf(":"))}`,
+          "--format",
+          "{{.Repository}}:{{.Tag}}",
+        ]),
+      ).filter((other) => other !== tag);
+      yield* Effect.forEach(
+        others,
+        (other) =>
+          run("image", ["image", "inspect", "--format", "{{.Created}}", other]).pipe(
+            Effect.flatMap((created) =>
+              now - Date.parse(created.trim()) > EARLIER_BUILD_KEPT_MS
+                ? run("image", ["image", "rm", other])
+                : Effect.void,
+            ),
+            Effect.ignore,
+          ),
+        { discard: true },
+      );
+    }).pipe(Effect.ignore);
 
   // Pods starting together build once: the next one finds the image.
   const imageBuilds = Semaphore.makeUnsafe(1);
@@ -663,6 +685,7 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
     list,
     ensureNetwork,
     engineOperatingSystem,
+    requireEngineOperatingSystem,
     ensureImage,
     inspectNetwork,
     createVolume: ({ name, labels }) =>
