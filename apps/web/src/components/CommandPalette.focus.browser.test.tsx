@@ -33,7 +33,18 @@ vi.mock("../hooks/useScratchProject", () => ({
   useScratchProject: () => ({ scratchEnvironmentId: () => null }),
 }));
 vi.mock("../hooks/useNewProject", () => ({ useNewProject: () => vi.fn() }));
-vi.mock("../hooks/useHandleNewThread", () => ({ useHandleNewThread: () => ({}) }));
+// The real module cannot load here, so every export the palette's graph reads
+// is stubbed; useNewThreadHandler is reached through useStartTicketThread.
+vi.mock("../hooks/useHandleNewThread", () => ({
+  useHandleNewThread: () => ({
+    activeDraftThread: null,
+    activeThread: null,
+    defaultProjectRef: null,
+    handleNewThread: vi.fn(),
+    routeThreadRef: null,
+  }),
+  useNewThreadHandler: () => vi.fn(),
+}));
 vi.mock("../hooks/useOpenPanelPullRequestUrl", () => ({ useOpenPanelPullRequestUrl: () => null }));
 vi.mock("../connection/useDesktopLocalBootstraps", () => ({ useDesktopLocalBootstraps: () => [] }));
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
