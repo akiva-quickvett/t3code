@@ -110,11 +110,13 @@ function layerExecutorFor(input: {
         closeInstance: () => Effect.void,
         release: () => record("release"),
         detach: () => record("detach"),
+        releasePod: () => Effect.void,
       }),
     ),
     Layer.succeed(
       ProviderTurnStartService.ProviderTurnStartServiceV2,
       ProviderTurnStartService.ProviderTurnStartServiceV2.of({
+        drainPodHolds: Effect.void,
         start: () =>
           Effect.gen(function* () {
             yield* record("start");

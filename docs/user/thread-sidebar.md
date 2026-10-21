@@ -249,3 +249,12 @@ Choose **Snooze → Custom…** from a thread's menu to pick a date and time in 
 local time zone, or a duration in minutes, hours, or days. Durations start when
 you confirm; one day means 24 hours. On web and desktop, you can also snooze
 several selected threads together. Choose **Wake thread** to bring a thread back early.
+
+Snoozing a thread also snoozes the threads under it in the agent tree: its delegated agents and
+the threads it supervises. Choose **Snooze only this thread** to leave them awake. If any of them
+is still working or waiting on you, the menu offers **Snooze when idle**, which snoozes the tree
+once that work ends, and the thread shows a small alarm clock until then; **Cancel snooze when
+idle** takes it back. A tree snooze gives every thread in it the same wake time, replacing an
+earlier one. **Wake thread** wakes the tree the same way. A thread that a usage limit put to sleep stays asleep
+until its limit resets, whether you snooze or wake the tree above it; wake it directly to bring it
+back sooner.

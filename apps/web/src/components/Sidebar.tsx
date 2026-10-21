@@ -36,6 +36,7 @@ import {
   effectiveSnoozed,
   hasQueuedTurnStart,
   QUEUED_TURN_START_GRACE_MS,
+  threadTreeHasActiveWork,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
 import { createInboxReturnTracker } from "@t3tools/client-runtime/state/thread-inbox";
@@ -151,7 +152,11 @@ import {
   getThreadKeysToDeselectAfterDelete,
   useThreadSelectionStore,
 } from "../threadSelectionStore";
-import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
+import {
+  type ThreadSnoozeOptions,
+  useAcknowledgeThreadWoke,
+  useThreadActions,
+} from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
@@ -170,7 +175,9 @@ import {
   usePrimaryEnvironmentId,
 } from "../state/environments";
 import {
+  readEnvironmentSupportsSnoozeTree,
   readThreadShell,
+  readThreadShells,
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
   useServerConfigs,
@@ -196,7 +203,9 @@ import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import {
   buildDraftActionMenuItems,
   buildThreadActionMenuItems,
+  snoozeMenuChoice,
   threadActionRequiresOperate,
+  threadSnoozeTreeMenuState,
 } from "./threadActionMenu.logic";
 import {
   animateSidebarLayoutChanges,
@@ -2274,6 +2283,23 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     )
   ) : null;
 
+  // A snooze waiting for the thread's work to end; the menu's Cancel snooze when idle takes it back.
+  const snoozeWhenIdleIndicator =
+    thread.snoozeWhenIdle == null ? null : (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <AlarmClockIcon
+              aria-label="Snoozes when idle"
+              role="img"
+              className="size-3 shrink-0 text-muted-foreground/65"
+            />
+          }
+        />
+        <TooltipPopup>Snoozes once its work ends</TooltipPopup>
+      </Tooltip>
+    );
+
   if (variant === "slim") {
     return (
       <li
@@ -2334,6 +2360,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               </span>
             )}
             <PodChip environmentId={thread.environmentId} worktreePath={thread.worktreePath} slim />
+            {snoozeWhenIdleIndicator}
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -2502,6 +2529,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ) : (
                 <span className="flex-1" />
               )}
+              {snoozeWhenIdleIndicator}
               {pinIndicator}
               {sortable?.isDragging ? (
                 dragDestination
@@ -3521,9 +3549,9 @@ export default function Sidebar() {
       }
     })();
   };
-  const attemptUnsnooze = (threadRef: ScopedThreadRef) => {
+  const attemptUnsnooze = (threadRef: ScopedThreadRef, options: ThreadSnoozeOptions = {}) => {
     void (async () => {
-      const result = await unsnoozeThread(threadRef);
+      const result = await unsnoozeThread(threadRef, options);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -4064,10 +4092,20 @@ export default function Sidebar() {
       }
     })();
   };
+  /** A quick snooze covers the tree and waits for its work rather than being refused. */
+  const quickSnoozeOptions = (threadRef: ScopedThreadRef): ThreadSnoozeOptions => {
+    const thread = readThreadShell(threadRef);
+    if (thread === null || !readEnvironmentSupportsSnoozeTree(threadRef.environmentId)) return {};
+    return {
+      whenIdle: threadTreeHasActiveWork(thread, readThreadShells(), {
+        now: new Date().toISOString(),
+      }),
+    };
+  };
   const performSnooze = async (
     threadRef: ScopedThreadRef,
     preset: Pick<SnoozePreset, "snoozedUntil">,
-    opts: { coSnoozingKeys?: ReadonlySet<string> } = {},
+    opts: { coSnoozingKeys?: ReadonlySet<string>; snooze?: ThreadSnoozeOptions } = {},
   ) => {
     const threadKey = scopedThreadKey(threadRef);
     if (snoozingThreadKeysRef.current.has(threadKey)) {
@@ -4075,7 +4113,11 @@ export default function Sidebar() {
     }
     snoozingThreadKeysRef.current.add(threadKey);
     const navigateAfterSnooze = planForwardNavigation(threadKey, opts.coSnoozingKeys);
-    const result = await snoozeThread(threadRef, preset.snoozedUntil);
+    const result = await snoozeThread(
+      threadRef,
+      preset.snoozedUntil,
+      opts.snooze ?? quickSnoozeOptions(threadRef),
+    );
     snoozingThreadKeysRef.current.delete(threadKey);
     if (result._tag === "Failure") {
       return isAtomCommandInterrupted(result)
@@ -4098,7 +4140,7 @@ export default function Sidebar() {
   const attemptSnooze = (
     threadRef: ScopedThreadRef,
     preset: Pick<SnoozePreset, "snoozedUntil">,
-    opts: { coSnoozingKeys?: ReadonlySet<string> } = {},
+    opts: { coSnoozingKeys?: ReadonlySet<string>; snooze?: ThreadSnoozeOptions } = {},
   ) => {
     void (async () => {
       const outcome = await performSnooze(threadRef, preset, opts);
@@ -4456,6 +4498,11 @@ export default function Sidebar() {
         const isSnoozed = snoozedThreadKeysRef.current.has(threadKey);
         const isPinned = thread.pinnedAt != null;
         const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
+        const shell = readThreadShell(threadRef);
+        const snoozeTree =
+          shell !== null && readEnvironmentSupportsSnoozeTree(thread.environmentId)
+            ? threadSnoozeTreeMenuState(shell, readThreadShells(), new Date().toISOString())
+            : undefined;
         const threadProjectGroup =
           projectGroupsRef.current.find((project) =>
             project.memberProjectRefs.some(
@@ -4495,18 +4542,23 @@ export default function Sidebar() {
                 threadUsage: canReadThreadUsage(threadRef.environmentId),
               },
               snoozePresets,
+              ...(snoozeTree === undefined ? {} : { snoozeTree }),
             }),
             position,
           ),
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
         if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
-        if (clicked.value?.startsWith("snooze:")) {
+        const snoozeChoice = snoozeMenuChoice(clicked.value, snoozeTree);
+        if (snoozeChoice !== null) {
           const preset =
-            clicked.value === "snooze:custom"
+            snoozeChoice.presetId === "custom"
               ? await requestCustomSnooze()
-              : snoozePresets.find((candidate) => `snooze:${candidate.id}` === clicked.value);
-          if (preset) attemptSnooze(threadRef, preset);
+              : snoozePresets.find((candidate) => candidate.id === snoozeChoice.presetId);
+          if (preset)
+            attemptSnooze(threadRef, preset, {
+              snooze: { scope: snoozeChoice.scope, whenIdle: snoozeChoice.whenIdle },
+            });
           return;
         }
         switch (clicked.value) {
@@ -4557,6 +4609,9 @@ export default function Sidebar() {
             return;
           case "unsettle":
             attemptUnsettle(threadRef);
+            return;
+          case "cancel-snooze-when-idle":
+            attemptUnsnooze(threadRef, { scope: "thread" });
             return;
           case "unsnooze":
             attemptUnsnooze(threadRef);

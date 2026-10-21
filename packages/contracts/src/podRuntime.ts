@@ -125,8 +125,20 @@ export const PodRuntimeSnapshot = Schema.Struct({
   hostnameProblem: Schema.optionalKey(
     Schema.String.check(Schema.isMaxLength(POD_RUNTIME_ERROR_MESSAGE_MAX_LENGTH)),
   ),
+  /**
+   * Stopped or frozen because every thread on its worktree was snoozed or
+   * settled; it starts again when one of them wakes. Absent otherwise.
+   */
+  parked: Schema.optionalKey(Schema.Literal(true)),
 });
 export type PodRuntimeSnapshot = typeof PodRuntimeSnapshot.Type;
+
+/** A pod's shell opens while its agent container may run, including after a failure. */
+export const POD_RUNTIME_SHELL_STATES: ReadonlyArray<PodRuntimeState> = [
+  "running",
+  "start_failed",
+  "stop_failed",
+];
 
 /** Containers or volumes labelled for this environment that no pod record owns. */
 export const PodRuntimeOrphan = Schema.Struct({

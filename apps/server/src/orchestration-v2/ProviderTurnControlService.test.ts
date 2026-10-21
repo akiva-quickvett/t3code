@@ -217,6 +217,7 @@ it.effect(
           getSettlementCandidates: () => Effect.die("unused getSettlementCandidates"),
           getThreadsWithPullRequests: () => Effect.die("unused getThreadsWithPullRequests"),
           getThreadWorktreePaths: () => Effect.die("unused getThreadWorktreePaths"),
+          getThreadParking: () => Effect.die("unused getThreadParking"),
           getWorkTreeNodes: () => Effect.die("unused getWorkTreeNodes"),
           getThreadProjection: () => Effect.die("control effects must not load transcript"),
           getTurnStartContext: () => Effect.die("unused"),
@@ -277,6 +278,7 @@ it.effect(
           closeInstance: () => Effect.void,
           release: () => Effect.void,
           detach: () => Effect.void,
+          releasePod: () => Effect.void,
         }),
       );
       const layerControl = ProviderTurnControlService.layer.pipe(

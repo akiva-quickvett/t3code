@@ -160,6 +160,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   chatChannels: Schema.optionalKey(Schema.Boolean),
   /** Server answers the podRuntime.* RPCs; absent on stock servers, whose clients hide pod UI. */
   podRuntime: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Server takes `scope` and `whenIdle` on thread snooze and wake, and its pods
+   * follow their threads' snooze; absent on stock servers, which ignore both.
+   */
+  threadSnoozeTree: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

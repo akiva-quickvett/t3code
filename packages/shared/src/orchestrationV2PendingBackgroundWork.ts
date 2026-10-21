@@ -54,6 +54,23 @@ export function backgroundWorkHoldsCompletion(
   return tasks.some((task) => backgroundWorkKindHoldsCompletion(task.kind));
 }
 
+const PULL_REQUEST_WATCH_TASK_PREFIX = "pull-request-watch:";
+
+/**
+ * Background work a snooze waits for and a parked pod stays up for: as for
+ * completion, except a pull request watch, which is how a snoozed thread
+ * wakes rather than work it is doing.
+ */
+export function backgroundWorkHoldsSnooze(
+  tasks: ReadonlyArray<Pick<PendingBackgroundWorkTask, "kind" | "taskId">>,
+): boolean {
+  return tasks.some(
+    (task) =>
+      !task.taskId.startsWith(PULL_REQUEST_WATCH_TASK_PREFIX) &&
+      backgroundWorkKindHoldsCompletion(task.kind),
+  );
+}
+
 function backgroundWorkKindHoldsCompletion(kind: PendingBackgroundWorkTask["kind"]): boolean {
   switch (kind) {
     case "command":
@@ -259,7 +276,7 @@ function pullRequestWatchTasks(
       ? []
       : [
           {
-            taskId: `pull-request-watch:${threadPullRequestKeyOf(link)}`,
+            taskId: `${PULL_REQUEST_WATCH_TASK_PREFIX}${threadPullRequestKeyOf(link)}`,
             description: `Watching pull request #${link.number}`,
             kind: "monitor" as const,
           },

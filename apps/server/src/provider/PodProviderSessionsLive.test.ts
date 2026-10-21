@@ -12,6 +12,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  PodRuntimeError,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Duration from "effect/Duration";
@@ -61,9 +62,12 @@ const makeLayer = (input: {
   readonly mountedAtStart: boolean;
   readonly recreateMounts?: boolean;
   readonly instanceEnabled?: boolean;
+  /** The pod's own failure when a start is asked of it. */
+  readonly startFailure?: string;
 }) => {
   const mounted = new Set(input.mountedAtStart ? [input.configDir] : []);
   const recreated: Array<PodRuntimeId> = [];
+  const started: Array<PodRuntimeId> = [];
   const targets = WorkspaceExecutionTarget.WorkspaceExecutionTarget.of({
     resolve: (path) =>
       Effect.succeed(
@@ -97,6 +101,25 @@ const makeLayer = (input: {
           }),
         awaitSettled: () => Effect.succeed(snapshot("running")),
         forPath: () => Effect.succeed(snapshot("running")),
+        current: () => Effect.succeed(snapshot(input.podState ?? "running")),
+        ensureRunning: (id) =>
+          Effect.suspend(() => {
+            started.push(id);
+            return input.startFailure === undefined
+              ? Effect.succeed(snapshot("running"))
+              : Effect.fail(
+                  new PodRuntimeError({
+                    reason: "invalid-state",
+                    podId: id,
+                    state: "start_failed",
+                    lastError: {
+                      operation: "start",
+                      message: input.startFailure,
+                      at: "2026-10-21T00:00:00.000Z",
+                    },
+                  }),
+                );
+          }),
       }),
     ),
     Layer.provide(
@@ -118,7 +141,7 @@ const makeLayer = (input: {
     ),
     Layer.provide(NodeServices.layer),
   );
-  return { layer, recreated };
+  return { layer, recreated, started };
 };
 
 const withConfigDir = <A, E, R>(use: (configDir: string) => Effect.Effect<A, E, R>) =>
@@ -195,6 +218,45 @@ describe("pod provider placement", () => {
         expect(refused.message).toBe("The pod is stopped; start it to run this thread's agent.");
       }).pipe(
         Effect.provide(makeLayer({ configDir, podState: "stopped", mountedAtStart: true }).layer),
+      ),
+    ),
+  );
+
+  it.effect("reads the pod a session would run in, and starts it unless it runs", () =>
+    withConfigDir((configDir) => {
+      const stopped = makeLayer({ configDir, podState: "stopped", mountedAtStart: true });
+      return Effect.gen(function* () {
+        const placement = yield* PodProviderPlacement;
+        const podOf = (cwd: string, driver: ProviderDriverKind) =>
+          placement.podOf({ cwd, driver, runsIn: undefined });
+        expect((yield* podOf(POD_WORKTREE, claude))?.id).toBe(podId);
+        // A host session, or one its pod refuses, has no pod to wait for; opening it says why.
+        expect(yield* podOf("/work/trees/host", claude)).toBeUndefined();
+        expect(yield* podOf(POD_WORKTREE, cursor)).toBeUndefined();
+        yield* placement.startPod(podId);
+        expect(stopped.started).toEqual([podId]);
+      }).pipe(Effect.provide(stopped.layer));
+    }),
+  );
+
+  it.effect("fails a pod start with the pod's own reason", () =>
+    withConfigDir((configDir) =>
+      Effect.gen(function* () {
+        const refused = yield* Effect.flatMap(PodProviderPlacement, (placement) =>
+          placement.startPod(podId),
+        ).pipe(Effect.flip);
+        expect(refused.message).toBe(
+          "The pod did not start: Checking the pod's containers failed: volume gone.",
+        );
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            configDir,
+            podState: "start_failed",
+            mountedAtStart: true,
+            startFailure: "Checking the pod's containers failed: volume gone.",
+          }).layer,
+        ),
       ),
     ),
   );
