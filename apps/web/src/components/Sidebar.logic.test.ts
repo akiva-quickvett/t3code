@@ -14,6 +14,7 @@ import {
   createThreadJumpHintVisibilityController,
   deleteSelectedThreadEntries,
   filterSidebarProjectScopeItems,
+  filterSidebarAgentTreeThreads,
   filterSidebarV2VisibleThreads,
   formatWorkingDurationLabel,
   getFallbackThreadIdAfterDelete,
@@ -445,6 +446,37 @@ describe("sidebar thread lineage helpers", () => {
         new Set([`${environmentId}:${projectId}`]),
       ).map((thread) => thread.id),
     ).toEqual([parentId, fork.id]);
+  });
+
+  it("lists app-owned subagents in tree mode but keeps provider-native ones hidden", () => {
+    const parentId = ThreadId.make("thread-parent");
+    const subagentLineage = {
+      rootThreadId: parentId,
+      parentThreadId: parentId,
+      relationshipToParent: "subagent" as const,
+    };
+    const appOwned = makeThreadFixture({
+      id: ThreadId.make("app-owned"),
+      lineage: subagentLineage,
+    });
+    const native = makeThreadFixture({ id: ThreadId.make("native"), lineage: subagentLineage });
+    const archived = makeThreadFixture({
+      id: ThreadId.make("archived"),
+      lineage: subagentLineage,
+      archivedAt: "2026-01-02T00:00:00.000Z",
+    });
+
+    expect(
+      filterSidebarAgentTreeThreads(
+        [
+          makeThreadFixture({ id: parentId }),
+          appOwned,
+          { ...native, source: { ...native.source, creationSource: "provider" } },
+          archived,
+        ],
+        null,
+      ).map((thread) => thread.id),
+    ).toEqual([parentId, appOwned.id]);
   });
 
   it("identifies subagent threads so the sidebar can hide them", () => {
@@ -2302,6 +2334,36 @@ describe("Working shelf (beta)", () => {
       marker("settled-header"),
       row("s1", "settled"),
     ];
+
+    it("drops between nested agent rows without ordering them", () => {
+      const child = (key: string, section: SidebarSection): SidebarListItem => ({
+        kind: "child",
+        key,
+        section,
+      });
+      const tree: readonly SidebarListItem[] = [
+        marker("pinned-header"),
+        row("p1", "pinned"),
+        child("p1-child", "pinned"),
+        marker("pinned-divider"),
+        row("a1", "active"),
+        child("a1-child", "active"),
+        row("a2", "active"),
+        marker("settled-header"),
+      ];
+
+      expect(resolveSidebarDropTarget(tree, "a2", "a1-child")).toEqual({
+        section: "active",
+        pinnedOrder: ["p1"],
+        activeOrder: ["a1", "a2"],
+      });
+      expect(resolveSidebarDropTarget(tree, "a1", "p1-child")).toEqual({
+        section: "pinned",
+        pinnedOrder: ["p1", "a1"],
+        activeOrder: ["a2"],
+      });
+      expect(resolveSidebarDropTarget(tree, "a1-child", "a2")).toBeNull();
+    });
 
     it("never drops into the Working shelf, and keeps it out of the inbox order", () => {
       expect(resolveSidebarDropTarget(items, "a1", "w1")).toBeNull();

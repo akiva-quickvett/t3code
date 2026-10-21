@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
+import { scopedThreadKey, scopeThreadRef } from "../environment/scoped.ts";
+
 import {
+  agentTreeAncestorIds,
+  type AgentTreeThread,
+  deriveAgentTree,
   deriveThreadRelationshipGraph,
+  flattenAgentTree,
   immediateThreadRelationships,
   orderWebThreadLineageRows,
   relatedThreadIds,
@@ -535,5 +541,154 @@ describe("web thread lineage ordering", () => {
         ],
       }),
     ).toEqual([first, second, third]);
+  });
+});
+
+describe("agent tree", () => {
+  const environmentId = EnvironmentId.make("environment-tree");
+  let clock = 0;
+  const node = (
+    id: string,
+    parent: {
+      readonly subagentOf?: string;
+      readonly supervisedBy?: string;
+      readonly forkOf?: string;
+    } = {},
+    createdAt?: string,
+  ): AgentTreeThread => {
+    clock += 1;
+    const parentThreadId = parent.subagentOf ?? parent.forkOf ?? null;
+    return {
+      environmentId,
+      id: ThreadId.make(id),
+      createdAt: createdAt ?? new Date(Date.UTC(2026, 9, 1, 0, 0, clock)).toISOString(),
+      lineage: {
+        parentThreadId: parentThreadId === null ? null : ThreadId.make(parentThreadId),
+        relationshipToParent:
+          parent.subagentOf !== undefined
+            ? "subagent"
+            : parent.forkOf !== undefined
+              ? "fork"
+              : null,
+        ...(parent.supervisedBy === undefined
+          ? {}
+          : { supervisorThreadId: ThreadId.make(parent.supervisedBy) }),
+      },
+    };
+  };
+  const keyOf = (id: string) => scopedThreadKey(scopeThreadRef(environmentId, ThreadId.make(id)));
+  const ids = (threads: ReadonlyArray<AgentTreeThread>) => threads.map((thread) => thread.id);
+  const childIds = (tree: ReturnType<typeof deriveAgentTree>, parentId: string) =>
+    ids(tree.childrenByKey.get(keyOf(parentId)) ?? []);
+  const rowIds = (tree: ReturnType<typeof deriveAgentTree>, expanded: ReadonlyArray<string> = []) =>
+    flattenAgentTree(tree, tree.roots, (key) => expanded.some((id) => key === keyOf(id))).map(
+      (row) => `${"  ".repeat(row.depth)}${row.thread.id}`,
+    );
+
+  it("nests subagents under their parent and supervised threads under their supervisor", () => {
+    const tree = deriveAgentTree([
+      node("meta"),
+      node("slice", { supervisedBy: "meta" }),
+      node("broker", { subagentOf: "slice" }),
+      node("fork", { forkOf: "meta" }),
+    ]);
+
+    expect(ids(tree.roots)).toEqual(["meta", "fork"]);
+    expect(childIds(tree, "meta")).toEqual(["slice"]);
+    expect(childIds(tree, "slice")).toEqual(["broker"]);
+    expect(rowIds(tree, ["meta", "slice"])).toEqual(["meta", "  slice", "    broker", "fork"]);
+  });
+
+  it("keeps roots in the caller's order and siblings oldest first", () => {
+    const tree = deriveAgentTree([
+      node("b-root"),
+      node("late", { subagentOf: "a-root" }, "2026-10-03T00:00:00.000Z"),
+      node("a-root"),
+      node("early", { subagentOf: "a-root" }, "2026-10-01T00:00:00.000Z"),
+      node("tie-b", { subagentOf: "a-root" }, "2026-10-02T00:00:00.000Z"),
+      node("tie-a", { subagentOf: "a-root" }, "2026-10-02T00:00:00.000Z"),
+    ]);
+
+    expect(ids(tree.roots)).toEqual(["b-root", "a-root"]);
+    expect(childIds(tree, "a-root")).toEqual(["early", "tie-a", "tie-b", "late"]);
+  });
+
+  it("collapses every parent unless it is expanded", () => {
+    const tree = deriveAgentTree([
+      node("root"),
+      node("child", { subagentOf: "root" }),
+      node("grandchild", { subagentOf: "child" }),
+    ]);
+
+    const collapsed = flattenAgentTree(tree, tree.roots, () => false);
+    expect(collapsed.map((row) => [row.thread.id, row.childCount, row.expanded])).toEqual([
+      ["root", 1, false],
+    ]);
+    // An expanded thread under a collapsed parent stays hidden.
+    expect(rowIds(tree, ["child"])).toEqual(["root"]);
+    expect(rowIds(tree, ["root"])).toEqual(["root", "  child"]);
+  });
+
+  it("lifts children of a missing parent to the top level", () => {
+    const tree = deriveAgentTree([
+      node("orphan", { subagentOf: "deleted" }),
+      node("supervised-orphan", { supervisedBy: "archived" }),
+      node("grandchild", { subagentOf: "orphan" }),
+    ]);
+
+    expect(ids(tree.roots)).toEqual(["orphan", "supervised-orphan"]);
+    expect(childIds(tree, "orphan")).toEqual(["grandchild"]);
+  });
+
+  it("keys parents by environment, so a same-id thread elsewhere is not a parent", () => {
+    const elsewhere = { ...node("parent"), environmentId: EnvironmentId.make("other") };
+    const tree = deriveAgentTree([elsewhere, node("child", { subagentOf: "parent" })]);
+
+    expect(ids(tree.roots)).toEqual(["parent", "child"]);
+  });
+
+  it("shows every thread of a lineage cycle once instead of dropping or looping", () => {
+    const tree = deriveAgentTree([
+      node("root"),
+      node("a", { subagentOf: "c" }),
+      node("b", { subagentOf: "a" }),
+      node("c", { subagentOf: "b" }),
+      node("tail", { subagentOf: "b" }),
+      node("self", { subagentOf: "self" }),
+    ]);
+
+    expect(ids(tree.roots)).toEqual(["root", "a", "self"]);
+    expect(rowIds(tree, ["a", "b", "c", "self"])).toEqual([
+      "root",
+      "a",
+      "  b",
+      "    c",
+      "    tail",
+      "self",
+    ]);
+  });
+
+  it("walks ancestors through supervisors and stops at a missing thread or a cycle", () => {
+    const threads = new Map(
+      [
+        node("meta"),
+        node("slice", { supervisedBy: "meta" }),
+        node("broker", { subagentOf: "slice" }),
+        node("cell", { subagentOf: "broker" }),
+        node("x", { subagentOf: "y" }),
+        node("y", { subagentOf: "x" }),
+        node("lost", { subagentOf: "gone" }),
+      ].map((thread) => [thread.id, thread]),
+    );
+    const lookup = (threadId: ThreadId) => threads.get(threadId) ?? null;
+
+    expect(agentTreeAncestorIds(ThreadId.make("cell"), lookup)).toEqual([
+      "broker",
+      "slice",
+      "meta",
+    ]);
+    expect(agentTreeAncestorIds(ThreadId.make("x"), lookup)).toEqual(["y"]);
+    expect(agentTreeAncestorIds(ThreadId.make("lost"), lookup)).toEqual(["gone"]);
+    expect(agentTreeAncestorIds(ThreadId.make("meta"), lookup)).toEqual([]);
   });
 });

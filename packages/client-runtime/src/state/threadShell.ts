@@ -21,6 +21,7 @@ import {
   threadKey,
   threadRefsEqual,
 } from "./entities.ts";
+import { agentTreeParentThreadId } from "./threadRelationships.ts";
 
 const EMPTY_THREADS: ReadonlyArray<OrchestrationV2ThreadShell> = Object.freeze([]);
 const EMPTY_SCOPED_THREAD_REFS: ReadonlyArray<ScopedThreadRef> = Object.freeze([]);
@@ -45,14 +46,22 @@ const isChildRunLive = (
       thread.status === "running" ||
       thread.status === "waiting";
 
-/** Provider-native
-    subagents ask on their parent, so they are skipped. */
-function subagentRequest(thread: OrchestrationV2ThreadShell): PendingSubagentRequest | null {
+type ParentOf = (thread: OrchestrationV2ThreadShell) => ThreadId | null;
+
+const subagentParentThreadId: ParentOf = (thread) =>
+  thread.lineage.relationshipToParent === "subagent" ? thread.lineage.parentThreadId : null;
+
+/** A request bubbles to every agent ancestor: delegating parents and supervisors.
+    Provider-native subagents ask on their parent, so they are skipped. */
+function subagentRequest(
+  thread: OrchestrationV2ThreadShell,
+  parentOf: ParentOf = agentTreeParentThreadId,
+): PendingSubagentRequest | null {
   const kind = thread.pendingRuntimeRequest?.kind;
   if (
     kind === undefined ||
     kind === "auth_refresh" ||
-    thread.lineage.relationshipToParent !== "subagent" ||
+    parentOf(thread) === null ||
     isProviderNativeSubagentThread(thread) ||
     !isChildRunLive(thread)
   ) {
@@ -61,19 +70,27 @@ function subagentRequest(thread: OrchestrationV2ThreadShell): PendingSubagentReq
   return kind === "user_input" ? "user_input" : "approval";
 }
 
+/**
+ * `throughSupervisors: false` stops at supervised threads. They are top-level and
+ * raise their own notifications, so bubbling a notification past them would
+ * alert twice for one question.
+ */
 export function pendingSubagentRequestsByThread(
   threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+  options: { readonly throughSupervisors?: boolean } = {},
 ): ReadonlyMap<ThreadId, PendingSubagentRequest> {
+  const parentOf =
+    options.throughSupervisors === false ? subagentParentThreadId : agentTreeParentThreadId;
   const requests = new Map<ThreadId, PendingSubagentRequest>();
   let byId: ReadonlyMap<ThreadId, OrchestrationV2ThreadShell> | undefined;
   for (const child of threads) {
-    const request = subagentRequest(child);
+    const request = subagentRequest(child, parentOf);
     if (request === null) continue;
     byId ??= new Map(threads.map((thread) => [thread.id, thread] as const));
     const seen = new Set<ThreadId>([child.id]);
     let current: OrchestrationV2ThreadShell | undefined = child;
-    while (current?.lineage.relationshipToParent === "subagent") {
-      const parentId: ThreadId | null = current.lineage.parentThreadId;
+    while (current !== undefined) {
+      const parentId = parentOf(current);
       if (parentId === null || seen.has(parentId)) break;
       seen.add(parentId);
       if (requests.get(parentId) !== "approval") requests.set(parentId, request);
@@ -84,13 +101,17 @@ export function pendingSubagentRequestsByThread(
 }
 
 export function childThreadInputsTitle(
-  children: ReadonlyArray<Pick<EnvironmentThreadShell, "hasPendingApprovals">>,
+  children: ReadonlyArray<Pick<EnvironmentThreadShell, "hasPendingApprovals" | "lineage">>,
 ): string {
   const approvals = children.filter((child) => child.hasPendingApprovals).length;
   const need = approvals === 0 ? "input" : approvals === children.length ? "approval" : "you";
+  // A supervised thread is not a subagent; once one is listed, name them all neutrally.
+  const noun = children.every((child) => child.lineage.relationshipToParent === "subagent")
+    ? "subagent"
+    : "agent";
   return children.length === 1
-    ? `Subagent needs ${need}`
-    : `${children.length} subagents need ${need}`;
+    ? `${noun === "subagent" ? "Subagent" : "Agent"} needs ${need}`
+    : `${children.length} ${noun}s need ${need}`;
 }
 
 const sameWireThreadShell = Schema.toEquivalence(OrchestrationV2ThreadShell);
@@ -280,15 +301,16 @@ export function createEnvironmentThreadShellAtoms(input: {
   });
 
   // Child approvals and questions are hidden with their sidebar rows. Read their
-  // shell summaries, without subscribing to every child transcript.
+  // shell summaries, without subscribing to every child transcript. The walk
+  // matches the badge's, so a supervisor's banner names what its badge counts.
   const childThreadInputsAtomFamily = Atom.family((key: string) => {
     const ref = parseThreadKey(key);
     let previous: ReadonlyArray<EnvironmentThreadShell> = [];
     return Atom.make((get) => {
       const children = new Map<ThreadId, OrchestrationV2ThreadShell[]>();
       for (const thread of get(environmentThreadsAtom(ref.environmentId))) {
-        const parent = thread.lineage.parentThreadId;
-        if (parent === null || thread.lineage.relationshipToParent !== "subagent") continue;
+        const parent = agentTreeParentThreadId(thread);
+        if (parent === null) continue;
         const siblings = children.get(parent);
         if (siblings) siblings.push(thread);
         else children.set(parent, [thread]);

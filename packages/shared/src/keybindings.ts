@@ -122,6 +122,7 @@ type WhenToken =
 
 export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+b", command: "sidebar.toggle" },
+  { key: "mod+alt+shift+b", command: "sidebar.showAgentTree", when: "!terminalFocus" },
   { key: "mod+[", command: "navigation.back", when: "!terminalFocus" },
   { key: "mod+]", command: "navigation.forward", when: "!terminalFocus" },
   { key: "mod+j", command: "terminal.toggle" },
@@ -190,6 +191,7 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+shift+s", command: "thread.settle", when: "!terminalFocus" },
   { key: "mod+shift+p", command: "thread.pin", when: "!terminalFocus" },
   { key: "mod+z", command: "thread.undo", when: "!terminalFocus && !editableFocus" },
+  { key: "mod+alt+arrowup", command: "thread.goToParent", when: "!terminalFocus" },
   ...THREAD_JUMP_KEYBINDING_COMMANDS.map((command, index) => ({
     key: `mod+${index + 1}`,
     command,

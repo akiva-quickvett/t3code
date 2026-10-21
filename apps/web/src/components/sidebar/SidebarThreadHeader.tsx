@@ -16,6 +16,8 @@ export interface SidebarThreadHeaderProps {
   searchFieldRef?: RefObject<HTMLDivElement | null>;
   hasProjects: boolean;
   projectScope: ReactNode;
+  /** Absent where the sidebar has no tree mode. */
+  agentTreeToggle?: ReactNode;
   onNewProject: () => void;
   onNewThread: (event: ReactMouseEvent) => void;
   newThreadDisabled: boolean;
@@ -36,6 +38,7 @@ export function SidebarThreadHeader({
   searchFieldRef,
   hasProjects,
   projectScope,
+  agentTreeToggle,
   onNewProject,
   onNewThread,
   newThreadDisabled,
@@ -104,6 +107,7 @@ export function SidebarThreadHeader({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center">
+        {agentTreeToggle}
         {hasProjects ? (
           <>
             {projectScope}
@@ -140,12 +144,15 @@ export function SidebarThreadHeader({
 export function SidebarHeaderIconButton({
   label,
   tooltip = label,
+  pressed,
   className,
   children,
   ...rest
 }: {
   label: string;
   tooltip?: ReactNode;
+  /** Set for a toggle; leave unset for a plain action. */
+  pressed?: boolean | undefined;
   className?: string | undefined;
   children?: ReactNode;
 } & Omit<
@@ -160,6 +167,8 @@ export function SidebarHeaderIconButton({
             size="icon"
             type="button"
             aria-label={label}
+            aria-pressed={pressed}
+            isActive={pressed}
             {...rest}
             className={cn("relative size-7 shrink-0", className)}
           />

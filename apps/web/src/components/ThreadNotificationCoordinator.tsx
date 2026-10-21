@@ -125,7 +125,9 @@ function EnvironmentNotifications({
       return;
     }
     const next = new Map<ThreadId, NotificationState>();
-    const subagentRequests = pendingSubagentRequestsByThread(threads);
+    const subagentRequests = pendingSubagentRequestsByThread(threads, {
+      throughSupervisors: false,
+    });
     for (const rawThread of threads) {
       if (rawThread.lineage.relationshipToParent === "subagent") continue;
       const prior = previous.current.get(rawThread.id);

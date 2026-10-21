@@ -27,6 +27,7 @@ export interface PersistedUiState {
   projectOrderCwds?: string[];
   defaultAdvertisedEndpointKey?: string | null;
   sidebarProjectScopeKey?: string | null;
+  sidebarAgentTreeEnabled?: boolean;
   threadChangedFilesExpansionVersion?: number;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   pullRequestMergeMethod?: string;
@@ -36,6 +37,17 @@ export interface UiProjectState {
   projectExpandedById: Record<string, boolean>;
   projectOrder: string[];
   sidebarProjectScopeKey: string | null;
+}
+
+export interface UiAgentTreeState {
+  sidebarAgentTreeEnabled: boolean;
+  /**
+   * Thread keys whose children show. Kept for the session only: children start
+   * collapsed, and a persisted set would only grow.
+   */
+  agentTreeExpandedKeys: Readonly<Record<string, true>>;
+  /** Bumped by "Show agent tree" so the sidebar opens and scrolls to the thread. */
+  agentTreeReveal: { readonly threadKey: string; readonly request: number } | null;
 }
 
 export interface UiThreadState {
@@ -52,12 +64,15 @@ export interface UiPullRequestState {
 }
 
 export interface UiState
-  extends UiProjectState, UiThreadState, UiEndpointState, UiPullRequestState {}
+  extends UiProjectState, UiAgentTreeState, UiThreadState, UiEndpointState, UiPullRequestState {}
 
 const initialState: UiState = {
   projectExpandedById: {},
   projectOrder: [],
   sidebarProjectScopeKey: null,
+  sidebarAgentTreeEnabled: false,
+  agentTreeExpandedKeys: {},
+  agentTreeReveal: null,
   threadLastVisitedAtById: {},
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
@@ -151,6 +166,9 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
         : {},
     defaultAdvertisedEndpointKey: sanitizeOptionalKey(parsed.defaultAdvertisedEndpointKey),
     sidebarProjectScopeKey: sanitizeOptionalKey(parsed.sidebarProjectScopeKey),
+    sidebarAgentTreeEnabled: parsed.sidebarAgentTreeEnabled === true,
+    agentTreeExpandedKeys: initialState.agentTreeExpandedKeys,
+    agentTreeReveal: null,
     pullRequestMergeMethod: isPullRequestMergeMethod(parsed.pullRequestMergeMethod)
       ? parsed.pullRequestMergeMethod
       : initialState.pullRequestMergeMethod,
@@ -225,6 +243,7 @@ export function persistState(state: UiState): void {
         threadLastVisitedAtById: state.threadLastVisitedAtById,
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         sidebarProjectScopeKey: state.sidebarProjectScopeKey,
+        sidebarAgentTreeEnabled: state.sidebarAgentTreeEnabled,
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
         pullRequestMergeMethod: state.pullRequestMergeMethod,
@@ -334,6 +353,43 @@ export function setSidebarProjectScopeKey(state: UiState, projectKey: string | n
   };
 }
 
+export function setSidebarAgentTreeEnabled(state: UiState, enabled: boolean): UiState {
+  return state.sidebarAgentTreeEnabled === enabled
+    ? state
+    : { ...state, sidebarAgentTreeEnabled: enabled };
+}
+
+export function setAgentTreeExpanded(
+  state: UiState,
+  threadKey: string,
+  expanded: boolean,
+): UiState {
+  if ((state.agentTreeExpandedKeys[threadKey] === true) === expanded) return state;
+  const agentTreeExpandedKeys = { ...state.agentTreeExpandedKeys };
+  if (expanded) agentTreeExpandedKeys[threadKey] = true;
+  else delete agentTreeExpandedKeys[threadKey];
+  return { ...state, agentTreeExpandedKeys };
+}
+
+/** Turns tree mode on and expands `ancestorKeys` so `threadKey`'s row shows. */
+export function showAgentTree(
+  state: UiState,
+  threadKey: string | null,
+  ancestorKeys: readonly string[],
+): UiState {
+  const agentTreeExpandedKeys = { ...state.agentTreeExpandedKeys };
+  for (const key of ancestorKeys) agentTreeExpandedKeys[key] = true;
+  return {
+    ...state,
+    sidebarAgentTreeEnabled: true,
+    agentTreeExpandedKeys,
+    agentTreeReveal:
+      threadKey === null
+        ? state.agentTreeReveal
+        : { threadKey, request: (state.agentTreeReveal?.request ?? 0) + 1 },
+  };
+}
+
 function setPullRequestMergeMethod(state: UiState, method: PullRequestMergeMethod): UiState {
   return state.pullRequestMergeMethod === method
     ? state
@@ -423,6 +479,9 @@ interface UiStateStore extends UiState {
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setSidebarProjectScopeKey: (projectKey: string | null) => void;
+  setSidebarAgentTreeEnabled: (enabled: boolean) => void;
+  setAgentTreeExpanded: (threadKey: string, expanded: boolean) => void;
+  showAgentTree: (threadKey: string | null, ancestorKeys: readonly string[]) => void;
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
@@ -444,6 +503,12 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setSidebarProjectScopeKey: (projectKey) =>
     set((state) => setSidebarProjectScopeKey(state, projectKey)),
+  setSidebarAgentTreeEnabled: (enabled) =>
+    set((state) => setSidebarAgentTreeEnabled(state, enabled)),
+  setAgentTreeExpanded: (threadKey, expanded) =>
+    set((state) => setAgentTreeExpanded(state, threadKey, expanded)),
+  showAgentTree: (threadKey, ancestorKeys) =>
+    set((state) => showAgentTree(state, threadKey, ancestorKeys)),
   setPullRequestMergeMethod: (method) => set((state) => setPullRequestMergeMethod(state, method)),
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),

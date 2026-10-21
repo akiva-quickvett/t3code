@@ -8,6 +8,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
+import { isProviderNativeSubagentThread } from "@t3tools/contracts";
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/reactivity";
@@ -148,10 +149,12 @@ export function sidebarMarkerId(marker: SidebarListMarker): string {
 
 export type SidebarListItem =
   | { readonly kind: "thread"; readonly key: string; readonly section: SidebarSection }
+  /** A nested agent-tree row. It follows its root and is never dragged or ordered on its own. */
+  | { readonly kind: "child"; readonly key: string; readonly section: SidebarSection }
   | { readonly kind: "marker"; readonly marker: SidebarListMarker };
 
 export function sidebarListItemId(item: SidebarListItem): string {
-  return item.kind === "thread" ? item.key : sidebarMarkerId(item.marker);
+  return item.kind === "marker" ? sidebarMarkerId(item.marker) : item.key;
 }
 
 function sectionAtSidebarSlot(items: readonly SidebarListItem[], index: number): SidebarSection {
@@ -197,7 +200,8 @@ export function resolveSidebarDropTarget(
         item.marker === "settled-header"
       )
         break;
-    } else if (currentSection === "pinned") pinnedOrder.push(item.key);
+    } else if (item.kind === "child") continue;
+    else if (currentSection === "pinned") pinnedOrder.push(item.key);
     else activeOrder.push(item.key);
   }
   return { section, pinnedOrder, activeOrder };
@@ -527,6 +531,26 @@ export function filterSidebarV2VisibleThreads<
     (thread) =>
       thread.archivedAt === null &&
       !isSidebarSubagentThread(thread) &&
+      (scopedProjectKeys === null ||
+        scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
+  );
+}
+
+/**
+ * Tree mode also lists the app-owned subagents flat mode hides. Provider-native
+ * subagents stay hidden: they ask and report through their parent's thread.
+ */
+export function filterSidebarAgentTreeThreads<
+  T extends Pick<SidebarThreadSummary, "archivedAt" | "lineage"> & {
+    environmentId: string;
+    projectId: string;
+    source: Pick<SidebarThreadSummary["source"], "creationSource" | "lineage">;
+  },
+>(threads: readonly T[], scopedProjectKeys: ReadonlySet<string> | null): T[] {
+  return threads.filter(
+    (thread) =>
+      thread.archivedAt === null &&
+      !isProviderNativeSubagentThread(thread.source) &&
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );

@@ -1,5 +1,5 @@
 import { AuthPreviewOperateScope } from "@t3tools/contracts";
-import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
+import { Outlet, createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import { useEffect } from "react";
 
@@ -30,6 +30,8 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
+import { readNavigationParentRef, showThreadInAgentTree } from "../state/agentTree";
+import { buildThreadRouteParams } from "../threadRoutes";
 
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
@@ -41,6 +43,7 @@ function ChatRouteGlobalShortcuts() {
     AuthPreviewOperateScope,
   );
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  const navigate = useNavigate();
   const legacySidebarEnabled = useLegacySidebarEnabled();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const projects = useProjects();
@@ -89,6 +92,26 @@ function ChatRouteGlobalShortcuts() {
           event.preventDefault();
           event.stopPropagation();
         }
+        return;
+      }
+
+      if (command === "thread.goToParent") {
+        const parentRef = routeThreadRef === null ? null : readNavigationParentRef(routeThreadRef);
+        if (parentRef === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        void navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(parentRef),
+        });
+        return;
+      }
+
+      if (command === "sidebar.showAgentTree") {
+        if (legacySidebarEnabled) return;
+        event.preventDefault();
+        event.stopPropagation();
+        showThreadInAgentTree(routeThreadRef);
         return;
       }
 
@@ -199,6 +222,7 @@ function ChatRouteGlobalShortcuts() {
     selectedThreadKeysSize,
     startScratchThread,
     legacySidebarEnabled,
+    navigate,
     terminalOpen,
   ]);
 

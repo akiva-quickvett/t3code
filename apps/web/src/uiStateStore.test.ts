@@ -13,8 +13,11 @@ import {
   resolveProjectExpanded,
   setDefaultAdvertisedEndpointKey,
   setProjectExpanded,
+  setAgentTreeExpanded,
+  setSidebarAgentTreeEnabled,
   setSidebarProjectScopeKey,
   setThreadChangedFilesExpanded,
+  showAgentTree,
   type UiState,
 } from "./uiStateStore";
 
@@ -23,6 +26,9 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectExpandedById: {},
     projectOrder: [],
     sidebarProjectScopeKey: null,
+    sidebarAgentTreeEnabled: false,
+    agentTreeExpandedKeys: {},
+    agentTreeReveal: null,
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
     defaultAdvertisedEndpointKey: null,
@@ -158,6 +164,38 @@ describe("uiStateStore pure functions", () => {
   });
 });
 
+describe("agent tree state", () => {
+  it("shows the tree with the thread's ancestors expanded and a fresh reveal request", () => {
+    const first = showAgentTree(makeUiState(), "environment:cell", [
+      "environment:broker",
+      "environment:slice",
+    ]);
+    expect(first.sidebarAgentTreeEnabled).toBe(true);
+    expect(first.agentTreeExpandedKeys).toEqual({
+      "environment:broker": true,
+      "environment:slice": true,
+    });
+    expect(first.agentTreeReveal).toEqual({ threadKey: "environment:cell", request: 1 });
+
+    // Showing the same thread again must still scroll to it, so the request moves.
+    const again = showAgentTree(first, "environment:cell", []);
+    expect(again.agentTreeReveal).toEqual({ threadKey: "environment:cell", request: 2 });
+    expect(again.agentTreeExpandedKeys).toEqual(first.agentTreeExpandedKeys);
+  });
+
+  it("collapses a thread and turns tree mode off without losing expansion", () => {
+    const expanded = setAgentTreeExpanded(makeUiState(), "environment:slice", true);
+    expect(setAgentTreeExpanded(expanded, "environment:slice", true)).toBe(expanded);
+    expect(
+      setAgentTreeExpanded(expanded, "environment:slice", false).agentTreeExpandedKeys,
+    ).toEqual({});
+
+    const flat = setSidebarAgentTreeEnabled({ ...expanded, sidebarAgentTreeEnabled: true }, false);
+    expect(flat.sidebarAgentTreeEnabled).toBe(false);
+    expect(flat.agentTreeExpandedKeys).toEqual({ "environment:slice": true });
+  });
+});
+
 describe("parsePersistedState", () => {
   it("hydrates the last selected pull request merge method", () => {
     const parsed = parsePersistedState({
@@ -202,6 +240,9 @@ describe("parsePersistedState", () => {
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKey: null,
+      sidebarAgentTreeEnabled: false,
+      agentTreeExpandedKeys: {},
+      agentTreeReveal: null,
       pullRequestMergeMethod: "merge",
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
@@ -324,6 +365,7 @@ describe("uiStateStore persistence", () => {
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKey: null,
+      sidebarAgentTreeEnabled: false,
       threadChangedFilesExpansionVersion: 2,
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
@@ -348,6 +390,21 @@ describe("uiStateStore persistence", () => {
     expect(parsePersistedState(persisted).sidebarProjectScopeKey).toBe(
       "github.com/pingdotgg/t3code",
     );
+  });
+
+  it("keeps tree mode across reloads but starts every tree collapsed", () => {
+    const state = showAgentTree(makeUiState(), "environment:cell", [
+      "environment:broker",
+      "environment:slice",
+    ]);
+    persistState(state);
+
+    const restored = parsePersistedState(
+      JSON.parse(localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}") as PersistedUiState,
+    );
+    expect(restored.sidebarAgentTreeEnabled).toBe(true);
+    expect(restored.agentTreeExpandedKeys).toEqual({});
+    expect(restored.agentTreeReveal).toBeNull();
   });
 
   it("drops the temporary expanded-only migration fallback when rewriting state", () => {

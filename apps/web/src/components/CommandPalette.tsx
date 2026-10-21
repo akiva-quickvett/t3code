@@ -68,6 +68,7 @@ import {
   FolderPlusIcon,
   MessageSquareDashedIcon,
   LinkIcon,
+  ListTreeIcon,
   MessageSquareIcon,
   MonitorIcon,
   MoonIcon,
@@ -104,7 +105,7 @@ import {
   copyPromptLink,
   promptLinkRepositoryOf,
 } from "./promptLinks/copyPromptLink";
-import { useClientSettings } from "../hooks/useSettings";
+import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { useTheme } from "../hooks/useTheme";
 import { useCustomThemes } from "../hooks/useCustomThemes";
@@ -245,6 +246,7 @@ import { ComposerHandleContext, useComposerHandleContext } from "../composerHand
 import type { ChatComposerHandle } from "./chat/ChatComposer";
 import { getProjectOrderKey } from "../logicalProject";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
+import { readNavigationParentRef, showThreadInAgentTree } from "../state/agentTree";
 import {
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
@@ -719,6 +721,8 @@ function OpenCommandPaletteDialog(props: {
     setHighlightedItemValue(null);
   }
   const clientSettings = useClientSettings(selectCommandPaletteClientSettings);
+  const legacySidebarEnabled = useLegacySidebarEnabled();
+  const sidebarAgentTreeEnabled = useUiStateStore((store) => store.sidebarAgentTreeEnabled);
   const createProject = useAtomCommand(projectEnvironment.create, {
     reportFailure: false,
   });
@@ -1714,6 +1718,57 @@ function OpenCommandPaletteDialog(props: {
           run: () => copyPromptLink(contextLink),
         });
       }
+    }
+  }
+
+  const activeThreadParentRef =
+    activeThread === null
+      ? null
+      : readNavigationParentRef(scopeThreadRef(activeThread.environmentId, activeThread.id));
+  if (activeThreadParentRef !== null) {
+    actionItems.push({
+      kind: "action",
+      value: "action:go-to-parent-thread",
+      searchTerms: ["parent", "supervisor", "up", "agent", "tree"],
+      title: "Go to parent",
+      icon: <CornerLeftUpIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "thread.goToParent",
+      run: async () => {
+        await navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(activeThreadParentRef),
+        });
+      },
+    });
+  }
+
+  if (!legacySidebarEnabled) {
+    actionItems.push({
+      kind: "action",
+      value: "action:show-agent-tree",
+      searchTerms: ["agent", "tree", "subagents", "hierarchy", "sidebar", "reveal"],
+      title: "Show agent tree",
+      icon: <ListTreeIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "sidebar.showAgentTree",
+      run: async () => {
+        showThreadInAgentTree(
+          activeThread === null
+            ? null
+            : scopeThreadRef(activeThread.environmentId, activeThread.id),
+        );
+      },
+    });
+    if (sidebarAgentTreeEnabled) {
+      actionItems.push({
+        kind: "action",
+        value: "action:hide-agent-tree",
+        searchTerms: ["agent", "tree", "flat", "sidebar"],
+        title: "Hide agent tree",
+        icon: <ListTreeIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          useUiStateStore.getState().setSidebarAgentTreeEnabled(false);
+        },
+      });
     }
   }
 
