@@ -12,6 +12,8 @@ import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/fil
 import {
   type PodRuntimeAction,
   podRuntimeActions,
+  podServiceLinks,
+  type PodServiceLink,
 } from "@t3tools/client-runtime/state/pod-runtime";
 import type { SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import * as Arr from "effect/Array";
@@ -75,6 +77,27 @@ export function buildPodActionItems(input: {
         run: () => input.run(action),
       },
     ];
+  });
+}
+
+/** The active thread's running pod services, each opening in an environment browser tab. */
+export function buildPodServiceItems(input: {
+  readonly pod: PodRuntimeSnapshot;
+  readonly icon: ReactNode;
+  readonly allowed: boolean;
+  readonly open: (link: PodServiceLink) => Promise<void>;
+}): CommandPaletteActionItem[] {
+  return podServiceLinks(input.pod).map((link) => {
+    const title = `Open pod service: ${link.name}`;
+    return {
+      kind: "action",
+      value: `action:pod-service:${link.name}`,
+      searchTerms: [title, "pod container browser preview", link.url],
+      title,
+      disabled: !input.allowed,
+      icon: input.icon,
+      run: () => input.open(link),
+    };
   });
 }
 

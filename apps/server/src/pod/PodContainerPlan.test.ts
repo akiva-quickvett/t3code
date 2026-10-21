@@ -25,6 +25,7 @@ const input: PodPlanInput = {
     ANTHROPIC_API_KEY: "sk-ant",
     CLAUDE_CODE_OAUTH_TOKEN: "oauth",
   },
+  publish: [],
 };
 
 const mountList = (
@@ -53,6 +54,16 @@ describe("pod container plan", () => {
       "bind /home/dev/.gitconfig:/home/dev/.gitconfig ro",
       "bind /home/dev/.config/gh:/home/dev/.config/gh ro",
       "bind /home/dev/pods/seeds/repo:/seeds/repo ro",
+    ]);
+  });
+
+  it("runs dockerd itself, so the image adds no listener open to the pods network", () => {
+    // A first argument that is a flag makes docker:dind's entrypoint add
+    // --host=tcp://0.0.0.0:2375, which clashes with the loopback listener.
+    expect(planPod(input).dind.command).toEqual([
+      "dockerd",
+      "--host=unix:///var/run/docker.sock",
+      "--host=tcp://127.0.0.1:2375",
     ]);
   });
 

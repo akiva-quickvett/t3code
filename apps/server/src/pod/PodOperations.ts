@@ -36,6 +36,8 @@ export interface PodOperationContext {
   readonly network: string;
   readonly config: T3ProjectFilePod;
   readonly worktreePath: string;
+  /** Fails naming the port when something else now holds one the daemon publishes. */
+  readonly checkHostPorts: Effect.Effect<void, PodStepError>;
 }
 
 export interface PodOperationResult {
@@ -121,9 +123,68 @@ const execIn = (
       ),
     );
 
+const DAEMON_LOG_LINES = 5;
+const DAEMON_EXITED_STEP = "Starting the pod's Docker daemon";
+
+/** The last lines the daemon printed, one line, within the failure message's bound. */
+const logTail = (logs: string) =>
+  logs
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(-DAEMON_LOG_LINES)
+    .join(" | ")
+    .slice(-300);
+
+/**
+ * A daemon that exited will never answer; failing at once, with what it
+ * printed, beats waiting out every attempt for a misleading timeout.
+ */
+const failIfDaemonExited = (context: PodOperationContext) =>
+  Effect.gen(function* () {
+    const { dind } = yield* podContainers(context);
+    if (dind !== undefined && dind.status !== "exited" && dind.status !== "dead") return;
+    const logs =
+      dind === undefined
+        ? ""
+        : yield* context.host
+            .logs(dind.id, DAEMON_LOG_LINES * 4)
+            .pipe(Effect.orElseSucceed(() => ""));
+    const tail = logTail(logs);
+    return yield* new PodStepError({
+      step: DAEMON_EXITED_STEP,
+      exitCode: null,
+      timedOut: false,
+      daemonMessage:
+        dind === undefined
+          ? "its container is gone."
+          : `it ${dind.status === "dead" ? "died" : "exited"}${tail.length === 0 ? "." : `: ${tail}`}`,
+    });
+  });
+
+/** However each probe fares, a daemon not ready by then is not coming. */
+const DAEMON_READY_DEADLINE = "2 minutes";
+
 const awaitDaemon = (context: PodOperationContext, dindId: string) =>
   execIn(context, dindId, "Waiting for the pod's Docker daemon", ["docker", "info"], 30_000).pipe(
-    Effect.retry({ schedule: Schedule.spaced("1 second"), times: DAEMON_READY_ATTEMPTS }),
+    Effect.tapError(() => failIfDaemonExited(context)),
+    Effect.retry({
+      schedule: Schedule.spaced("1 second"),
+      times: DAEMON_READY_ATTEMPTS,
+      while: (error) => error.step !== DAEMON_EXITED_STEP,
+    }),
+    Effect.timeoutOrElse({
+      duration: DAEMON_READY_DEADLINE,
+      orElse: () =>
+        Effect.fail(
+          new PodStepError({
+            step: "Waiting for the pod's Docker daemon",
+            exitCode: null,
+            timedOut: true,
+            daemonMessage: null,
+          }),
+        ),
+    }),
   );
 
 /**
@@ -171,6 +232,9 @@ const bringUp = (context: PodOperationContext, fresh: boolean) =>
       yield* context.host
         .createVolume(context.plan.volume)
         .pipe(step("Creating the pod's Docker volume"));
+    // A running or paused daemon already holds its ports.
+    if (found.dind?.status !== "running" && found.dind?.status !== "paused")
+      yield* context.checkHostPorts;
     const dindId = yield* ensureContainer(
       context,
       found.dind,

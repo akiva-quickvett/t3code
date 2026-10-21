@@ -21,12 +21,13 @@ machine, so a `docker compose` it runs reaches your own Docker, not the pod's.
     "services": { "web": 3000, "api": 8000 },
     "up": ["docker compose up -d --build"],
     "seeds": ["docker compose exec -T db psql -U app < /seeds/my-repo/dev.sql"],
-    "env": { "APP_ENV": "development" }
+    "env": { "APP_ENV": "development", "API_URL": "{api.url}" }
   }
 }
 ```
 
-`services` names the ports the stack serves. `up` and `seeds` run once, when the pod is created,
+`services` names the ports the stack serves inside the pod; the compose file must publish each one
+on all addresses (`"3000:3000"`, not `"127.0.0.1:3000:3000"`). `up` and `seeds` run once, when the pod is created,
 in the pod's agent container as you, so files they write stay yours; `up` defaults to
 `docker compose up -d`. Seed files go in `~/pods/seeds/<repository folder name>/` and appear in the
 pod at `/seeds/<repository folder name>/`. A pod whose creation is interrupted or fails runs `up`
@@ -37,6 +38,13 @@ for it and says so if the image lacks it. The default, `docker:27-cli`, is minim
 `git`, no `bash` and no project toolchain, so terminals use `sh` and setup and teardown scripts that
 need more fail. Set `podRuntime.defaultImage` in the server settings to an image with `git` and
 whatever your scripts run.
+
+`env` is set for every command in the pod and written to the worktree's `.env`, replacing those
+variables and keeping the rest of the file; keep `.env` out of Git. A `.env` that is a symlink, as
+some worktree setups make to share the main checkout's, becomes the worktree's own file, so the
+shared one never gets this pod's addresses. In its values, `{web.url}` and
+`{web.port}` become the `web` service's address and port on the machine running T3 Code. A
+placeholder that names no service fails the pod and names the variable.
 
 ## Start a thread in a pod
 
@@ -57,6 +65,22 @@ to remove a pod, **Remove anyway** forgets it; whatever Docker kept is then list
 **Settings → Diagnostics → Pods** lists every pod with its memory use, including orphans:
 containers labelled for this T3 Code server that no pod owns. T3 Code never deletes orphans on its
 own; remove them there.
+
+## Open a pod's services
+
+While a pod runs, each of its `services` is published on a port of the machine running T3 Code,
+from 20000 up. Open one from the pod chip or from **Settings → Diagnostics → Pods**: it opens in a
+browser tab of the thread, in the browser T3 Code runs on that machine, so it works from any device
+you connect with. Running services also appear in the browser panel's list of local servers.
+
+A service keeps its port through stop, start, recreate and T3 Code restarts, until the pod is
+removed. If something else holds the port when the pod starts, the start fails and names the port:
+free it, then **Retry**. Changes to `services` and `env` in `t3.json` take effect on **Recreate
+pod**, which also writes `.env` again.
+
+To reach the services from other tailnet devices directly, set `podRuntime.publishOnTailnet` to
+`true` in the server settings. Pods created or recreated after that are also published on this
+machine's tailnet address, which Diagnostics shows next to each service.
 
 ## Removing a pod's worktree
 

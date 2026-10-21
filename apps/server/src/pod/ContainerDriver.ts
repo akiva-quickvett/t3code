@@ -25,10 +25,19 @@ export interface PodContainerSpec {
     | { readonly mode: "container"; readonly container: string };
   readonly mounts: ReadonlyArray<PodContainerMount>;
   readonly env: Readonly<Record<string, string>>;
+  /** TCP ports published on the host, as `docker create -p`. */
+  readonly publish?: ReadonlyArray<PodPublishedPort>;
   /** `uid:gid`; the image's user when absent. */
   readonly user?: string;
   readonly workdir?: string;
   readonly command: ReadonlyArray<string>;
+}
+
+export interface PodPublishedPort {
+  /** An IPv4 address of the host; never a wildcard. */
+  readonly hostIp: string;
+  readonly hostPort: number;
+  readonly containerPort: number;
 }
 
 export type PodContainerStatus =
@@ -85,6 +94,7 @@ export const ContainerDriverOperation = Schema.Literals([
   "removeContainer",
   "exec",
   "stats",
+  "logs",
 ]);
 export type ContainerDriverOperation = typeof ContainerDriverOperation.Type;
 
@@ -132,6 +142,8 @@ export interface ContainerHost {
     spec: PodExecSpec & { readonly timeoutMs: number },
   ) => Effect.Effect<PodExecResult, ContainerDriverError>;
   readonly execLaunch: (id: string, spec: PodExecSpec & { readonly tty: boolean }) => PodExecLaunch;
+  /** The container's last `lines` lines of output, stdout then stderr. */
+  readonly logs: (id: string, lines: number) => Effect.Effect<string, ContainerDriverError>;
   /** Memory in bytes per container id; ids Docker did not report are absent. */
   readonly memoryUsage: (
     ids: ReadonlyArray<string>,
@@ -396,6 +408,10 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
         "--network",
         spec.network.mode === "bridge" ? spec.network.name : `container:${spec.network.container}`,
         ...spec.mounts.flatMap((mount) => ["--mount", mountArgument(mount)]),
+        ...(spec.publish ?? []).flatMap((port) => [
+          "--publish",
+          `${port.hostIp}:${port.hostPort}:${port.containerPort}/tcp`,
+        ]),
         ...env.args,
         ...(spec.user === undefined ? [] : ["--user", spec.user]),
         ...(spec.workdir === undefined ? [] : ["--workdir", spec.workdir]),
@@ -474,6 +490,29 @@ const makeDockerHost = (runner: ProcessRunner.ProcessRunner["Service"], dockerHo
           ),
         );
     },
+    logs: (id, count) =>
+      runner
+        .run({
+          command: "docker",
+          args: ["logs", "--tail", String(count), id],
+          env: hostEnv,
+          timeout: DOCKER_TIMEOUT_MS,
+          maxOutputBytes: DOCKER_OUTPUT_BYTES,
+          outputMode: "truncate",
+          timeoutBehavior: "timedOutResult",
+        })
+        .pipe(
+          Effect.map((output) => `${output.stdout}\n${output.stderr}`),
+          Effect.mapError(
+            (cause) =>
+              new ContainerDriverError({
+                operation: "logs",
+                exitCode: null,
+                daemonMessage: null,
+                cause,
+              }),
+          ),
+        ),
     execLaunch: (id, spec) => {
       const exec = execArguments(spec);
       return {

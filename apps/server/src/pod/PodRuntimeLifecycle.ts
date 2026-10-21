@@ -20,9 +20,18 @@ export interface PodRuntimeRecord {
   readonly dockerHost: string;
   /** The removed pod's worktree is gone too, so the path no longer belongs to it. */
   readonly worktreeReleased?: boolean;
+  /** Host port per service; held from allocation until the pod is removed. */
+  readonly hostPorts?: Readonly<Record<string, number>>;
+  /** The tailnet address the services are also published on. */
+  readonly tailnetAddress?: string;
 }
 
 const PodServicePort = Schema.Struct({ name: TrimmedNonEmptyString, port: Schema.Int });
+const PodServiceHostPort = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  port: Schema.Int,
+  hostPort: Schema.Int,
+});
 
 /** Persisted in `pod_runtime_events`; replaying them in order rebuilds `pod_runtimes`. */
 export const PodRuntimeEvent = Schema.Union([
@@ -58,6 +67,17 @@ export const PodRuntimeEvent = Schema.Union([
     occurredAt: IsoDateTime,
     operation: PodRuntimeOperation,
     message: Schema.String,
+  }),
+  /**
+   * The services the pod's daemon publishes and their host ports, decided before
+   * its containers are created. Replaces the service list.
+   */
+  Schema.Struct({
+    type: Schema.Literal("pod.ports-allocated"),
+    podId: PodRuntimeId,
+    occurredAt: IsoDateTime,
+    services: Schema.Array(PodServiceHostPort),
+    tailnetAddress: Schema.NullOr(Schema.String),
   }),
   /** A removed pod's worktree checkout was removed, freeing the path for a host worktree. */
   Schema.Struct({
@@ -313,8 +333,40 @@ export const planPodObservation = (
 const settledState = (event: Extract<PodRuntimeEvent, { type: "pod.operation-succeeded" }>) =>
   POD_OPERATION_RULES[event.operation].success;
 
+export const POD_LOOPBACK_ADDRESS = "127.0.0.1";
+
+export const podServiceUrl = (address: string, hostPort: number) => `http://${address}:${hostPort}`;
+
+/** A removed pod holds no ports; a pod's services are reachable only while it runs. */
+const publishServices = (record: PodRuntimeRecord): PodRuntimeRecord => {
+  const { hostPorts, tailnetAddress, ...unallocated } = record;
+  const { state } = record.snapshot;
+  const kept = state === "removed" ? unallocated : record;
+  const services = record.snapshot.services.map(({ name, port }) => {
+    const hostPort = state === "running" ? hostPorts?.[name] : undefined;
+    if (hostPort === undefined) return { name, port, url: null };
+    return {
+      name,
+      port,
+      url: podServiceUrl(POD_LOOPBACK_ADDRESS, hostPort),
+      ...(tailnetAddress === undefined
+        ? {}
+        : { tailnetUrl: podServiceUrl(tailnetAddress, hostPort) }),
+    };
+  });
+  return { ...kept, snapshot: { ...record.snapshot, services } };
+};
+
 /** The projection reducer; `pod.created` is the only event that may start a record. */
 export const applyPodEvent = (
+  record: PodRuntimeRecord | undefined,
+  event: PodRuntimeEvent,
+): PodRuntimeRecord | undefined => {
+  const next = reducePodEvent(record, event);
+  return next === undefined ? undefined : publishServices(next);
+};
+
+const reducePodEvent = (
   record: PodRuntimeRecord | undefined,
   event: PodRuntimeEvent,
 ): PodRuntimeRecord | undefined => {
@@ -342,6 +394,21 @@ export const applyPodEvent = (
   switch (event.type) {
     case "pod.worktree-released":
       return { ...record, worktreeReleased: true };
+    case "pod.ports-allocated": {
+      const { tailnetAddress: _previous, ...rest } = record;
+      return {
+        ...rest,
+        hostPorts: Object.fromEntries(
+          event.services.map((service) => [service.name, service.hostPort]),
+        ),
+        ...(event.tailnetAddress === null ? {} : { tailnetAddress: event.tailnetAddress }),
+        snapshot: {
+          ...snapshot,
+          services: event.services.map(({ name, port }) => ({ name, port, url: null })),
+          updatedAt,
+        },
+      };
+    }
     case "pod.operation-requested":
       return {
         ...record,
