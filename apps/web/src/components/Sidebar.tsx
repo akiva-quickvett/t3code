@@ -2082,7 +2082,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const treeIndentStyle =
     props.treeDepth !== null && props.treeDepth > 0
       ? {
-          paddingInlineStart: `${Math.min(props.treeDepth, AGENT_TREE_MAX_INDENT_DEPTH) * 0.75}rem`,
+          paddingInlineStart: `${Math.min(props.treeDepth, AGENT_TREE_MAX_INDENT_DEPTH) * 0.5}rem`,
         }
       : undefined;
   const rootStyle =
@@ -2139,6 +2139,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         aria-hidden
         className={cn(
           "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
+          // Tree rows are indented and carry a role badge; the title keeps room first.
+          props.treeDepth !== null && "min-w-16",
           shouldRecede ? "font-normal" : "font-medium",
           variant === "card"
             ? cn(
@@ -2285,18 +2287,29 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 {treeDisclosure}
               </span>
             )}
-            <span
-              className={cn(
-                "flex shrink-0 items-center transition-opacity",
-                (!props.isActive || variantAction === "unsettle") &&
-                  "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
-              )}
-            >
-              {props.project ? <ProjectFavicon project={props.project} className="size-4" /> : null}
-            </span>
+            {/* A nested row is always in its root's project, so it skips the favicon. */}
+            {props.treeDepth !== null && props.treeDepth > 0 ? null : (
+              <span
+                className={cn(
+                  "flex shrink-0 items-center transition-opacity",
+                  (!props.isActive || variantAction === "unsettle") &&
+                    "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
+                )}
+              >
+                {props.project ? (
+                  <ProjectFavicon project={props.project} className="size-4" />
+                ) : null}
+              </span>
+            )}
             {draftIndicator}
             {title}
-            <ThreadRoleBadge thread={thread} />
+            {props.treeDepth === null ? (
+              <ThreadRoleBadge thread={thread} />
+            ) : (
+              <span className="flex min-w-0 max-w-[45%]">
+                <ThreadRoleBadge thread={thread} shrink />
+              </span>
+            )}
             {/* M8's pod chip for broker rows goes here; brokers are subagents, so always slim. */}
             {pinIndicator}
             {terminalStatusIcon}

@@ -4,11 +4,18 @@ import { useThreadRoleBadge } from "../../state/agentRoles";
 import { Badge } from "../ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-function RoleBadge(props: { readonly badge: ThreadRoleBadge }) {
+function RoleBadge(props: { readonly badge: ThreadRoleBadge; readonly shrink: boolean }) {
+  // A shrinking badge truncates its label, so the full label stays in the title.
+  const label = props.shrink ? (
+    <span className="truncate">{props.badge.label}</span>
+  ) : (
+    props.badge.label
+  );
+  const title = props.shrink ? props.badge.label : undefined;
   if (!props.badge.missing) {
     return (
-      <Badge variant="secondary" size="sm">
-        {props.badge.label}
+      <Badge variant="secondary" size="sm" shrink={props.shrink} title={title}>
+        {label}
       </Badge>
     );
   }
@@ -16,8 +23,8 @@ function RoleBadge(props: { readonly badge: ThreadRoleBadge }) {
     <Tooltip>
       <TooltipTrigger
         render={
-          <Badge variant="warning" size="sm">
-            {props.badge.label}
+          <Badge variant="warning" size="sm" shrink={props.shrink}>
+            {label}
           </Badge>
         }
       />
@@ -32,7 +39,9 @@ function RoleBadge(props: { readonly badge: ThreadRoleBadge }) {
  */
 export function ThreadRoleBadge(props: {
   readonly thread: Parameters<typeof useThreadRoleBadge>[0];
+  /** Narrows and truncates before the row's title does. */
+  readonly shrink?: boolean;
 }) {
   const badge = useThreadRoleBadge(props.thread);
-  return badge === null ? null : <RoleBadge badge={badge} />;
+  return badge === null ? null : <RoleBadge badge={badge} shrink={props.shrink === true} />;
 }

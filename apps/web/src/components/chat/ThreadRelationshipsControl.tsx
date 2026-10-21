@@ -525,19 +525,23 @@ export function ThreadRelationshipsPanel(props: {
                     fallbackIcon={RelationshipIcon}
                     status={rowStatus}
                   />
-                  <span className="min-w-0 flex-1">
+                  {/* The title keeps room first; the role badge truncates before it. */}
+                  <span className="min-w-16 flex-1">
                     <span className="block truncate text-left text-sm font-medium leading-4 text-foreground/85">
                       {threadTitle}
                     </span>
                   </span>
                   {node?.thread ? (
-                    <ThreadRoleBadge
-                      thread={{
-                        environmentId: ref.environmentId,
-                        projectId: node.thread.projectId,
-                        rolePreset: node.thread.rolePreset,
-                      }}
-                    />
+                    <span className="flex min-w-0 max-w-[45%]">
+                      <ThreadRoleBadge
+                        thread={{
+                          environmentId: ref.environmentId,
+                          projectId: node.thread.projectId,
+                          rolePreset: node.thread.rolePreset,
+                        }}
+                        shrink
+                      />
+                    </span>
                   ) : null}
                   {agent ? null : (
                     <ArrowRightIcon className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
