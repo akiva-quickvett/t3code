@@ -47,14 +47,20 @@ const ENVIRONMENT = "env-test";
 interface FakeHostNetwork {
   readonly busy: Set<string>;
   tailnetAddress: string | null;
+  resolvConf: string;
 }
 
-const makeFakeHostNetwork = (): FakeHostNetwork => ({ busy: new Set(), tailnetAddress: null });
+const makeFakeHostNetwork = (): FakeHostNetwork => ({
+  busy: new Set(),
+  tailnetAddress: null,
+  resolvConf: "",
+});
 
 const harness = (options: {
   readonly driver: FakeContainerDriver;
   readonly enabled?: boolean;
   readonly publishOnTailnet?: boolean;
+  readonly dnsServers?: ReadonlyArray<string>;
   readonly projectFile?: T3ProjectFile | null;
   readonly network?: FakeHostNetwork;
   readonly router?: FakePodHostnameRouter;
@@ -74,6 +80,7 @@ const harness = (options: {
       podRuntime: {
         enabled: options.enabled ?? true,
         publishOnTailnet: options.publishOnTailnet ?? false,
+        ...(options.dnsServers === undefined ? {} : { dnsServers: options.dnsServers }),
       },
     }),
     Layer.mock(ProjectService.ProjectService)({
@@ -113,6 +120,7 @@ const harness = (options: {
       probePort: (address, port) =>
         Effect.sync(() => (network.busy.has(`${address}:${port}`) ? "in-use" : "free")),
       tailnetAddress: Effect.sync(() => network.tailnetAddress),
+      resolvConf: Effect.sync(() => network.resolvConf),
     }),
   ).pipe(
     Layer.provideMerge(SqlitePersistence.layerMemory),
@@ -1278,6 +1286,67 @@ describe("PodRuntimeService hostnames", () => {
         ).toBeUndefined();
       });
     },
+  );
+});
+
+describe("PodRuntimeService resolvers", () => {
+  const HOST_RESOLV_CONF = [
+    "nameserver 127.0.0.53",
+    "nameserver 100.100.100.100",
+    "nameserver 192.168.1.1",
+    "nameserver 2600:4040:ac1c:5400::1",
+  ].join("\n");
+  const dindDns = (options: Omit<Parameters<typeof harness>[0], "driver">) => {
+    const driver = makeFakeContainerDriver();
+    return withPods(
+      driver,
+      (pods) =>
+        Effect.gen(function* () {
+          const { id } = yield* pods.create({ projectId, worktreePath });
+          yield* pods.drain;
+          const dind = driver
+            .containers()
+            .find((container) => container.name === `t3-envtest-${id}-dind`)?.spec;
+          return { dns: dind?.dns, command: dind?.command.slice(3) };
+        }),
+      options,
+    );
+  };
+  const network = (resolvConf: string) => ({ ...makeFakeHostNetwork(), resolvConf });
+
+  it.effect(
+    "gives a pod of ports the host's reachable upstreams unless the setting names others",
+    () =>
+      Effect.gen(function* () {
+        expect(yield* dindDns({ network: network(HOST_RESOLV_CONF) })).toEqual({
+          dns: ["192.168.1.1"],
+          command: ["--dns", "192.168.1.1"],
+        });
+        expect(
+          yield* dindDns({ network: network(HOST_RESOLV_CONF), dnsServers: ["9.9.9.9"] }),
+        ).toEqual({ dns: ["9.9.9.9"], command: ["--dns", "9.9.9.9"] });
+        // Nothing reachable found: Docker's own DNS, as before.
+        expect(yield* dindDns({ network: network("nameserver 127.0.0.53\n") })).toEqual({
+          dns: undefined,
+          command: [],
+        });
+      }),
+  );
+
+  it.effect("asks the proxy's DNS server first in hostname mode, then the setting only", () =>
+    Effect.gen(function* () {
+      const hostnames: T3ProjectFile = { pod: { services: { web: 3000 }, hostnames: true } };
+      expect(
+        yield* dindDns({ network: network(HOST_RESOLV_CONF), projectFile: hostnames }),
+      ).toEqual({ dns: ["172.21.0.2"], command: ["--dns", "172.21.0.2"] });
+      expect(
+        (yield* dindDns({
+          network: network(HOST_RESOLV_CONF),
+          projectFile: hostnames,
+          dnsServers: ["9.9.9.9"],
+        })).dns,
+      ).toEqual(["172.21.0.2", "9.9.9.9"]);
+    }),
   );
 });
 

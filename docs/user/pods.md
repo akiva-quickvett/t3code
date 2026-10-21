@@ -52,6 +52,11 @@ In the composer, choose **New worktree**, then **Runtime → Container**. T3 Cod
 worktree, starts its pod and brings the stack up before the setup script runs, which then runs in
 the pod. The first pod pulls its images, which can take a few minutes.
 
+A pod's Docker daemon looks names up through this machine's own upstream DNS servers, since
+Docker's DNS on the pods network fails on some machines. If its image pulls still fail with
+`server misbehaving`, set `podRuntime.dnsServers` in the server settings to resolvers that work
+from containers (for example `["192.168.1.1"]`) and recreate the pod.
+
 ## Manage a pod
 
 The pod chip next to the thread title shows its state. Click it to stop or start the pod, open a
@@ -121,10 +126,6 @@ why; **Recreate pod** once the proxy is back moves it to hostnames. If only its 
 in place, Diagnostics says why and its hostnames do not open until the pod starts again with the
 route. The proxy's container names, network, domain, routes directory and certificate are orch's
 defaults; change them under `podRuntime.hostnameProxy` in the server settings if your setup differs.
-
-If image pulls inside a pod fail with `server misbehaving`, Docker's DNS is failing on the pods
-network: set `podRuntime.dnsServers` in the server settings (for example `["192.168.1.1"]`) and
-recreate the pod.
 
 ## Removing a pod's worktree
 

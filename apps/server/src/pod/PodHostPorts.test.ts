@@ -1,5 +1,6 @@
 import * as NodeNet from "node:net";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -18,6 +19,7 @@ const fakeNetwork = (busy: ReadonlySet<string> = new Set()) =>
             : "free",
       ),
     tailnetAddress: Effect.succeed(null),
+    resolvConf: Effect.succeed(""),
   });
 
 const loopback = ["127.0.0.1"];
@@ -129,6 +131,35 @@ describe("host network probe", () => {
       expect(yield* network.probePort("127.0.0.1", port)).toBe("free");
       // TEST-NET-1 is never this host's address.
       expect(yield* network.probePort("192.0.2.1", port)).toBe("no-address");
-    }).pipe(Effect.provide(PodHostPorts.layer)),
+    }).pipe(Effect.provide(PodHostPorts.layer.pipe(Layer.provide(NodeServices.layer)))),
   );
+});
+
+describe("host upstream resolvers", () => {
+  it("keeps the IPv4 upstreams a container can reach, at most three", () => {
+    const resolvConf = [
+      "# This is /run/systemd/resolve/resolv.conf managed by man:systemd-resolved(8).",
+      "nameserver 127.0.0.53",
+      "nameserver 127.0.0.1",
+      "nameserver 100.100.100.100",
+      "nameserver 169.254.169.254",
+      "nameserver 192.168.1.1",
+      "nameserver 2600:4040:ac1c:5400::1",
+      "nameserver fd7a:115c:a1e0::53",
+      "nameserver ::1",
+      "nameserver dns.example.com",
+      "nameserver 10.0.0.1 # trailing words make it no plain address",
+      "search tail43a582.ts.net",
+      "nameserver 1.1.1.1",
+      "nameserver 8.8.8.8",
+      "nameserver 9.9.9.9",
+    ].join("\n");
+    expect(PodHostPorts.upstreamNameservers(resolvConf)).toEqual([
+      "192.168.1.1",
+      "1.1.1.1",
+      "8.8.8.8",
+    ]);
+    expect(PodHostPorts.upstreamNameservers("nameserver 127.0.0.53\n")).toEqual([]);
+    expect(PodHostPorts.upstreamNameservers("")).toEqual([]);
+  });
 });

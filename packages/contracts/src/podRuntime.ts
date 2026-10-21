@@ -367,9 +367,10 @@ export const PodRuntimeSettings = Schema.Struct({
    */
   publishOnTailnet: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
-   * Resolvers for each pod's Docker daemon and its stack, for hosts where
-   * Docker's own DNS fails on the pods network. Pods in hostname mode ask the
-   * proxy's DNS server first. Applies to pods created or recreated after.
+   * Resolvers for each pod's Docker daemon and its stack. Empty: a pod of
+   * ports asks the host's own upstream resolvers, since Docker's DNS on the
+   * pods network can fail. Pods in hostname mode ask the proxy's DNS server
+   * first. Applies to pods created or recreated after.
    */
   dnsServers: DnsServers.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   /** Host infrastructure only: it is the environment's, never a project's. */

@@ -537,6 +537,20 @@ const make = Effect.gen(function* () {
     };
   });
 
+  /**
+   * Explicit resolvers for the daemon and its stack. Docker's own DNS on the
+   * pods network can fail where the host's resolvers answer, so a pod of ports
+   * asks the host's upstreams unless the setting names others. A pod in
+   * hostname mode asks the proxy's DNS server first, which answers its domain
+   * and forwards the rest.
+   */
+  const podResolvers = (proxyDns: string | undefined, configured: ReadonlyArray<string>) =>
+    proxyDns !== undefined
+      ? Effect.succeed([proxyDns, ...configured])
+      : configured.length > 0
+        ? Effect.succeed(configured)
+        : hostNetwork.resolvConf.pipe(Effect.map(PodHostPorts.upstreamNameservers));
+
   const operationContext = Effect.fn("PodRuntimeService.operationContext")(function* (
     record: PodRuntimeRecord,
     operation: PodRuntimeOperation,
@@ -578,10 +592,7 @@ const make = Effect.gen(function* () {
       seeds: yield* seedsFor(root),
       podEnv: podServices.env,
       publish: podServices.publish,
-      dns: [
-        ...(podServices.record.dnsAddress === undefined ? [] : [podServices.record.dnsAddress]),
-        ...podRuntime.dnsServers,
-      ],
+      dns: yield* podResolvers(podServices.record.dnsAddress, podRuntime.dnsServers),
       proxyCaRoot: hostnameMode ? proxy.caRootPath : null,
     });
     return {
