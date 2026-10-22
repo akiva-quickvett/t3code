@@ -387,7 +387,9 @@ the published task result.
 Stops the child thread with the internal `thread.stop` command, then stops every
 task the child delegated, and disposes automatic parent delivery. Like a user Stop,
 `thread.stop` interrupts the running turn, holds queued turns, and ends pull request
-watches. A nonterminal task with no interruptible run is rejected. A terminal task
+watches. Unlike a user Stop, cancelling also releases the stopped threads' provider
+sessions, and the next message to one of them resumes it. A shared Codex or
+OpenCode process stays up for its other threads. A nonterminal task with no interruptible run is rejected. A terminal task
 returns its existing status, and its child thread still stops, including later
 runs and watch wakes. Published task results remain available. It accepts an
 optional cancellation reason. A supervised thread's task is the exception: see
