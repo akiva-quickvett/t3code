@@ -1,8 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-// Our fork's ids continue upstream's; when a merge of upstream brings its own 065, ours is
-// renumbered above it, so this may run on a database that already has the column.
+// A node rolled back to a pre-ledger build re-runs this as main 65 on a schema that has the column.
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(scheduled_tasks)`;
