@@ -420,10 +420,17 @@ export interface ThreadManagementServiceShape {
   readonly stopWorkflow: (
     input: OrchestrationV2StopWorkflowInput,
   ) => Effect.Effect<void, OrchestrationV2StopWorkflowError>;
+  /**
+   * Stops every non-supervised app-owned task `threadId` delegated, recursively.
+   * With `detachProviderSessions`, the caller is done with the stopped tree, so
+   * `threadId` (already stopped) and each thread this stops also release their
+   * provider sessions instead of holding a CLI process until idle release.
+   */
   readonly stopDelegatedTasks: (input: {
     readonly threadId: ThreadId;
     readonly commandId: CommandId;
     readonly reason?: string | undefined;
+    readonly detachProviderSessions?: boolean;
   }) => Effect.Effect<
     void,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
@@ -1101,7 +1108,38 @@ const make = Effect.gen(function* () {
 
   const stopDelegatedTasks: ThreadManagementServiceShape["stopDelegatedTasks"] = (input) =>
     Effect.gen(function* () {
-      const { subagents } = yield* orchestrator.getThreadRecords(input.threadId, ["subagents"]);
+      const { subagents, providerSessions } =
+        input.detachProviderSessions === true
+          ? yield* orchestrator.getThreadRecords(input.threadId, ["subagents", "providerSessions"])
+          : {
+              ...(yield* orchestrator.getThreadRecords(input.threadId, ["subagents"])),
+              providerSessions: [],
+            };
+      // A detached session leaves the thread's records and an idle-released one is
+      // stopped, so a repeated cancel finds nothing to detach. The thread stays
+      // resumable: its next turn opens a session and resumes the native thread.
+      // A message that lands between the stop and this detach starts a turn the
+      // detach then ends. Accepted: the window is two back-to-back dispatches, and
+      // the generic detach command cannot tell a cancel's detach from any other.
+      for (const session of providerSessions) {
+        if (session.status === "stopped" || session.status === "error") continue;
+        yield* dispatch({
+          type: "provider-session.detach",
+          commandId: CommandId.make(`${input.commandId}:detach:${input.threadId}:${session.id}`),
+          threadId: input.threadId,
+          providerSessionId: session.id,
+          reason: "Delegated task cancelled.",
+        }).pipe(
+          // Idle release still frees a session whose detach could not be recorded.
+          Effect.catch((error) =>
+            Effect.logWarning("Unable to detach a cancelled task's provider session", {
+              threadId: input.threadId,
+              providerSessionId: session.id,
+              error,
+            }),
+          ),
+        );
+      }
       const failures: Array<
         Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
       > = [];
