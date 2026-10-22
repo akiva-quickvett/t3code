@@ -34,6 +34,12 @@ const usage = {
   weekly: { usedPercent: 5, resetsAtMs: 1791763200000 },
 } satisfies MuseSubscriptionUsage;
 const nowMs = usage.observedAtMs;
+// The refusal this slice hit live (2026-10-22) while T3 still showed Muse headroom ok.
+const liveReset = "2026-10-22T07:58:42.000Z";
+const liveRefusal = {
+  message:
+    "API error 429 [request_id=826ba6da-a835-4b22-bc11-8270b7fa0fad]: Subscription quota exhausted. Your usage window resets at 2026-10-22T07:58:42Z. (rate_limit_error)",
+};
 // How Muse 1.4.6 ended a turn at a real quota stop (2026-10-13), relayed by a credential proxy.
 const realRefusal =
   "API error 429: All credentials for model muse-wonder-1.0-contributor are cooling down (last error: rate_limit_exceeded: Subscription quota exhausted. Your usage window resets at 2026-10-13T10:45:52Z.) (after 10 provider attempts)";
@@ -239,6 +245,42 @@ describe("Muse usage limit windows", () => {
     ]);
     expect(museUsageLimitResetAt(usage, nowMs, refusal)).toBe("2026-10-12T00:00:00.000Z");
   });
+
+  it.effect("stops at the refusal this slice hit live while Muse still read ok", () =>
+    Effect.gen(function* () {
+      expect(isMuseUsageLimitFailure(liveRefusal.message)).toBe(true);
+      const at = Date.parse("2026-10-22T05:12:00Z");
+      const pending = yield* pendingProvider;
+
+      const unreported = apply(pending, museQuotaRefusalUpdate(undefined, at, liveRefusal));
+      expect(project(unreported, at)).toMatchObject({
+        windows: [{ kind: "session", usedPercent: 100, resetsAt: liveReset }],
+        headroom: "exhausted",
+      });
+      expect(museUsageLimitResetAt(undefined, at, liveRefusal)).toBe(liveReset);
+
+      const report = {
+        observedAtMs: at - 60_000,
+        tier: "tier-1",
+        window: { usedPercent: 62, windowDurationMins: 300, resetsAtMs: Date.parse(liveReset) },
+        weekly: { usedPercent: 40, resetsAtMs: Date.parse("2026-10-26T00:00:00Z") },
+      } satisfies MuseSubscriptionUsage;
+      const reported = apply(pending, museUsageToUpdate(report));
+      expect(project(reported, at).headroom).toBe("ok");
+      const refused = apply(reported, museQuotaRefusalUpdate(report, at, liveRefusal));
+      expect(project(refused, at)).toMatchObject({
+        windows: [
+          { kind: "session", usedPercent: 100, resetsAt: liveReset },
+          { kind: "weekly", usedPercent: 40, resetsAt: "2026-10-26T00:00:00.000Z" },
+        ],
+        headroom: "exhausted",
+      });
+
+      const after = Date.parse(liveReset) + 1;
+      expect(museQuotaRefusalUpdate(report, after, liveRefusal)).toBeUndefined();
+      expect(museUsageLimitResetAt(report, after, liveRefusal)).toBeNull();
+    }),
+  );
 
   it.effect("attributes a refusal to the reported window its reset matches", () =>
     Effect.gen(function* () {

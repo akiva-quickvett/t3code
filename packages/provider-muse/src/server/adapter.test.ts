@@ -354,6 +354,9 @@ const SUBSCRIPTION_USAGE = {
 // How Muse ends a turn Meta refuses for quota (from a simulated Meta 429).
 const QUOTA_MESSAGE =
   "API error 429: Subscription quota exhausted. Your usage window resets soon. (rate_limit_error)";
+// The refusal this slice hit live (2026-10-22) while T3 still showed Muse headroom ok.
+const LIVE_QUOTA_MESSAGE =
+  "API error 429 [request_id=826ba6da-a835-4b22-bc11-8270b7fa0fad]: Subscription quota exhausted. Your usage window resets at 2026-10-22T07:58:42Z. (rate_limit_error)";
 // How Muse 1.4.6 ended a turn at a real quota stop (2026-10-13), relayed by a credential proxy.
 const RELAYED_QUOTA_MESSAGE =
   "API error 429: All credentials for model muse-wonder-1.0-contributor are cooling down (last error: rate_limit_exceeded: Subscription quota exhausted. Your usage window resets at 2026-10-13T10:45:52Z.) (after 10 provider attempts)";
@@ -723,6 +726,38 @@ describe("MuseAdapterV2", () => {
       assert.deepStrictEqual(
         refusal?.windows.map((window) => [window.usedPercent, window.resetsAt]),
         [[100, "2026-10-13T10:45:52.000Z"]],
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("stops at the refusal this slice hit live and publishes it as exhausted", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const updates: Array<Parameters<NonNullable<MuseAdapterV2Options["onUsageLimits"]>>[0]> = [];
+      const harness = yield* makeHarness(
+        fake,
+        INSTANCE_ID,
+        undefined,
+        undefined,
+        undefined,
+        runtimePolicy,
+        { onUsageLimits: (update) => Effect.sync(() => void updates.push(update)) },
+      );
+      const { nativeId } = yield* startConversation(harness, fake);
+      yield* fake.emit("turn/completed", {
+        turnId: nativeId,
+        terminal: "failed",
+        reason: LIVE_QUOTA_MESSAGE,
+        error: { kind: "modelError", message: LIVE_QUOTA_MESSAGE, retryable: false },
+      });
+      const terminal = yield* harness.takeEvent("turn.terminal");
+      assert.strictEqual(terminal.failure?.class, "usage_limit");
+      assert.strictEqual(terminal.failure?.resetAt, "2026-10-22T07:58:42.000Z");
+      assert.deepStrictEqual(
+        updates.flatMap((update) =>
+          update.windows.map((window) => [window.usedPercent, window.resetsAt]),
+        ),
+        [[100, "2026-10-22T07:58:42.000Z"]],
       );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
