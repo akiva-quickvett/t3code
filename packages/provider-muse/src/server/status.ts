@@ -10,6 +10,7 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import { createMuseSdkHost, makeMuseEnvironment } from "./sdk.ts";
 import { parseMuseVersion } from "./maintenance.ts";
 import { discoverMuseModels, museModelCapabilities } from "./modelCatalog.ts";
+import { museUsageLimitsBeforeReport } from "./usageLimits.ts";
 import {
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
@@ -34,10 +35,11 @@ const FALLBACK_CAPABILITIES = museModelCapabilities();
 export const makePendingMuseProvider = Effect.fn("makePendingMuseProvider")(function* (
   settings: MuseSettings,
 ) {
+  const checkedAt = DateTime.formatIso(yield* DateTime.now);
   return buildServerProvider({
     presentation: MUSE_PRESENTATION,
     enabled: settings.enabled,
-    checkedAt: DateTime.formatIso(yield* DateTime.now),
+    checkedAt,
     models: providerModelsFromSettings([], settings.customModels, FALLBACK_CAPABILITIES),
     slashCommands: settings.enabled ? [COMPACT_SLASH_COMMAND] : [],
     probe: {
@@ -45,6 +47,7 @@ export const makePendingMuseProvider = Effect.fn("makePendingMuseProvider")(func
       version: null,
       status: "warning",
       auth: { status: "unknown" },
+      ...(settings.enabled ? { usageLimits: museUsageLimitsBeforeReport(checkedAt) } : {}),
       message: settings.enabled
         ? "Checking Muse Code CLI availability..."
         : "Muse Code is disabled in T3 Code settings.",
@@ -68,7 +71,7 @@ export const checkMuseProviderStatus = Effect.fn("checkMuseProviderStatus")(func
       checkedAt,
       models: providerModelsFromSettings(models, settings.customModels, FALLBACK_CAPABILITIES),
       slashCommands: [COMPACT_SLASH_COMMAND],
-      probe,
+      probe: { ...probe, usageLimits: museUsageLimitsBeforeReport(checkedAt) },
     });
   const versionResult = yield* Effect.gen(function* () {
     const spawnCommand = yield* resolveSpawnCommand(settings.binaryPath, ["--version"], {

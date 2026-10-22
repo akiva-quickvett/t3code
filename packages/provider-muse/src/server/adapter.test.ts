@@ -196,7 +196,7 @@ const makeHarness = Effect.fnUntraced(function* (
   policy = runtimePolicy,
   overrides: Pick<
     MuseAdapterV2Options,
-    "createHost" | "nativeEventLogger" | "modelCatalog" | "continuationRequests"
+    "createHost" | "nativeEventLogger" | "modelCatalog" | "continuationRequests" | "onUsageLimits"
   > = {},
 ) {
   let hostCount = 0;
@@ -354,6 +354,9 @@ const SUBSCRIPTION_USAGE = {
 // How Muse ends a turn Meta refuses for quota (from a simulated Meta 429).
 const QUOTA_MESSAGE =
   "API error 429: Subscription quota exhausted. Your usage window resets soon. (rate_limit_error)";
+// The refusal this slice hit live (2026-10-22) while T3 still showed Muse headroom ok.
+const LIVE_QUOTA_MESSAGE =
+  "API error 429 [request_id=826ba6da-a835-4b22-bc11-8270b7fa0fad]: Subscription quota exhausted. Your usage window resets at 2026-10-22T07:58:42Z. (rate_limit_error)";
 // How Muse 1.4.6 ended a turn at a real quota stop (2026-10-13), relayed by a credential proxy.
 const RELAYED_QUOTA_MESSAGE =
   "API error 429: All credentials for model muse-wonder-1.0-contributor are cooling down (last error: rate_limit_exceeded: Subscription quota exhausted. Your usage window resets at 2026-10-13T10:45:52Z.) (after 10 provider attempts)";
@@ -635,12 +638,28 @@ describe("MuseAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
-  it.effect("limits a quota stop without a reset time when no report shows a used-up window", () =>
+  it.effect("resumes an untimed quota stop when the reported short window resets", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeMuse();
       const harness = yield* makeHarness(fake);
-      // The last report still had room in both windows, so it cannot say when Meta will allow more.
+      // The last report still had room, but Meta's untimed refusal names the short window.
       yield* fake.emitHostWide("usage/changed", SUBSCRIPTION_USAGE);
+      const { nativeId } = yield* startConversation(harness, fake);
+      yield* fake.emit("turn/completed", {
+        turnId: nativeId,
+        terminal: "failed",
+        error: { message: QUOTA_MESSAGE },
+      });
+      const terminal = yield* harness.takeEvent("turn.terminal");
+      assert.strictEqual(terminal.failure?.class, "usage_limit");
+      assert.strictEqual(terminal.failure?.resetAt, "2026-10-08T13:19:17.000Z");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("leaves an untimed quota stop without a reset time before any report", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const harness = yield* makeHarness(fake);
       const { nativeId } = yield* startConversation(harness, fake);
       yield* fake.emit("turn/completed", {
         turnId: nativeId,
@@ -668,6 +687,78 @@ describe("MuseAdapterV2", () => {
       const terminal = yield* harness.takeEvent("turn.terminal");
       assert.strictEqual(terminal.failure?.class, "usage_limit");
       assert.strictEqual(terminal.failure?.resetAt, "2026-10-13T10:45:52.000Z");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("publishes each report and a quota stop to the instance's usage limits", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const updates: Array<Parameters<NonNullable<MuseAdapterV2Options["onUsageLimits"]>>[0]> = [];
+      const harness = yield* makeHarness(
+        fake,
+        INSTANCE_ID,
+        undefined,
+        undefined,
+        undefined,
+        runtimePolicy,
+        { onUsageLimits: (update) => Effect.sync(() => void updates.push(update)) },
+      );
+      yield* fake.emitHostWide("usage/changed", SUBSCRIPTION_USAGE);
+      const { nativeId } = yield* startConversation(harness, fake);
+      yield* fake.emit("turn/completed", {
+        turnId: nativeId,
+        terminal: "failed",
+        reason: RELAYED_QUOTA_MESSAGE,
+        error: { kind: "modelError", message: RELAYED_QUOTA_MESSAGE, retryable: true },
+      });
+      yield* harness.takeEvent("turn.terminal");
+      const [report, refusal] = updates;
+      assert.strictEqual(updates.length, 2);
+      assert.strictEqual(report?.checkedAt, "2026-10-08T08:22:42.610Z");
+      assert.deepStrictEqual(
+        report?.windows.map((window) => [window.id, window.usedPercent, window.resetsAt]),
+        [
+          ["window", 0, "2026-10-08T13:19:17.000Z"],
+          ["weekly", 5, "2026-10-12T00:00:00.000Z"],
+        ],
+      );
+      // Which window the refusal marks depends on the clock; usageLimits.test.ts covers that.
+      assert.deepStrictEqual(
+        refusal?.windows.map((window) => [window.usedPercent, window.resetsAt]),
+        [[100, "2026-10-13T10:45:52.000Z"]],
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("stops at the refusal this slice hit live and publishes it as exhausted", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const updates: Array<Parameters<NonNullable<MuseAdapterV2Options["onUsageLimits"]>>[0]> = [];
+      const harness = yield* makeHarness(
+        fake,
+        INSTANCE_ID,
+        undefined,
+        undefined,
+        undefined,
+        runtimePolicy,
+        { onUsageLimits: (update) => Effect.sync(() => void updates.push(update)) },
+      );
+      const { nativeId } = yield* startConversation(harness, fake);
+      yield* fake.emit("turn/completed", {
+        turnId: nativeId,
+        terminal: "failed",
+        reason: LIVE_QUOTA_MESSAGE,
+        error: { kind: "modelError", message: LIVE_QUOTA_MESSAGE, retryable: false },
+      });
+      const terminal = yield* harness.takeEvent("turn.terminal");
+      assert.strictEqual(terminal.failure?.class, "usage_limit");
+      assert.strictEqual(terminal.failure?.resetAt, "2026-10-22T07:58:42.000Z");
+      assert.deepStrictEqual(
+        updates.flatMap((update) =>
+          update.windows.map((window) => [window.usedPercent, window.resetsAt]),
+        ),
+        [[100, "2026-10-22T07:58:42.000Z"]],
+      );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

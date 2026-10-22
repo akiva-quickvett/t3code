@@ -810,9 +810,7 @@ export function agentHeadroom(
 
 /**
  * The agent-safe view of one instance's limits. An instance with no snapshot
- * reports `unsupported`: Pi (history only), ACP registry agents, and Muse,
- * whose windows arrive only inside a turn (`usage/changed`, used for limit
- * recovery) and which has no probe to publish them between turns.
+ * reports `unsupported`, such as Pi (history only) and ACP registry agents.
  */
 export function projectAgentUsageLimits(
   provider: ServerProvider,

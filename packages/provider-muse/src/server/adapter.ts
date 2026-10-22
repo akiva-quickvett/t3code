@@ -62,7 +62,12 @@ import {
   museApprovalOptions,
   type MuseItem,
 } from "./protocol.ts";
-import { isMuseUsageLimitFailure, museUsageLimitResetAt } from "./usageLimits.ts";
+import {
+  isMuseUsageLimitFailure,
+  museQuotaRefusalUpdate,
+  museUsageLimitResetAt,
+  museUsageToUpdate,
+} from "./usageLimits.ts";
 import {
   createMuseSdkHostEffect,
   museApprovalMode,
@@ -72,6 +77,7 @@ import {
   type MuseSdkHost,
 } from "./sdk.ts";
 import type * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
 import {
   providerMessageTextWithAttachmentPaths,
   isProviderNativeImageAttachment,
@@ -196,6 +202,7 @@ export interface MuseAdapterV2Options {
   readonly createHost?: typeof createMuseSdkHost;
   readonly requestTimeoutMs?: number;
   readonly nativeEventLogger?: ProviderEventLoggers.EventNdjsonLogger;
+  readonly onUsageLimits?: ManagedServerProvider["applyUsageLimits"];
   readonly continuationRequests?: {
     readonly offer: (
       request: ProviderContinuationRequests.ProviderContinuationRequest,
@@ -995,6 +1002,18 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
                 }
               : {}),
           });
+          const refusal = usageLimited
+            ? museQuotaRefusalUpdate(latestSubscriptionUsage, DateTime.toEpochMillis(completedAt), {
+                quota,
+                message: detail,
+              })
+            : undefined;
+          if (refusal && options.onUsageLimits) {
+            yield* options.onUsageLimits({
+              ...refusal,
+              checkedAt: DateTime.formatIso(completedAt),
+            });
+          }
           const base = baseItem(turn, `failure:${turn.nativeId}`, completedAt);
           yield* emit({
             type: "turn_item.updated",
@@ -1270,6 +1289,14 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         // Account-wide, so it names no session: Meta's subscription windows after a response.
         if (method === "usage/changed") {
           latestSubscriptionUsage = yield* decode(MuseSubscriptionUsage, params);
+          if (options.onUsageLimits) {
+            yield* options.onUsageLimits({
+              ...museUsageToUpdate(latestSubscriptionUsage),
+              checkedAt: DateTime.formatIso(
+                DateTime.makeUnsafe(latestSubscriptionUsage.observedAtMs),
+              ),
+            });
+          }
           return;
         }
         if (params.sessionId !== nativeSessionId) return;
