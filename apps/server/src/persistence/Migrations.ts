@@ -200,8 +200,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
-  // Fork ledger work only on a full run; partial runs replay an upstream history.
-  if (toMigrationInclusive === undefined) yield* reconcileLegacyForkMigrations();
+  yield* reconcileLegacyForkMigrations();
   if (includesV2) {
     yield* assertV2MigrationsCanRun(toMigrationInclusive);
   }
@@ -213,6 +212,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
+  // Fork bodies need upstream's tables, so they run only on a full run.
   if (toMigrationInclusive === undefined) yield* runForkMigrations();
 
   const sql = yield* SqlClient.SqlClient;

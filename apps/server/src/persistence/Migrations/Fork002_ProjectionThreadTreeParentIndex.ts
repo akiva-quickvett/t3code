@@ -12,7 +12,7 @@ export const PROJECTION_THREAD_TREE_PARENT = `CASE WHEN json_valid(payload_json)
     THEN json_extract(payload_json, '$.lineage.parentThreadId') END
 ) END`;
 
-// Fork ledger id 2. IF NOT EXISTS keeps it harmless if the index already exists.
+// A node rolled back to a pre-ledger build re-runs this as main 66 on a schema that has the index.
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql.unsafe(

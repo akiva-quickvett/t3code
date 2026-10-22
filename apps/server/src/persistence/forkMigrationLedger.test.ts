@@ -1,12 +1,11 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { forkMigrationEntries } from "./ForkMigrations.ts";
-import { migrationEntries, migrationManifest, runMigrations } from "./Migrations.ts";
+import { forkMigrationEntries, reconcileLegacyForkMigrations } from "./ForkMigrations.ts";
+import { migrationManifest, runMigrations } from "./Migrations.ts";
 
 const LAST_SHARED_UPSTREAM_ID = 64;
 const forkManifest = forkMigrationEntries.map(([id, name]) => [id, name] as const);
@@ -18,6 +17,12 @@ const legacyForkLayout = [
   [67, "ChatChannels", "2026-08-03 00:00:00"],
   [68, "PodRuntimes", "2026-08-04 00:00:00"],
 ] as const;
+
+const movedForkLedger = legacyForkLayout.map(([id, name, created_at]) => ({
+  migration_id: id - LAST_SHARED_UPSTREAM_ID,
+  name,
+  created_at,
+}));
 
 const ledger = (table: string) =>
   Effect.gen(function* () {
@@ -45,6 +50,8 @@ const schemaObject = (type: "table" | "index", name: string) =>
     return rows.length === 1;
   });
 
+const forkLedgerExists = schemaObject("table", "fork_effect_sql_migrations");
+
 const hasActionJsonColumn = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(scheduled_tasks)`;
@@ -59,6 +66,10 @@ const forkArtefacts = Effect.all([
   schemaObject("table", "pod_runtimes"),
 ]);
 
+const migrateThroughSharedUpstream = runMigrations({
+  toMigrationInclusive: LAST_SHARED_UPSTREAM_ID,
+});
+
 /**
  * The database as live fork nodes hold it today: upstream through 64, then the fork migration
  * bodies applied by the same migrator and recorded in the main ledger at 65.., with distinct
@@ -67,7 +78,7 @@ const forkArtefacts = Effect.all([
 const seedLegacyForkDatabase = (count: number = legacyForkLayout.length) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations({ toMigrationInclusive: LAST_SHARED_UPSTREAM_ID });
+    yield* migrateThroughSharedUpstream;
     const layout = legacyForkLayout.slice(0, count);
     const executed = yield* Migrator.make({})({
       loader: Migrator.fromRecord(
@@ -88,32 +99,37 @@ const seedLegacyForkDatabase = (count: number = legacyForkLayout.length) =>
     }
   });
 
-const marker = (name: string) =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql.unsafe(`CREATE TABLE ${name}_marker (id INTEGER)`);
+// Upstream migrations stand-ins, run by the main-ledger migrator the way runMigrations runs it.
+const runUpstreamStubs = (stubs: ReadonlyArray<readonly [number, string]>) =>
+  Migrator.make({})({
+    loader: Migrator.fromRecord(
+      Object.fromEntries(
+        stubs.map(([id, name]) => [
+          `${id}_${name}`,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql.unsafe(`CREATE TABLE ${name}_marker (id INTEGER)`);
+          }),
+        ]),
+      ),
+    ),
   });
 
-// Stand-ins for upstream's next migrations, loaded the way runMigrations loads the main ledger.
-const upstreamStubs = [
-  [65, "CodexUsageNativeTurnIndex"],
-  [66, "RepairClientSettlementTimestamps"],
-  [67, "WebhookDedupe"],
-] as const;
+const stubMarkers = (stubs: ReadonlyArray<readonly [number, string]>) =>
+  Effect.forEach(stubs, ([, name]) => schemaObject("table", `${name}_marker`));
 
-const runMainLedgerWithUpstreamStubs = Migrator.make({})({
-  loader: Migrator.fromRecord({
-    ...Object.fromEntries(
-      migrationEntries.map(([id, name, migration]) => [`${id}_${name}`, migration]),
-    ),
-    ...Object.fromEntries(upstreamStubs.map(([id, name]) => [`${id}_${name}`, marker(name)])),
-  }),
-});
+const expectBadState = (message: string) =>
+  Effect.gen(function* () {
+    const error = yield* Effect.flip(runMigrations());
+    assert.instanceOf(error, Migrator.MigrationError);
+    assert.strictEqual(error.kind, "BadState");
+    assert.include(error.message, message);
+  });
 
-const upstreamStubMarkers = Effect.all(
-  upstreamStubs.map(([, name]) => schemaObject("table", `${name}_marker`)),
+const maxManifestId = Math.max(...migrationManifest.map(([id]) => id));
+const manifestThroughSharedUpstream = migrationManifest.filter(
+  ([id]) => id <= LAST_SHARED_UPSTREAM_ID,
 );
-
 const migrationsAfterSharedUpstream = migrationManifest.filter(
   ([id]) => id > LAST_SHARED_UPSTREAM_ID,
 );
@@ -141,6 +157,16 @@ describe("fork migration ledger", () => {
     }).pipe(Effect.provide(sqlite)),
   );
 
+  it.effect("a bounded run on a fresh database neither creates nor runs the fork ledger", () =>
+    Effect.gen(function* () {
+      yield* migrateThroughSharedUpstream;
+
+      assert.deepStrictEqual(yield* mainHistory, manifestThroughSharedUpstream);
+      assert.isFalse(yield* forkLedgerExists);
+      assert.deepStrictEqual(yield* forkArtefacts, [false, false, false, false]);
+    }).pipe(Effect.provide(sqlite)),
+  );
+
   it.effect("moves a legacy fork history into the fork ledger without re-running it", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -158,14 +184,7 @@ describe("fork migration ledger", () => {
       assert.deepStrictEqual(yield* runMigrations(), migrationsAfterSharedUpstream);
 
       assert.deepStrictEqual(yield* mainHistory, migrationManifest);
-      assert.deepStrictEqual(
-        yield* ledger("fork_effect_sql_migrations"),
-        legacyForkLayout.map(([id, name, created_at]) => ({
-          migration_id: id - LAST_SHARED_UPSTREAM_ID,
-          name,
-          created_at,
-        })),
-      );
+      assert.deepStrictEqual(yield* ledger("fork_effect_sql_migrations"), movedForkLedger);
       assert.deepStrictEqual(yield* forkArtefacts, [false, false, true, false]);
       assert.isFalse(yield* schemaObject("table", "chat_settings"));
       assert.deepStrictEqual(yield* sql`SELECT channel_id FROM chat_channels`, [
@@ -199,47 +218,73 @@ describe("fork migration ledger", () => {
     }).pipe(Effect.provide(sqlite)),
   );
 
+  it.effect.each([54, LAST_SHARED_UPSTREAM_ID])(
+    "a run bounded at %s moves a legacy fork history",
+    (toMigrationInclusive) =>
+      Effect.gen(function* () {
+        yield* seedLegacyForkDatabase();
+
+        assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive }), []);
+
+        assert.deepStrictEqual(yield* mainHistory, manifestThroughSharedUpstream);
+        assert.deepStrictEqual(yield* ledger("fork_effect_sql_migrations"), movedForkLedger);
+      }).pipe(Effect.provide(sqlite)),
+  );
+
   it.effect.each(["CodexUsageNativeTurnIndex", "ChatChannels"])(
     "leaves %s recorded at 65 in the main ledger",
     (name) =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        yield* runMigrations({ toMigrationInclusive: LAST_SHARED_UPSTREAM_ID });
+        yield* migrateThroughSharedUpstream;
         yield* sql`
           INSERT INTO effect_sql_migrations (migration_id, name, created_at)
           VALUES (65, ${name}, '2026-09-01 00:00:00')
         `;
-
-        assert.deepStrictEqual(yield* runMigrations(), []);
-
-        assert.deepStrictEqual(
-          yield* sql`SELECT * FROM effect_sql_migrations WHERE migration_id = 65`,
-          [{ migration_id: 65, name, created_at: "2026-09-01 00:00:00" }],
-        );
-        assert.deepStrictEqual(yield* forkHistory, forkManifest);
-        assert.deepStrictEqual(yield* forkArtefacts, [true, true, true, true]);
-      }).pipe(Effect.provide(sqlite)),
-  );
-
-  it.effect.each([54, LAST_SHARED_UPSTREAM_ID])(
-    "a run bounded at %s leaves a legacy fork history in place",
-    (toMigrationInclusive) =>
-      Effect.gen(function* () {
-        yield* seedLegacyForkDatabase();
         const main = yield* ledger("effect_sql_migrations");
 
-        assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive }), []);
+        yield* reconcileLegacyForkMigrations();
 
         assert.deepStrictEqual(yield* ledger("effect_sql_migrations"), main);
-        assert.isFalse(yield* schemaObject("table", "fork_effect_sql_migrations"));
+        assert.isFalse(yield* forkLedgerExists);
       }).pipe(Effect.provide(sqlite)),
   );
 
-  it.effect("rolls the move back when it fails part way and retries cleanly", () =>
+  it.effect("refuses a fork id recorded under another name", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* seedLegacyForkDatabase();
-      const main = yield* ledger("effect_sql_migrations");
+      yield* runMigrations();
+      yield* sql`UPDATE fork_effect_sql_migrations SET name = 'Other' WHERE migration_id = 3`;
+
+      yield* expectBadState("3_ChatChannels (recorded: Other)");
+    }).pipe(Effect.provide(sqlite)),
+  );
+
+  it.effect("refuses a fork history with a gap below its highest id", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations();
+      yield* sql`DELETE FROM fork_effect_sql_migrations WHERE migration_id = 2`;
+
+      yield* expectBadState("2_ProjectionThreadTreeParentIndex (recorded: nothing)");
+    }).pipe(Effect.provide(sqlite)),
+  );
+
+  it.effect("still starts after a newer build recorded a later fork migration", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations();
+      yield* sql`INSERT INTO fork_effect_sql_migrations (migration_id, name) VALUES (5, 'Newer')`;
+
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* forkHistory, [...forkManifest, [5, "Newer"]]);
+    }).pipe(Effect.provide(sqlite)),
+  );
+
+  it.effect("rolls the move back when the fork ledger already holds another name", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* seedLegacyForkDatabase(1);
       yield* sql`
         CREATE TABLE fork_effect_sql_migrations (
           migration_id integer PRIMARY KEY NOT NULL,
@@ -247,34 +292,33 @@ describe("fork migration ledger", () => {
           name VARCHAR(255) NOT NULL
         )
       `;
-      yield* sql`
-        CREATE TRIGGER fail_fork_move BEFORE INSERT ON fork_effect_sql_migrations
-        WHEN NEW.migration_id = 3
-        BEGIN SELECT RAISE(ABORT, 'injected failure'); END
-      `;
+      yield* sql`INSERT INTO fork_effect_sql_migrations (migration_id, name) VALUES (1, 'Other')`;
+      const main = yield* ledger("effect_sql_migrations");
+      const fork = yield* ledger("fork_effect_sql_migrations");
 
-      assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+      yield* expectBadState("1_ScheduledTaskActions (recorded: Other)");
+
       assert.deepStrictEqual(yield* ledger("effect_sql_migrations"), main);
-      assert.deepStrictEqual(yield* forkHistory, []);
-
-      yield* sql`DROP TRIGGER fail_fork_move`;
-      assert.deepStrictEqual(yield* runMigrations(), migrationsAfterSharedUpstream);
-      assert.deepStrictEqual(yield* mainHistory, migrationManifest);
-      assert.deepStrictEqual(yield* forkHistory, forkManifest);
+      assert.deepStrictEqual(yield* ledger("fork_effect_sql_migrations"), fork);
     }).pipe(Effect.provide(sqlite)),
   );
 
-  describe("upstream migrations after 64", () => {
+  describe("upstream migrations", () => {
     it.effect("apply normally once the legacy fork history is moved", () =>
       Effect.gen(function* () {
+        const nextUpstream = [
+          [maxManifestId + 1, "NextUpstreamA"],
+          [maxManifestId + 2, "NextUpstreamB"],
+          [maxManifestId + 3, "NextUpstreamC"],
+        ] as const;
         yield* seedLegacyForkDatabase();
         yield* runMigrations();
         const fork = yield* ledger("fork_effect_sql_migrations");
 
-        assert.deepStrictEqual(yield* runMainLedgerWithUpstreamStubs, upstreamStubs);
+        assert.deepStrictEqual(yield* runUpstreamStubs(nextUpstream), nextUpstream);
 
-        assert.deepStrictEqual(yield* mainHistory, [...migrationManifest, ...upstreamStubs]);
-        assert.deepStrictEqual(yield* upstreamStubMarkers, [true, true, true]);
+        assert.deepStrictEqual(yield* mainHistory, [...migrationManifest, ...nextUpstream]);
+        assert.deepStrictEqual(yield* stubMarkers(nextUpstream), [true, true, true]);
         assert.deepStrictEqual(yield* ledger("fork_effect_sql_migrations"), fork);
       }).pipe(Effect.provide(sqlite)),
     );
@@ -282,11 +326,16 @@ describe("fork migration ledger", () => {
     // Why the move exists: the migrator skips every id up to the highest recorded one.
     it.effect("would be skipped while fork migrations still hold 65-68", () =>
       Effect.gen(function* () {
+        const upstream65To67 = [
+          [65, "CodexUsageNativeTurnIndex"],
+          [66, "RepairClientSettlementTimestamps"],
+          [67, "WebhookDedupe"],
+        ] as const;
         yield* seedLegacyForkDatabase();
 
-        assert.deepStrictEqual(yield* runMainLedgerWithUpstreamStubs, []);
+        assert.deepStrictEqual(yield* runUpstreamStubs(upstream65To67), []);
 
-        assert.deepStrictEqual(yield* upstreamStubMarkers, [false, false, false]);
+        assert.deepStrictEqual(yield* stubMarkers(upstream65To67), [false, false, false]);
         assert.deepStrictEqual(
           (yield* mainHistory).slice(-4),
           legacyForkLayout.map(([id, name]) => [id, name]),
