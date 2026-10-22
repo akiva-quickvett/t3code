@@ -2654,8 +2654,16 @@ const make = Effect.gen(function* () {
                 ),
               ),
             );
+          // Unlike a user's Stop, a cancel expects no immediate follow-up, so the
+          // stopped threads' provider processes go now rather than at idle release.
+          // A later message still resumes them.
           yield* threadManagement
-            .stopDelegatedTasks({ threadId: current.childThreadId, commandId, reason })
+            .stopDelegatedTasks({
+              threadId: current.childThreadId,
+              commandId,
+              reason,
+              detachProviderSessions: true,
+            })
             .pipe(
               Effect.mapError((error) =>
                 failure(

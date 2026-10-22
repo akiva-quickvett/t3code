@@ -271,6 +271,8 @@ export function layerWithRegistry<Error>(
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
     readonly supervisedWakes?: boolean;
+    /** Runs effects against the real ThreadManagementService, e.g. a Stop's delegated-task cascade. */
+    readonly realThreadManagement?: boolean;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -468,18 +470,30 @@ export function layerWithRegistry<Error>(
       ),
     ),
   );
-  const layerThreadManagementProvided = Layer.unwrap(
-    Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      return Layer.mock(ThreadManagementService.ThreadManagementService)({
-        dispatch: orchestrator.dispatch,
-        getThreadRecords: orchestrator.getThreadRecords,
-        getThreadProjection: orchestrator.getThreadProjection,
-        recoverDelegatedTask: orchestrator.recoverDelegatedTask,
-        delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
-      });
-    }),
-  ).pipe(Layer.provide(layerOrchestratorProvided));
+  const layerThreadManagementProvided =
+    options.realThreadManagement === true
+      ? ThreadManagementService.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              layerOrchestratorProvided,
+              layerProviderSessionManagerProvided,
+              layerServerSettings,
+              layerCommandReceiptStoreProvided,
+            ),
+          ),
+        )
+      : Layer.unwrap(
+          Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            return Layer.mock(ThreadManagementService.ThreadManagementService)({
+              dispatch: orchestrator.dispatch,
+              getThreadRecords: orchestrator.getThreadRecords,
+              getThreadProjection: orchestrator.getThreadProjection,
+              recoverDelegatedTask: orchestrator.recoverDelegatedTask,
+              delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
+            });
+          }),
+        ).pipe(Layer.provide(layerOrchestratorProvided));
   const layerContinuationWorkerProvided =
     options.runContinuationWorker === true
       ? ProviderContinuationService.layer.pipe(
