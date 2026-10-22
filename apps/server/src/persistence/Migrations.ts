@@ -2,6 +2,7 @@ import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
+import { reconcileLegacyForkMigrations, runForkMigrations } from "./ForkMigrations.ts";
 
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
 import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
@@ -67,10 +68,6 @@ import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
 import Migration0062 from "./Migrations/062_ThreadFailureLookupIndex.ts";
 import Migration0063 from "./Migrations/063_DropUnusedV1Projections.ts";
 import Migration0064 from "./Migrations/064_CanonicalizeThreadPullRequestLinks.ts";
-import Migration0065 from "./Migrations/065_ScheduledTaskActions.ts";
-import Migration0066 from "./Migrations/066_ProjectionThreadTreeParentIndex.ts";
-import Migration0067 from "./Migrations/067_ChatChannels.ts";
-import Migration0068 from "./Migrations/068_PodRuntimes.ts";
 
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -138,10 +135,6 @@ export const migrationEntries = [
   [62, "ThreadFailureLookupIndex", Migration0062],
   [63, "DropUnusedV1Projections", Migration0063],
   [64, "CanonicalizeThreadPullRequestLinks", Migration0064],
-  [65, "ScheduledTaskActions", Migration0065],
-  [66, "ProjectionThreadTreeParentIndex", Migration0066],
-  [67, "ChatChannels", Migration0067],
-  [68, "PodRuntimes", Migration0068],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -207,6 +200,8 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
+  // Fork ledger work only on a full run; partial runs replay an upstream history.
+  if (toMigrationInclusive === undefined) yield* reconcileLegacyForkMigrations();
   if (includesV2) {
     yield* assertV2MigrationsCanRun(toMigrationInclusive);
   }
@@ -218,6 +213,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
+  if (toMigrationInclusive === undefined) yield* runForkMigrations();
 
   const sql = yield* SqlClient.SqlClient;
   const recorded = yield* sql<{
