@@ -163,6 +163,7 @@ export const MuseDriver: ProviderDriver<MuseSettings, MuseDriverEnv> = {
         environment: processEnvironment,
         modelCatalog,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        onUsageLimits: (update) => snapshot.applyUsageLimits(update),
         continuationRequests,
       });
       const textGeneration = yield* makeMuseTextGeneration(effectiveConfig, {

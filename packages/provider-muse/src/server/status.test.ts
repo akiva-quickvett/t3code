@@ -60,6 +60,7 @@ it.layer(NodeServices.layer)("Muse status", (it) => {
       const createHost = vi.fn(async () => makeHost(metaCatalog));
       const snapshot = yield* checkMuseProviderStatus(settings({}), {}, undefined, createHost);
       expect(snapshot.status).toBe("disabled");
+      expect(snapshot.usageLimits).toBeUndefined();
       expect(createHost).not.toHaveBeenCalled();
     }),
   );
@@ -73,6 +74,8 @@ it.layer(NodeServices.layer)("Muse status", (it) => {
       expect(snapshot.status).toBe("error");
       expect(snapshot.message).toContain("muse login");
       expect(snapshot.message).toContain("this T3 server host");
+      // Muse publishes limits only with a reply, so a status check leaves them unknown.
+      expect(snapshot.usageLimits?.unavailable?.reason).toBe("probeFailed");
     }),
   );
 
@@ -110,6 +113,10 @@ it.layer(NodeServices.layer)("Muse status", (it) => {
         );
         expect(snapshot.status).toBe("ready");
         expect(snapshot.message).toBeUndefined();
+        expect(snapshot.usageLimits).toMatchObject({
+          windows: [],
+          unavailable: { reason: "probeFailed" },
+        });
         expect(snapshot.slashCommands).toEqual([COMPACT_SLASH_COMMAND]);
         expect(snapshot.auth).toEqual({ status: "unknown" });
         expect(snapshot.version).toBe("1.0.3-R2198.1");
