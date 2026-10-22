@@ -231,6 +231,26 @@ describe("fork migration ledger", () => {
       }).pipe(Effect.provide(sqlite)),
   );
 
+  it.effect("moves fork rows again after a rollback to a pre-ledger build re-recorded them", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* seedLegacyForkDatabase();
+      yield* migrateThroughSharedUpstream;
+      // The rolled-back build re-runs its migrations 65-68 and records them in the main ledger.
+      for (const [id, name] of legacyForkLayout) {
+        yield* sql`
+          INSERT INTO effect_sql_migrations (migration_id, name, created_at)
+          VALUES (${id}, ${name}, '2026-09-10 00:00:00')
+        `;
+      }
+
+      assert.deepStrictEqual(yield* runMigrations(), migrationsAfterSharedUpstream);
+
+      assert.deepStrictEqual(yield* mainHistory, migrationManifest);
+      assert.deepStrictEqual(yield* ledger("fork_effect_sql_migrations"), movedForkLedger);
+    }).pipe(Effect.provide(sqlite)),
+  );
+
   it.effect.each(["CodexUsageNativeTurnIndex", "ChatChannels"])(
     "leaves %s recorded at 65 in the main ledger",
     (name) =>
@@ -323,8 +343,9 @@ describe("fork migration ledger", () => {
       }).pipe(Effect.provide(sqlite)),
     );
 
-    // Why the move exists: the migrator skips every id up to the highest recorded one.
-    it.effect("would be skipped while fork migrations still hold 65-68", () =>
+    // Guards the library premise behind the move, not fork code: Effect's migrator skips every id
+    // up to the highest recorded one, so fork rows at 65-68 would hide upstream's 065-067.
+    it.effect("Effect's migrator would skip them while fork migrations hold 65-68", () =>
       Effect.gen(function* () {
         const upstream65To67 = [
           [65, "CodexUsageNativeTurnIndex"],
