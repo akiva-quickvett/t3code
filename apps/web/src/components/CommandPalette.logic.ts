@@ -13,6 +13,7 @@ import {
   type PodRuntimeAction,
   podRuntimeActions,
   podServiceLinks,
+  podServiceShareTarget,
   type PodServiceLink,
 } from "@t3tools/client-runtime/state/pod-runtime";
 import type { SidebarThreadSortOrder } from "@t3tools/contracts/settings";
@@ -80,24 +81,44 @@ export function buildPodActionItems(input: {
   });
 }
 
-/** The active thread's running pod services, each opening in an environment browser tab. */
+/**
+ * The active thread's running pod services, each opening in an environment
+ * browser tab, and each URL to copy as it best reaches the service from here.
+ */
 export function buildPodServiceItems(input: {
   readonly pod: PodRuntimeSnapshot;
   readonly icon: ReactNode;
+  readonly copyIcon: ReactNode;
   readonly allowed: boolean;
+  readonly clientOnHost: boolean;
   readonly open: (link: PodServiceLink) => Promise<void>;
+  readonly copy: (link: PodServiceLink, url: string) => Promise<void>;
 }): CommandPaletteActionItem[] {
-  return podServiceLinks(input.pod).map((link) => {
+  return podServiceLinks(input.pod).flatMap((link): CommandPaletteActionItem[] => {
     const title = `Open pod service: ${link.name}`;
-    return {
-      kind: "action",
-      value: `action:pod-service:${link.name}`,
-      searchTerms: [title, "pod container browser preview", link.url],
-      title,
-      disabled: !input.allowed,
-      icon: input.icon,
-      run: () => input.open(link),
-    };
+    const share = podServiceShareTarget(link, input.clientOnHost);
+    const copyTitle = `Copy pod service URL: ${link.name}${
+      share.reachLabel === null ? "" : ` (${share.reachLabel})`
+    }`;
+    return [
+      {
+        kind: "action",
+        value: `action:pod-service:${link.name}`,
+        searchTerms: [title, "pod container browser preview", link.url],
+        title,
+        disabled: !input.allowed,
+        icon: input.icon,
+        run: () => input.open(link),
+      },
+      {
+        kind: "action",
+        value: `action:pod-service-copy:${link.name}`,
+        searchTerms: [copyTitle, "pod container link clipboard", share.url],
+        title: copyTitle,
+        icon: input.copyIcon,
+        run: () => input.copy(link, share.url),
+      },
+    ];
   });
 }
 
