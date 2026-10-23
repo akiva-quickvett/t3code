@@ -513,6 +513,151 @@ describe("CursorAdapterV2", () => {
     ),
   );
 
+  it.effect("marks only a completed /compress turn as a compaction", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-v2-compact-" });
+      // Ordinary turn, failed /compress, then completed /compress.
+      const runStatuses = ["finished", "error", "finished"] as const;
+      let sendCalls = 0;
+      const instanceId = ProviderInstanceId.make("cursor");
+      const threadId = ThreadId.make("cursor-compaction-thread");
+      const modelSelection = { instanceId, model: "composer-2.5" };
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: workspace,
+      });
+      const adapter = yield* makeCursorAdapterV2({
+        instanceId,
+        settings: yield* decodeCursorSettings({}),
+        environment: { HOME: workspace },
+      }).pipe(
+        Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
+          assertComplete: Effect.void,
+          open: () =>
+            Effect.succeed({
+              agentId: "native-cursor-compaction",
+              listMessages: Effect.succeed([]),
+              close: Effect.void,
+              send: () =>
+                Effect.sync(() => {
+                  const status = runStatuses[sendCalls] ?? "finished";
+                  sendCalls += 1;
+                  const runId = `native-cursor-compaction-run-${sendCalls}`;
+                  return {
+                    agentId: "native-cursor-compaction",
+                    runId,
+                    wait: Effect.succeed({
+                      id: runId,
+                      requestId: `native-compaction-request-${sendCalls}`,
+                      status,
+                      model: { id: "composer-2.5" },
+                      durationMs: 1,
+                    }),
+                    cancel: Effect.void,
+                  };
+                }),
+            }),
+        }),
+        Effect.provide(TestProviderHost.layer({ cwd: workspace })),
+      );
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("cursor-compaction-session"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const now = yield* DateTime.now;
+      const appThread = {
+        id: threadId,
+        projectId: ProjectId.make("cursor-compaction-project"),
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        title: "Cursor compaction",
+        providerInstanceId: instanceId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: providerThread.id,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      };
+      const turnInput = (ordinal: number, text: string) => ({
+        threadId,
+        providerThread,
+        modelSelection,
+        runtimePolicy,
+        runId: RunId.make(`cursor-compaction-run-${ordinal}`),
+        runOrdinal: ordinal,
+        providerTurnOrdinal: ordinal,
+        attemptId: RunAttemptId.make(`cursor-compaction-attempt-${ordinal}`),
+        rootNodeId: NodeId.make(`cursor-compaction-root-${ordinal}`),
+        appThread,
+        message: {
+          messageId: MessageId.make(`cursor-compaction-message-${ordinal}`),
+          createdBy: "user" as const,
+          creationSource: "web" as const,
+          text,
+          attachments: [],
+        },
+      });
+      const compactionItemsUntilTerminal = runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.map((events) =>
+          Array.from(events).flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "compaction"
+              ? [event.turnItem]
+              : [],
+          ),
+        ),
+      );
+
+      yield* runtime.startTurn(turnInput(1, "continue"));
+      assert.deepStrictEqual(yield* compactionItemsUntilTerminal, []);
+
+      yield* runtime.compactThread!(turnInput(2, "/compact"));
+      assert.deepStrictEqual(yield* compactionItemsUntilTerminal, []);
+
+      yield* runtime.compactThread!(turnInput(3, "/compact"));
+      const compactions = yield* compactionItemsUntilTerminal;
+      assert.equal(compactions.length, 1);
+      assert.deepInclude(compactions[0], {
+        type: "compaction",
+        status: "completed",
+        title: "Context compacted",
+        runId: RunId.make("cursor-compaction-run-3"),
+        nodeId: NodeId.make("cursor-compaction-root-3"),
+        parentItemId: null,
+      });
+      assert.deepStrictEqual(compactions[0]?.nativeItemRef, {
+        driver: CursorAgentSdk.CURSOR_PROVIDER,
+        nativeId: "native-cursor-compaction-run-3:compaction",
+        strength: "weak",
+      });
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
+      ),
+    ),
+  );
+
   it.effect("projects Cursor directory trees and lint diagnostics as file search results", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

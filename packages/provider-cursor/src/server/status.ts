@@ -18,6 +18,7 @@ import {
   buildBooleanOptionDescriptor,
   buildSelectOptionDescriptor,
   buildServerProvider,
+  COMPACT_SLASH_COMMAND,
   providerModelsFromSettings,
   type ServerProviderDraft,
 } from "@t3tools/provider-core/server/snapshotProbe";
@@ -33,6 +34,8 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 });
 
 const CURSOR_SDK_CATALOG_TIMEOUT_MS = 15_000;
+// Cursor lists no native slash commands; the adapter runs `compact` as `/compress`.
+const CURSOR_SLASH_COMMANDS = [COMPACT_SLASH_COMMAND];
 
 export function buildInitialCursorProviderSnapshot(
   cursorSettings: CursorSettings,
@@ -62,6 +65,7 @@ export function buildInitialCursorProviderSnapshot(
       enabled: true,
       checkedAt,
       models,
+      slashCommands: CURSOR_SLASH_COMMANDS,
       probe: {
         installed: true,
         version: null,
@@ -235,6 +239,7 @@ export function buildCursorProviderSnapshot(input: {
       input.cursorSettings.customModels,
       EMPTY_CAPABILITIES,
     ),
+    slashCommands: CURSOR_SLASH_COMMANDS,
     probe: {
       installed: true,
       version: input.parsed.version,
