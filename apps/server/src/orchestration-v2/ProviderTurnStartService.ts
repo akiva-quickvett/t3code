@@ -51,6 +51,7 @@ import {
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { COMPACT_SLASH_COMMAND } from "@t3tools/provider-core/server/snapshotProbe";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -858,6 +859,8 @@ export const layer: Layer.Layer<
           }),
         );
         if (replacement === undefined) return undefined;
+        // A fresh native session has never seen the role.
+        deliveredRoleKeys.delete(providerThread.id);
         const transferId = yield* idAllocator.allocate.contextTransfer({
           sourceThreadId: projection.thread.id,
           targetThreadId: projection.thread.id,
@@ -1185,10 +1188,16 @@ export const layer: Layer.Layer<
         records: message.context?.records ?? [],
       });
       const role = yield* resolveThreadRole(projection.thread);
+      const slashCommand = userText.trimStart().startsWith("/")
+        ? userText.trimStart().split(/\s/, 1)[0]!.toLowerCase()
+        : undefined;
+      // Compaction drops the role from native context, so the next turn must resend it.
+      const compacts = slashCommand === `/${COMPACT_SLASH_COMMAND.name}`;
+      if (compacts) deliveredRoleKeys.delete(providerThread.id);
       // A slash command must stay at the start of the prompt; the role waits a turn.
       const promptRole =
-        session.readsRoleInstructions === true || userText.trimStart().startsWith("/")
-          ? { note: "", key: deliveredRoleKeys.get(providerThread.id) }
+        session.readsRoleInstructions === true || slashCommand !== undefined
+          ? { note: "", key: compacts ? undefined : deliveredRoleKeys.get(providerThread.id) }
           : rolePromptNote({ role, deliveredKey: deliveredRoleKeys.get(providerThread.id) });
       // Delivered once: this run's provider turn marks the work as told. A
       // restart continuation is prompted by its own text or resumes natively.
