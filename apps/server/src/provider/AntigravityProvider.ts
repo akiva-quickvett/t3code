@@ -27,6 +27,7 @@ import {
 } from "@t3tools/provider-core/server/maintenanceResolver";
 import {
   buildServerProvider,
+  COMPACT_SLASH_COMMAND,
   isCommandMissingCause,
   type ServerProviderDraft,
 } from "@t3tools/provider-core/server/snapshotProbe";
@@ -79,11 +80,22 @@ export function buildAntigravityModelsFromSession(
   });
 }
 
+// The ACP adapter compacts Antigravity itself, so `compact` is advertised
+// whether or not the agent lists it.
+function withCompactCommand(
+  commands: ReadonlyArray<ServerProviderSlashCommand>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  return [
+    COMPACT_SLASH_COMMAND,
+    ...commands.filter((command) => command.name !== COMPACT_SLASH_COMMAND.name),
+  ];
+}
+
 function nativeCommands(
   commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
 ): ReadonlyArray<ServerProviderSlashCommand> {
   const seen = new Set<string>();
-  return commands.flatMap((command): ServerProviderSlashCommand[] => {
+  const native = commands.flatMap((command): ServerProviderSlashCommand[] => {
     if (!command.name.trim() || seen.has(command.name)) return [];
     seen.add(command.name);
     const description = command.description.trim();
@@ -96,6 +108,7 @@ function nativeCommands(
       },
     ];
   });
+  return withCompactCommand(native);
 }
 
 function isMissingInstallation(error: EffectAcpErrors.AcpError | ProviderSetupError): boolean {
@@ -141,6 +154,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
       enabled: settings.enabled,
       checkedAt,
       models: [],
+      slashCommands: settings.enabled ? [COMPACT_SLASH_COMMAND] : [],
       probe: {
         installed: false,
         version: null,
@@ -305,6 +319,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
             probed: usageLimits ?? draft.usageLimits,
           }),
           models: buildAntigravityModelsFromSession(started.sessionSetupResult),
+          slashCommands: withCompactCommand(draft.slashCommands),
           supportsTextGeneration,
           ...(cwd
             ? {
@@ -313,7 +328,9 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
                   {
                     cwd,
                     checkedAt: updatedAt,
-                    slashCommands: workspace?.slashCommands ?? draft.slashCommands,
+                    slashCommands: withCompactCommand(
+                      workspace?.slashCommands ?? draft.slashCommands,
+                    ),
                     skills: workspace?.skills ?? discoveredSkills.get(cwd) ?? [],
                   },
                 ].slice(-MAX_WORKSPACE_SNAPSHOTS),
