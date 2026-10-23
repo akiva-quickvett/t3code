@@ -6,6 +6,9 @@ import {
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpOrchestrationTreeResult,
+  OrchestratorMcpStartOrganInput,
+  OrchestratorMcpStartOrganResult,
   OrchestratorMcpThreadDetail,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadListInput,
@@ -289,5 +292,220 @@ describe("orchestrator capabilities headroom", () => {
     expect(decoded.providers.map((entry) => entry.headroom)).toEqual(["low", "unknown"]);
     expect(decoded.features.usageLimits).toBe(true);
     expect(() => decodeCapabilitiesResult(result([{ ...provider, headroom: "full" }]))).toThrow();
+  });
+});
+
+describe("organ MCP contracts", () => {
+  const task = {
+    childRunId: null,
+    status: "queued",
+    workState: "working",
+    hasPendingChildRuns: false,
+    providerInstanceId: "claudeAgent",
+    model: null,
+    summary: null,
+    resultContextTransferId: null,
+    latestTerminalRunId: null,
+    latestTerminalStatus: null,
+    latestTerminalSummary: null,
+    latestTerminalResultContextTransferId: null,
+    hasPendingQuestion: false,
+    waitTimedOut: false,
+  };
+  const cellTask = (index: number) => ({
+    ...task,
+    taskId: `node-cell-${index}`,
+    childThreadId: `thread-cell-${index}`,
+    childNodeId: `node-cell-${index}`,
+  });
+
+  it("decodes start_organ results with and without failed cells", () => {
+    const decode = Schema.decodeUnknownSync(OrchestratorMcpStartOrganResult);
+    const started = { organId: "organ_abcdefgh", round: 1, tasks: [cellTask(0), cellTask(1)] };
+    expect(decode(started).failed).toBeUndefined();
+    const partial = decode({ ...started, failed: [{ index: 2, reason: "No usable model." }] });
+    expect(partial.tasks).toHaveLength(2);
+    expect(partial.failed).toEqual([{ index: 2, reason: "No usable model." }]);
+  });
+
+  it("decodes start_organ input with per-call cells and a request key", () => {
+    const input = Schema.decodeSync(OrchestratorMcpStartOrganInput)({
+      presetId: "review-t3-council",
+      goal: "Review the diff.",
+      cells: [{ role: "scout", count: 2 }, { role: "review-t3" }],
+      clientRequestId: "review-1",
+    });
+    expect(input.cells?.map((cell) => cell.count)).toEqual([2, undefined]);
+    expect(() =>
+      Schema.decodeSync(OrchestratorMcpStartOrganInput)({
+        presetId: "scouts",
+        goal: "Look.",
+        cells: [{ role: "scout", count: 9 }],
+      }),
+    ).toThrow();
+  });
+
+  it("keeps delegate_task inputs without organ unchanged and validates organ rounds", () => {
+    const plain = { task: "Inspect the workspace.", preset: "scout" };
+    expect(decodeDelegateTaskInput(plain)).toEqual(plain);
+    expect(
+      decodeDelegateTaskInput({ ...plain, organ: { id: "organ_abcdefgh", round: 2 } }).organ,
+    ).toEqual({ id: "organ_abcdefgh", round: 2 });
+    expect(() => decodeDelegateTaskInput({ ...plain, organ: { id: "organ_x" } })).toThrow();
+  });
+
+  it("decodes branchless and roleless tree rows and pins the dot set", () => {
+    const cell = {
+      threadId: "thread-cell-0",
+      role: null,
+      model: null,
+      status: "running",
+      dot: "working",
+    };
+    const tree = (dot: string) => ({
+      projects: [
+        {
+          projectId: "project-1",
+          branches: [
+            {
+              branch: null,
+              slices: [
+                {
+                  threadId: "thread-slice",
+                  title: "Organs",
+                  dot,
+                  pods: [
+                    {
+                      threadId: "thread-pod",
+                      title: "organs/contracts",
+                      dot: "idle",
+                      organs: [
+                        {
+                          id: "organ_abcdefgh",
+                          presetId: "implementation",
+                          goal: "Fix X",
+                          round: 1,
+                          cells: [cell],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const decode = Schema.decodeUnknownSync(OrchestratorMcpOrchestrationTreeResult);
+    const result = (dot: string) => ({
+      metas: [],
+      noMeta: tree(dot),
+      trees: {},
+      stale: false,
+    });
+
+    const branch = decode(result("working")).noMeta.projects[0]?.branches[0];
+    expect(branch?.branch).toBeNull();
+    expect(branch?.slices[0]?.pods[0]?.organs[0]?.cells[0]?.role).toBeNull();
+    for (const dot of [
+      "needs-you",
+      "failed",
+      "limited",
+      "woke",
+      "working",
+      "waiting",
+      "done-unread",
+      "idle",
+    ]) {
+      expect(decode(result(dot)).noMeta.projects[0]?.branches[0]?.slices[0]?.dot).toBe(dot);
+    }
+    expect(() => decode(result("pulsing"))).toThrow();
+  });
+
+  it("decodes the orchestration tree payload", () => {
+    const tree = {
+      projects: [
+        {
+          projectId: "project-1",
+          branches: [
+            {
+              branch: "agent/organs",
+              slices: [
+                {
+                  threadId: "thread-slice",
+                  title: "Organs",
+                  dot: "working",
+                  pods: [
+                    {
+                      threadId: "thread-pod",
+                      title: "organs/contracts",
+                      dot: "needs-you",
+                      organs: [
+                        {
+                          id: "organ_abcdefgh",
+                          presetId: "implementation",
+                          goal: "Fix X",
+                          round: 1,
+                          cells: [
+                            {
+                              threadId: "thread-cell-0",
+                              role: "implementor",
+                              model: "claude-opus",
+                              status: "running",
+                              dot: "working",
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const decoded = Schema.decodeUnknownSync(OrchestratorMcpOrchestrationTreeResult)({
+      metas: [{ threadId: "thread-meta", title: "Ops", dot: "needs-you", unread: 1 }],
+      noMeta: { projects: [] },
+      trees: { "thread-meta": tree },
+      stale: false,
+    });
+    expect(decoded.metas[0]?.unread).toBe(1);
+  });
+
+  it("carries organ presets and the metas and organs features", () => {
+    const decoded = decodeCapabilitiesResult({
+      parentThreadId: null,
+      inheritedProviderInstanceId: null,
+      inheritedModel: null,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      providers: [],
+      organPresets: [
+        {
+          id: "implementation",
+          label: "Implementation",
+          goalTemplate: "",
+          cells: [{ role: "implementor", count: 1 }],
+        },
+      ],
+      features: {
+        appOwnedSubagents: true,
+        asyncPolling: true,
+        cancellation: true,
+        batchThreadCreation: true,
+        threadManagement: true,
+        incrementalThreadRead: true,
+        scheduledTasks: true,
+        maxBatchThreads: 20,
+        metas: true,
+        organs: true,
+      },
+    });
+    expect(decoded.organPresets?.[0]?.cells[0]?.role).toBe("implementor");
+    expect([decoded.features.metas, decoded.features.organs]).toEqual([true, true]);
   });
 });

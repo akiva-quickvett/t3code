@@ -1,4 +1,5 @@
 import { AgentRolePresetSettings } from "./agentRole.ts";
+import { OrganPresetSettings } from "./organPreset.ts";
 import {
   PodRuntimeProjectSettingsPatch,
   PodRuntimeSettings,
@@ -1329,6 +1330,11 @@ export const ServerSettings = Schema.Struct({
    */
   agentRolePresets: AgentRolePresetSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(AgentRolePresetSettings)({}))),
+  ),
+
+  /** Like `agentRolePresets`: user edits only, written through the organ preset RPCs. */
+  organPresets: OrganPresetSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(OrganPresetSettings)({}))),
   ),
 });
 export type ServerSettings = typeof ServerSettings.Type;

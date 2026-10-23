@@ -65,6 +65,7 @@ import {
 } from "./providerPolicy.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ThreadRolePreset } from "./agentRole.ts";
+import { OrganLabel } from "./organPreset.ts";
 import { ThreadWorktreeRuntime } from "./podRuntime.ts";
 import { OrchestrationProjectShell } from "./orchestrationProject.ts";
 import {
@@ -117,6 +118,8 @@ export const OrchestrationV2AppThreadLineage = Schema.Struct({
    * before it decode `relationshipToParent` strictly and drop unknown keys.
    */
   supervisorThreadId: Schema.optional(ThreadId),
+  /** Set on organ cells, so a cell renders its organ without the parent's records. */
+  organ: Schema.optional(OrganLabel),
 });
 export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLineage.Type;
 
@@ -431,6 +434,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /** Absent or null: not a meta. Meta tabs sort by it. */
+  metaAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   rolePreset: Schema.optional(Schema.NullOr(ThreadRolePreset)),
@@ -738,6 +743,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
    * It is no subagent: no card, no stop cascade, and the thread stays in the sidebar.
    */
   supervised: Schema.optional(Schema.Literal(true)),
+  organ: Schema.optional(OrganLabel),
   status: Schema.Literals([
     "idle",
     "pending",
@@ -1899,6 +1905,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /** Absent or null: not a meta. Meta tabs sort by it. */
+  metaAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   rolePreset: Schema.optional(Schema.NullOr(ThreadRolePreset)),
@@ -1984,6 +1992,7 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  metaAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -2408,6 +2417,7 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  metaAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
@@ -2594,6 +2604,18 @@ export const OrchestrationV2StoredEventJson = Schema.Struct({
   event: OrchestrationV2DomainEventJson,
 });
 export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJson.Type;
+
+/**
+ * Kept out of `OrchestrationV2Command` until the server decides it: the
+ * union feeds exhaustive switches that would not compile without a handler.
+ */
+export const OrchestrationV2ThreadMetaSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.meta.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  enabled: Schema.Boolean,
+});
+export type OrchestrationV2ThreadMetaSetCommand = typeof OrchestrationV2ThreadMetaSetCommand.Type;
 
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
@@ -3013,6 +3035,7 @@ export const OrchestrationV2Command = Schema.Union([
     interactionMode: ProviderInteractionMode,
     workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
     rolePreset: Schema.optional(ThreadRolePreset),
+    organ: Schema.optional(OrganLabel),
     // Omitted behaves as "settled_only" (no wake while the parent has a live
     // run); producers that want fire-and-forget wakes must set "always".
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),

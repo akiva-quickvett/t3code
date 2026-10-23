@@ -39,6 +39,8 @@ export * from "./orchestrationProject.ts";
 export * from "./orchestrationV2.ts";
 export * from "./applicationEvent.ts";
 export * from "./agentRole.ts";
+export * from "./organPreset.ts";
+export * from "./orchestrationStats.ts";
 export * from "./chatChannel.ts";
 export * from "./podRuntime.ts";
 export * from "./orchestratorMcp.ts";

@@ -24,6 +24,8 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2AppThread,
+  OrchestrationV2AppThreadJson,
   OrchestrationV2AppThreadLineage,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
@@ -41,7 +43,9 @@ import {
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadStreamItem,
+  OrchestrationV2ThreadMetaSetCommand,
   OrchestrationV2ThreadShell,
+  OrchestrationV2ThreadShellJson,
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
 } from "./orchestrationV2.ts";
@@ -1622,5 +1626,295 @@ describe("latestProviderTurnForAttempt", () => {
     ];
     expect(latestProviderTurnForAttempt(turns, RunAttemptId.make("goal-attempt"))?.id).toBe("last");
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
+  });
+});
+
+const typeLiterals = (union: typeof OrchestrationV2Command | typeof OrchestrationV2DomainEvent) =>
+  union.members.flatMap((member) => {
+    const type = member.fields.type;
+    return "literals" in type ? [...type.literals] : [type.literal];
+  });
+
+const organLabel = {
+  id: "organ_01J0000000000000000000000A",
+  presetId: "implementation",
+  goal: "Fix X",
+  round: 1,
+};
+
+/** A stored payload as JSON text, the way `payload_json` and the client cache hold it. */
+const throughJsonText = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
+
+describe("meta and organ contracts", () => {
+  it("keeps metaAt through the AppThread and ThreadShell JSON variants", () => {
+    const thread = Schema.decodeUnknownSync(OrchestrationV2AppThread)({
+      ...emptyThreadProjection().thread,
+      metaAt: now,
+    });
+    const threadJson = throughJsonText(Schema.encodeSync(OrchestrationV2AppThreadJson)(thread));
+    expect((threadJson as { metaAt: unknown }).metaAt).toBe("2026-04-20T00:00:00.000Z");
+    const decodedThread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson)(threadJson);
+    expect(decodedThread.metaAt && DateTime.toEpochMillis(decodedThread.metaAt)).toBe(
+      DateTime.toEpochMillis(now),
+    );
+
+    const shell = decodeOrchestrationV2ThreadShell({ ...historicalThreadShellJson, metaAt: now });
+    const shellJson = throughJsonText(Schema.encodeSync(OrchestrationV2ThreadShellJson)(shell));
+    const decodedShell = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson)(shellJson);
+    expect(decodedShell.metaAt && DateTime.toEpochMillis(decodedShell.metaAt)).toBe(
+      DateTime.toEpochMillis(now),
+    );
+
+    const demoted = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson)(
+      throughJsonText(
+        Schema.encodeSync(OrchestrationV2ThreadShellJson)({ ...shell, metaAt: null }),
+      ),
+    );
+    expect(demoted.metaAt).toBeNull();
+  });
+
+  it("reads a stored thread without metaAt as not a meta", () => {
+    const thread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson)(
+      throughJsonText(
+        Schema.encodeSync(OrchestrationV2AppThreadJson)(
+          Schema.decodeUnknownSync(OrchestrationV2AppThread)(emptyThreadProjection().thread),
+        ),
+      ),
+    );
+    expect(thread.metaAt).toBeUndefined();
+    expect(decodeOrchestrationV2ThreadShell(historicalThreadShellJson).metaAt).toBeUndefined();
+  });
+
+  it("lets a decoder without metaAt and lineage.organ read a shell that carries them", () => {
+    const { metaAt: _metaAt, ...stockShellFields } = OrchestrationV2ThreadShellJson.fields;
+    const { organ: _organ, ...stockLineageFields } = OrchestrationV2AppThreadLineage.fields;
+    const decodeStockShell = Schema.decodeUnknownSync(
+      Schema.Struct({ ...stockShellFields, lineage: Schema.Struct(stockLineageFields) }),
+    );
+    const shell = decodeOrchestrationV2ThreadShell({
+      ...historicalThreadShellJson,
+      metaAt: now,
+      lineage: {
+        parentThreadId: "thread-pod",
+        relationshipToParent: "subagent",
+        rootThreadId: "thread-pod",
+        organ: organLabel,
+      },
+    });
+    const payload = throughJsonText(Schema.encodeSync(OrchestrationV2ThreadShellJson)(shell));
+
+    const stock = decodeStockShell(payload);
+    expect("metaAt" in stock).toBe(false);
+    expect("organ" in stock.lineage).toBe(false);
+    expect(stock.lineage.relationshipToParent).toBe("subagent");
+  });
+
+  it("ignores unknown keys on the real thread, shell and lineage schemas", () => {
+    const lineage = {
+      parentThreadId: "thread-pod",
+      relationshipToParent: "subagent",
+      rootThreadId: "thread-pod",
+      futureKey: 1,
+    };
+    const decodedLineage = Schema.decodeUnknownSync(OrchestrationV2AppThreadLineage)(lineage);
+    expect("futureKey" in decodedLineage).toBe(false);
+
+    const shellJson = throughJsonText(
+      Schema.encodeSync(OrchestrationV2ThreadShellJson)(
+        decodeOrchestrationV2ThreadShell(historicalThreadShellJson),
+      ),
+    ) as Record<string, unknown>;
+    const shell = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson)({
+      ...shellJson,
+      futureKey: 1,
+      lineage: { ...lineage, rootThreadId: "thread-1" },
+    });
+    expect("futureKey" in shell).toBe(false);
+    expect("futureKey" in shell.lineage).toBe(false);
+
+    const threadJson = throughJsonText(
+      Schema.encodeSync(OrchestrationV2AppThreadJson)(
+        Schema.decodeUnknownSync(OrchestrationV2AppThread)(emptyThreadProjection().thread),
+      ),
+    ) as Record<string, unknown>;
+    const thread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson)({
+      ...threadJson,
+      futureKey: 1,
+    });
+    expect("futureKey" in thread).toBe(false);
+  });
+
+  it("validates the organ label and keeps it through the subagent JSON variant", () => {
+    const subagent = decodeOrchestrationV2Subagent({
+      id: "node-organ-cell-1",
+      threadId: "thread-pod",
+      runId: "run-1",
+      parentNodeId: "node-root-1",
+      origin: "app_owned",
+      createdBy: "agent",
+      driver: "claudeAgent",
+      providerInstanceId: "claudeAgent",
+      providerThreadId: null,
+      childThreadId: "thread-cell-1",
+      nativeTaskRef: null,
+      prompt: "Fix X",
+      title: null,
+      model: null,
+      organ: organLabel,
+      status: "running",
+      result: null,
+      startedAt: now,
+      completedAt: null,
+      updatedAt: now,
+    });
+    const json = throughJsonText(encodeOrchestrationV2SubagentJson(subagent));
+    expect(Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(json).organ).toEqual(organLabel);
+
+    const decodeLineage = Schema.decodeUnknownSync(OrchestrationV2AppThreadLineage);
+    const lineage = (organ: unknown) => ({
+      parentThreadId: "thread-pod",
+      relationshipToParent: "subagent",
+      rootThreadId: "thread-pod",
+      organ,
+    });
+    expect(decodeLineage(lineage(organLabel)).organ).toEqual(organLabel);
+    expect(() => decodeLineage(lineage({ ...organLabel, goal: "g".repeat(501) }))).toThrow();
+    expect(() => decodeLineage(lineage({ ...organLabel, id: "organ_x" }))).toThrow();
+    expect(() => decodeLineage(lineage({ ...organLabel, id: "task_0123456789" }))).toThrow();
+    expect(() => decodeLineage(lineage({ ...organLabel, round: 0 }))).toThrow();
+  });
+
+  it("accepts organ on delegated_task.request", () => {
+    const command = decodeOrchestrationV2Command({
+      type: "delegated_task.request",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId: "command-organ-cell-1",
+      parentThreadId: "thread-pod",
+      parentRunId: "run-1",
+      parentNodeId: "node-root-1",
+      task: "Fix X",
+      modelSelection: { instanceId: "claudeAgent", model: "claude-opus" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      organ: organLabel,
+    });
+    expect(command.type === "delegated_task.request" && command.organ).toEqual(organLabel);
+  });
+
+  it("defines thread.meta.set outside the command union, which stays pinned", () => {
+    const metaSet = {
+      type: "thread.meta.set",
+      commandId: "command-meta-1",
+      threadId: "thread-1",
+      enabled: true,
+    };
+    expect(Schema.decodeUnknownSync(OrchestrationV2ThreadMetaSetCommand)(metaSet).enabled).toBe(
+      true,
+    );
+    expect(() => decodeOrchestrationV2Command(metaSet)).toThrow();
+
+    expect(typeLiterals(OrchestrationV2Command)).toEqual([
+      "thread.create",
+      "thread.archive",
+      "thread.unarchive",
+      "thread.delete",
+      "thread.settle",
+      "thread.auto-settle",
+      "thread.unsettle",
+      "thread.snooze",
+      "thread.unsnooze",
+      "thread.auto-settle.set",
+      "thread.pin",
+      "thread.unpin",
+      "thread.pin.reorder",
+      "thread.active.reorder",
+      "thread.visit",
+      "thread.mark-unread",
+      "thread.metadata.update",
+      "thread.pull-request.link",
+      "thread.pull-request.unlink",
+      "thread.pull-request-link.sync",
+      "thread.pull-request.watch",
+      "thread.pull-request.sync",
+      "thread.title.regeneration.complete",
+      "thread.runtime-mode.set",
+      "thread.interaction-mode.set",
+      "thread.model-selection.set",
+      "provider-session.detach",
+      "message.dispatch",
+      "prepared-run.release",
+      "notification.delivery.accept",
+      "prepared-run.progress",
+      "prepared-run.fail",
+      "prepared-run.retry",
+      "subagent.stop",
+      "run.interrupt",
+      "queued-message.promote-to-steer",
+      "queue.resume",
+      "queued-run.reorder",
+      "queued-run.cancel",
+      "queued-run.edit",
+      "runtime-request.respond",
+      "thread.user-input.dismiss",
+      "checkpoint.rollback",
+      "thread.fork",
+      "thread.merge_back",
+      "delegated_task.request",
+      "delegated_task.wake-policy",
+      "delegated_task.completion-delivery.acknowledge",
+      "delegated_task.completion-delivery.dispose",
+      "thread.created.record",
+      "provider.switch",
+    ]);
+  });
+
+  it("pins the domain event type list", () => {
+    expect(typeLiterals(OrchestrationV2DomainEvent)).toEqual([
+      "thread.created",
+      "thread.archived",
+      "thread.unarchived",
+      "thread.deleted",
+      "thread.settled",
+      "thread.unsettled",
+      "thread.snoozed",
+      "thread.unsnoozed",
+      "thread.pinned",
+      "thread.auto-settle-set",
+      "thread.unpinned",
+      "thread.pin-reordered",
+      "thread.active-reordered",
+      "thread.visited",
+      "thread.marked-unread",
+      "thread.metadata-updated",
+      "thread.pull-request-synced",
+      "thread.runtime-mode-updated",
+      "thread.interaction-mode-updated",
+      "thread.model-selection-updated",
+      "thread.provider-switched",
+      "thread.pull-request-link-updated",
+      "run.created",
+      "run.updated",
+      "run.background-work-cancelled",
+      "run-attempt.created",
+      "run-attempt.updated",
+      "node.updated",
+      "subagent.updated",
+      "provider-session.attached",
+      "provider-session.updated",
+      "provider-session.detached",
+      "provider-thread.updated",
+      "provider-turn.updated",
+      "runtime-request.updated",
+      "message.updated",
+      "turn-item.updated",
+      "plan.updated",
+      "checkpoint-scope.created",
+      "checkpoint.captured",
+      "checkpoint.rollback-requested",
+      "context-handoff.updated",
+      "context-transfer.created",
+      "context-transfer.updated",
+    ]);
   });
 });

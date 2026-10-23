@@ -12,6 +12,10 @@ export const HostResourcesSnapshot = Schema.Struct({
   cpuCount: NonNegativeInt,
   availableMemoryBytes: NonNegativeInt,
   totalMemoryBytes: NonNegativeInt,
+  /** Absent where the platform reports no swap, and on older servers. */
+  swapUsedBytes: Schema.optional(Schema.Number),
+  swapTotalBytes: Schema.optional(Schema.Number),
+  loadAverage1m: Schema.optional(Schema.Number),
 });
 export type HostResourcesSnapshot = typeof HostResourcesSnapshot.Type;
 
