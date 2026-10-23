@@ -17,6 +17,7 @@ import {
   type OrchestrationV2ThreadProjection,
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpStartOrganResult,
   OrchestratorMcpTaskCancelResult,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadListResult,
@@ -115,6 +116,7 @@ const queuedFollowupResult = "Queued delegated follow-up completed.";
 
 const decodeCreateThreadsResult = Schema.decodeUnknownEffect(OrchestratorMcpCreateThreadsResult);
 const decodeDelegateTaskResult = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
+const decodeStartOrganResult = Schema.decodeUnknownEffect(OrchestratorMcpStartOrganResult);
 const decodeTaskCancelResult = Schema.decodeUnknownEffect(OrchestratorMcpTaskCancelResult);
 const decodeThreadInterruptResult = Schema.decodeUnknownEffect(
   OrchestratorMcpThreadInterruptResult,
@@ -3992,6 +3994,129 @@ describe("orchestrator MCP toolkit", () => {
           }).pipe(Effect.provide(layerTest));
         }),
       ),
+  );
+
+  it.effect("starts an organ through start_organ and labels every cell", () =>
+    Effect.gen(function* () {
+      const codexDriver = ProviderDriverKind.make("codex");
+      const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+        {
+          instanceId: codexInstanceId,
+          driver: codexDriver,
+          getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+          planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+          openSession: () => Effect.die("The effect worker does not run in this test."),
+        } as ProviderAdapter.ProviderAdapterV2["Service"],
+      ]);
+      const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+        { name: "start-organ-toolkit" },
+        layerRegistry,
+        { runEffectWorker: false },
+      );
+      const layerOrchestration = Layer.merge(
+        layerOrchestrator,
+        ThreadManagementService.layer.pipe(
+          Layer.provide(layerOrchestrator),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(
+            CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+          ),
+        ),
+      );
+      const layerTest = layerOrchestratorToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(layerOrchestration),
+        Layer.provide(layerRegistry),
+        Layer.provide(
+          ProviderRegistryMock.layer([
+            makeProviderSnapshot({
+              instanceId: codexInstanceId,
+              driver: codexDriver,
+              model: codexModel,
+            }),
+          ]),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(layerUnusedScheduledTaskStub),
+        Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+        Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+        Layer.provide(NodeServices.layer),
+      );
+
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const server = yield* McpServer.McpServer;
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:mcp-organ-parent:create"),
+          threadId: parentThreadId,
+          projectId,
+          title: "MCP organ parent",
+          modelSelection: codexSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:mcp-organ-parent:start"),
+          threadId: parentThreadId,
+          messageId: MessageId.make("message:mcp-organ-parent:start"),
+          text: parentPrompt,
+          attachments: [],
+          modelSelection: codexSelection,
+          dispatchMode: { type: "start_immediately" },
+        });
+        const startOrgan = server.tools.find(({ tool }) => tool.name === "start_organ");
+        expect(startOrgan?.tool.annotations?.destructiveHint).toBe(true);
+
+        const call = yield* server
+          .callTool({
+            name: "start_organ",
+            arguments: {
+              presetId: "scouts",
+              goal: "Map the organ start path.",
+              cells: [{ role: "scout", count: 2, target: { providerInstanceId: codexInstanceId } }],
+              clientRequestId: "organ-toolkit-1",
+            },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, {
+              environmentId: EnvironmentId.make("environment:mcp-organ"),
+              requestNamespace: "mcp-provider-session-organ",
+              thread: {
+                threadId: parentThreadId,
+                providerSessionId: "mcp-provider-session-organ",
+                providerInstanceId: codexInstanceId,
+              },
+              client: undefined,
+              capabilities: new Set(["orchestration"] as const),
+              issuedAt: 1,
+            }),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        expect(call.isError).toBe(false);
+        const result = yield* decodeStartOrganResult(call.structuredContent).pipe(Effect.orDie);
+        expect(result.tasks).toHaveLength(2);
+        const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+        const organ = {
+          id: result.organId,
+          presetId: "scouts",
+          goal: "Map the organ start path.",
+          round: 1,
+        };
+        expect(parent.subagents.map((task) => task.organ)).toEqual([organ, organ]);
+        for (const task of result.tasks) {
+          const child = yield* orchestrator.getThreadProjection(task.childThreadId);
+          expect(child.thread.lineage.organ).toEqual(organ);
+        }
+      }).pipe(Effect.provide(layerTest));
+    }),
   );
 
   it.live("reports running and queued child follow-ups from a Codex replay transcript", () =>

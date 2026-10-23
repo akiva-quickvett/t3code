@@ -3,7 +3,8 @@
 A role gives a thread a job: a model, its permission and plan modes, and standing instructions.
 Every thread with the same role starts the same way, whether you start it or an agent delegates to
 it. T3 Code ships roles for orchestration work, such as implementor, scout, research, the review
-tiers, and ticket.
+tiers, designer, and ticket. Tier 3 has a second reviewer that reviews the same work independently
+of the first.
 
 ## Use a role
 
@@ -17,7 +18,8 @@ that had it keep its name, marked as removed. The instructions reach the agent w
 the conversation.
 
 Agents see the same roles and can start threads and subagents with one, so a reviewer an agent
-delegates to gets the reviewer's model and instructions.
+delegates to gets the reviewer's model and instructions. Allowed child roles are enforced when an
+organ starts or adds a round; other delegations treat them as advice.
 
 ## New ticket
 

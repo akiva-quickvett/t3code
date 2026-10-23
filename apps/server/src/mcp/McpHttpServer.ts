@@ -38,6 +38,7 @@ import {
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as OrganService from "../organs/OrganService.ts";
 import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
 import * as PreviewControlsHandlers from "./toolkits/previewControls/handlers.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
@@ -766,6 +767,7 @@ const registerHtmlPreview = Effect.fn("McpHttpServer.registerHtmlPreview")(funct
  */
 const HANDOFF_TOOLS: ReadonlySet<string> = new Set([
   "delegate_task",
+  "start_organ",
   "create_threads",
   "t3_thread_launch",
   "t3_thread_send",
@@ -793,6 +795,7 @@ const resultThreadIds = (content: unknown): ReadonlyArray<string> => {
   if (typeof content !== "object" || content === null) return [];
   const record = content as Readonly<Record<string, unknown>>;
   if (Array.isArray(record.threads)) return record.threads.flatMap(resultThreadIds);
+  if (Array.isArray(record.tasks)) return record.tasks.flatMap(resultThreadIds);
   const key = resultThreadKeys.find((candidate) => typeof record[candidate] === "string");
   return key === undefined ? [] : [record[key] as string];
 };
@@ -996,7 +999,10 @@ export const layerPreviewToolkit = Layer.mergeAll(
 export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorToolkit,
   OrchestratorHandlers.layer,
-).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
+).pipe(
+  Layer.provide(OrchestratorMcpService.layer.pipe(Layer.provide(OrganService.layer))),
+  Layer.provide(ThreadMetadataMcpService.layer),
+);
 
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 

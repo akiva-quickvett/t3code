@@ -4,6 +4,7 @@ import {
   MessageId,
   EventId,
   NodeId,
+  OrchestrationV2Command,
   type OrchestrationV2DomainEvent,
   PlanId,
   ProjectId,
@@ -22,6 +23,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -44,6 +46,7 @@ const adapter = {
   openSession: () => Effect.die("No provider process needed for metadata controls"),
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 const layerDatabase = SqlitePersistence.layerMemory;
+const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
 const layerTest = Layer.mergeAll(
   layerDatabase,
   ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
@@ -620,6 +623,84 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
     const parentAfterChildLink = yield* projections.getThreadProjection(parentThreadId);
     assert.deepEqual(parentAfterChildLink.thread.linkedPullRequest, parentPullRequest);
     assert.deepEqual(parentAfterChildLink.thread.pullRequests, parent.thread.pullRequests);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("labels an organ cell's parent record and child lineage, and nothing else", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const parentThreadId = ThreadId.make("thread:organ-parent");
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-organ-parent"),
+      threadId: parentThreadId,
+      projectId: ProjectId.make("project:organ"),
+      title: "Organ parent",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("start-organ-parent"),
+      threadId: parentThreadId,
+      messageId: MessageId.make("message:organ-parent"),
+      text: "Start an organ",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const parentRun = (yield* projections.getThreadProjection(parentThreadId)).runs[0]!;
+    const organ = {
+      id: "organ_decideLabel0001",
+      presetId: "review-t3-council",
+      goal: "Review it.",
+      round: 1,
+    };
+    const delegate = (suffix: string, extra: object) =>
+      decodeCommand({
+        type: "delegated_task.request",
+        commandId: `delegate-organ-${suffix}`,
+        parentThreadId,
+        parentRunId: parentRun.id,
+        parentNodeId: parentRun.rootNodeId,
+        task: "Review the changes",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        ...extra,
+      });
+    yield* orchestrator.dispatch(
+      delegate("cell", { organ, createdBy: "agent", creationSource: "mcp" }),
+    );
+    // A user's raw command is taken as decoded: its organ need not be on any record.
+    const forged = { ...organ, id: "organ_clientForged001", round: 4 };
+    yield* orchestrator.dispatch(
+      delegate("client", { organ: forged, createdBy: "user", creationSource: "web" }),
+    );
+    yield* orchestrator.dispatch(delegate("plain", { createdBy: "agent", creationSource: "mcp" }));
+    assert.throws(() =>
+      delegate("bad", { organ: { ...organ, id: "not-an-organ" }, createdBy: "user" }),
+    );
+
+    const subagents = (yield* projections.getThreadProjection(parentThreadId)).subagents;
+    const labels = [];
+    for (const task of subagents) {
+      const child = yield* projections.getThreadProjection(task.childThreadId!);
+      assert.deepEqual(child.thread.lineage.organ, task.organ);
+      labels.push([task.organ, "organ" in task, "organ" in child.thread.lineage]);
+    }
+    assert.deepEqual(labels, [
+      [organ, true, true],
+      [forged, true, true],
+      [undefined, false, false],
+    ]);
   }).pipe(Effect.provide(layerTest)),
 );
 

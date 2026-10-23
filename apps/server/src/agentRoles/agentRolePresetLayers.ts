@@ -1,7 +1,5 @@
 import type {
   AgentRolePreset,
-  AgentRolePresetId,
-  AgentRolePresetLayer,
   AgentRolePresetScope,
   AgentRolePresetSettings,
   AgentRolePresetSource,
@@ -9,50 +7,70 @@ import type {
   RemovedAgentRolePreset,
 } from "@t3tools/contracts";
 
-interface LayeredAgentRolePreset {
-  readonly preset: AgentRolePreset;
+/** Role and organ presets share this layering; their ids and labels are plain strings. */
+interface LayerablePreset {
+  readonly id: string;
+  readonly label: string;
+}
+
+/** One layer of user edits, keyed by preset id. */
+export interface PresetLayer<T> {
+  readonly overrides: { readonly [id: string]: T };
+  /** Ids removed at this layer that a lower layer still defines. */
+  readonly removed: ReadonlyArray<string>;
+}
+
+export interface PresetSettings<T> {
+  readonly environment: PresetLayer<T>;
+  readonly projects: { readonly [projectId: ProjectId]: PresetLayer<T> };
+}
+
+export interface LayeredPreset<T> {
+  readonly preset: T;
   readonly source: AgentRolePresetSource;
   readonly inherited: boolean;
 }
 
-interface LayeredAgentRolePresets {
-  readonly presets: ReadonlyArray<LayeredAgentRolePreset>;
+export interface LayeredPresets<T> {
+  readonly presets: ReadonlyArray<LayeredPreset<T>>;
   readonly removed: ReadonlyArray<RemovedAgentRolePreset>;
 }
 
-export type AgentRolePresetEdit =
+export type PresetEdit<T> =
   | {
       readonly type: "save";
       readonly scope: AgentRolePresetScope;
-      readonly preset: AgentRolePreset;
+      readonly preset: T;
     }
   | {
       readonly type: "remove";
       readonly scope: AgentRolePresetScope;
-      readonly id: AgentRolePresetId;
+      readonly id: string;
     }
   | {
       readonly type: "reset";
       readonly scope: AgentRolePresetScope;
-      readonly id?: AgentRolePresetId | undefined;
+      readonly id?: string | undefined;
     };
 
-const EMPTY_LAYER: AgentRolePresetLayer = { overrides: {}, removed: [] };
+export type AgentRolePresetEdit = PresetEdit<AgentRolePreset>;
+
+const EMPTY_LAYER: PresetLayer<never> = { overrides: {}, removed: [] };
 
 /**
  * Defaults, then the environment's edits, then the project's. A later layer
  * replaces a preset in place, appends a new one, or removes one below it.
  */
-export function layerAgentRolePresets(input: {
-  readonly defaults: ReadonlyArray<AgentRolePreset>;
-  readonly settings: AgentRolePresetSettings;
+export function layerPresets<T extends LayerablePreset>(input: {
+  readonly defaults: ReadonlyArray<T>;
+  readonly settings: PresetSettings<T>;
   readonly projectId?: ProjectId | undefined;
-}): LayeredAgentRolePresets {
-  const presets = new Map<string, LayeredAgentRolePreset>(
+}): LayeredPresets<T> {
+  const presets = new Map<string, LayeredPreset<T>>(
     input.defaults.map((preset) => [preset.id, { preset, source: "default", inherited: false }]),
   );
   const removed = new Map<string, RemovedAgentRolePreset>();
-  const apply = (layer: AgentRolePresetLayer, source: "environment" | "project") => {
+  const apply = (layer: PresetLayer<T>, source: "environment" | "project") => {
     for (const preset of Object.values(layer.overrides)) {
       presets.set(preset.id, { preset, source, inherited: presets.has(preset.id) });
     }
@@ -73,17 +91,17 @@ export function layerAgentRolePresets(input: {
   };
 }
 
-function layerAt(settings: AgentRolePresetSettings, scope: AgentRolePresetScope) {
+function layerAt<T>(settings: PresetSettings<T>, scope: AgentRolePresetScope): PresetLayer<T> {
   return scope.type === "environment"
     ? settings.environment
     : (settings.projects[scope.projectId] ?? EMPTY_LAYER);
 }
 
-function withLayer(
-  settings: AgentRolePresetSettings,
+function withLayer<T>(
+  settings: PresetSettings<T>,
   scope: AgentRolePresetScope,
-  layer: AgentRolePresetLayer,
-): AgentRolePresetSettings {
+  layer: PresetLayer<T>,
+): PresetSettings<T> {
   if (scope.type === "environment") return { ...settings, environment: layer };
   const { [scope.projectId]: _replaced, ...projects } = settings.projects;
   // An empty project layer is dropped so settings.json keeps no husk per project.
@@ -92,25 +110,25 @@ function withLayer(
 }
 
 /** Whether a layer below `scope` defines `id`, so removing it there needs a tombstone. */
-function definedBelow(input: {
-  readonly defaults: ReadonlyArray<AgentRolePreset>;
-  readonly settings: AgentRolePresetSettings;
+function definedBelow<T extends LayerablePreset>(input: {
+  readonly defaults: ReadonlyArray<T>;
+  readonly settings: PresetSettings<T>;
   readonly scope: AgentRolePresetScope;
-  readonly id: AgentRolePresetId;
+  readonly id: string;
 }): boolean {
   if (input.scope.type === "environment") {
     return input.defaults.some((preset) => preset.id === input.id);
   }
-  return layerAgentRolePresets({ defaults: input.defaults, settings: input.settings }).presets.some(
+  return layerPresets({ defaults: input.defaults, settings: input.settings }).presets.some(
     (entry) => entry.preset.id === input.id,
   );
 }
 
-export function applyAgentRolePresetEdit(input: {
-  readonly defaults: ReadonlyArray<AgentRolePreset>;
-  readonly settings: AgentRolePresetSettings;
-  readonly edit: AgentRolePresetEdit;
-}): AgentRolePresetSettings {
+export function applyPresetEdit<T extends LayerablePreset>(input: {
+  readonly defaults: ReadonlyArray<T>;
+  readonly settings: PresetSettings<T>;
+  readonly edit: PresetEdit<T>;
+}): PresetSettings<T> {
   const { edit, settings } = input;
   const layer = layerAt(settings, edit.scope);
   switch (edit.type) {
@@ -138,4 +156,20 @@ export function applyAgentRolePresetEdit(input: {
       });
     }
   }
+}
+
+export function layerAgentRolePresets(input: {
+  readonly defaults: ReadonlyArray<AgentRolePreset>;
+  readonly settings: AgentRolePresetSettings;
+  readonly projectId?: ProjectId | undefined;
+}): LayeredPresets<AgentRolePreset> {
+  return layerPresets(input);
+}
+
+export function applyAgentRolePresetEdit(input: {
+  readonly defaults: ReadonlyArray<AgentRolePreset>;
+  readonly settings: AgentRolePresetSettings;
+  readonly edit: AgentRolePresetEdit;
+}): AgentRolePresetSettings {
+  return applyPresetEdit(input);
 }

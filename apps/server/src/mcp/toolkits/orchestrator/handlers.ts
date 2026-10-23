@@ -57,6 +57,13 @@ const handlers = {
       return yield* service.delegateTask(scope, input);
     }),
   ),
+  start_organ: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      return yield* service.startOrgan(scope, input);
+    }),
+  ),
   task_status: McpToolAccess.actsAsCaller(({ taskId }) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

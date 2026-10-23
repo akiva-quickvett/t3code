@@ -2534,6 +2534,7 @@ it.layer(
         updateSettings: () => Effect.fail(settingsError),
         updateProviderInstance: () => Effect.fail(settingsError),
         updateAgentRolePresets: () => Effect.fail(settingsError),
+        updateOrganPresets: () => Effect.fail(settingsError),
         withSettingsSnapshot: () => Effect.fail(settingsError),
         streamChanges: Stream.empty,
         subscribeChanges: Effect.succeed(Stream.empty),

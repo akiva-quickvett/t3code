@@ -372,6 +372,7 @@ function makeMutableServerSettingsService(
           return next;
         }),
       updateAgentRolePresets: () => Effect.die("Unexpected role preset mutation"),
+      updateOrganPresets: () => Effect.die("Unexpected organ preset mutation"),
       withSettingsSnapshot: (use) => Ref.get(settingsRef).pipe(Effect.flatMap(use)),
       get streamChanges() {
         return Stream.fromPubSub(changes);

@@ -16,6 +16,8 @@ import {
   OrchestratorMcpListScheduledTasksResult,
   OrchestratorMcpScheduleTaskInput,
   OrchestratorMcpScheduleTaskResult,
+  OrchestratorMcpStartOrganInput,
+  OrchestratorMcpStartOrganResult,
   OrchestratorMcpTaskCancelInput,
   OrchestratorMcpTaskCancelResult,
   OrchestratorMcpUpdateScheduledTaskInput,
@@ -106,6 +108,19 @@ export const DelegateTaskTool = Tool.make("delegate_task", {
   dependencies,
 })
   .annotate(Tool.Title, "Delegate a child task")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
+export const StartOrganTool = Tool.make("start_organ", {
+  description:
+    "Needs an agent running inside a T3 thread with an active turn. Start an organ: one delegated child of THIS thread per cell of an organ preset from orchestrator_capabilities.organPresets, each labelled with the same organ and sent the preset's goal template filled with the full goal. cells replaces the preset's cells for this start. Each cell's role must exist and, when this thread's role lists allowed child roles, be one of them; a refused start creates nothing. Every cell's completion wakes this thread; end the turn instead of polling. Returns organId and one task per started cell; if a cell fails to start, the cells before it keep running and failed names the one that did not. A retry with the same clientRequestId returns the same organ and starts only the missing cells; a cell the server rejected stays rejected under that key, so add it with delegate_task and organ: { id: organId, round: 1 }. With a reused clientRequestId, the cells that already started must match by role, position and goal, or the call stops at the first one that differs or is left out; extra cells start as new cells of the same organ. Add a later round with delegate_task and organ: { id: organId }.",
+  parameters: OrchestratorMcpStartOrganInput,
+  success: OrchestratorMcpStartOrganResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Start an organ")
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
@@ -309,6 +324,7 @@ export const OrchestratorToolkit = Toolkit.make(
   UsageLimitsTool,
   UsageThreadTreeTool,
   DelegateTaskTool,
+  StartOrganTool,
   TaskStatusTool,
   TaskCancelTool,
   WorkflowStopTool,
