@@ -51,6 +51,8 @@ export interface OrganCellPlan {
 export interface OrganStartPlan {
   readonly organ: OrganLabel;
   readonly cells: ReadonlyArray<OrganCellPlan>;
+  /** This key already started the organ, so the call resumes it and never fails whole. */
+  readonly resumed: boolean;
 }
 
 export interface OrganStartInput {
@@ -154,15 +156,38 @@ function checkCellRoles(
 
 const normalizeRole = (role: string) => role.trim().toLowerCase();
 
+export function reusedKeyMessage(requestKey: string, organId: string, presetId: string): string {
+  return `clientRequestId \`${requestKey}\` already started organ \`${organId}\` for a different preset or goal (preset \`${presetId}\`); use a new clientRequestId.`;
+}
+
+/**
+ * Whether a replayed cell is the one this call plans at its index. The label
+ * keeps only the clipped goal, so the record's full prompt and its title, which
+ * leads with the cell's role and number, carry the rest.
+ */
+export function replayedCellMatches(
+  cell: Pick<OrganCellPlan, "index" | "role">,
+  goal: string,
+  record: { readonly title: string | null; readonly prompt: string },
+): "match" | "cells" | "goal" {
+  if (record.title?.startsWith(`${cell.role} ${cell.index + 1}: `) !== true) return "cells";
+  return record.prompt.includes(goal) ? "match" : "goal";
+}
+
 export function planOrganStart(
   settings: ServerSettings,
   input: OrganStartInput,
 ): OrganStartPlan | OrganRefusal {
+  const id = mintOrganId(input.requestNamespace, input.requestKey);
+  const started = input.subagents.flatMap((task) => (task.organ?.id === id ? [task.organ] : []));
   const presets = buildOrganPresetList(settings, input.starter.projectId).presets;
   const preset = findAgentRolePresetIn(presets, input.presetId);
   if (preset === undefined) {
     return new OrganRefusal({
-      message: `Unknown organ preset "${input.presetId}". Known presets: ${presets.map((entry) => entry.id).join(", ")}.`,
+      message:
+        started.length === 0
+          ? `Unknown organ preset "${input.presetId}". Known presets: ${presets.map((entry) => entry.id).join(", ")}.`
+          : `Organ preset "${input.presetId}" was removed, so organ \`${id}\` cannot resume; its started cells keep running. Add cells with delegate_task and organ: { id: "${id}" }.`,
     });
   }
   const sourceCells =
@@ -177,20 +202,17 @@ export function planOrganStart(
       target: cell.target === undefined ? undefined : toMcpTarget(cell.target),
     }));
   const organ: OrganLabel = {
-    id: mintOrganId(input.requestNamespace, input.requestKey),
+    id,
     presetId: preset.id,
     goal: organGoalLabel(input.goal),
     round: 1,
   };
-  const started = input.subagents.flatMap((task) =>
-    task.organ?.id === organ.id ? [task.organ] : [],
-  );
   const other = started.find(
     (label) => label.presetId !== organ.presetId || label.goal !== organ.goal,
   );
   if (other !== undefined) {
     return new OrganRefusal({
-      message: `clientRequestId \`${input.requestKey}\` already started organ \`${organ.id}\` (preset \`${other.presetId}\`); use a new clientRequestId.`,
+      message: reusedKeyMessage(input.requestKey, organ.id, other.presetId),
     });
   }
   // A new organ is refused whole. A retry of a started one is replayed instead:
@@ -218,7 +240,7 @@ export function planOrganStart(
         ...(refusal === undefined ? {} : { refusal }),
       };
     });
-  return { organ, cells };
+  return { organ, cells, resumed: started.length > 0 };
 }
 
 export function planOrganRound(

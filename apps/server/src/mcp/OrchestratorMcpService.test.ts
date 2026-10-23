@@ -17,6 +17,7 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -2839,6 +2840,15 @@ describe("OrchestratorMcpService provider resolution", () => {
   });
 });
 
+interface ChildReadGate {
+  readonly armed: boolean;
+  readonly first: ThreadId | null;
+}
+
+class ChildReadGateRef extends Context.Service<ChildReadGateRef, Ref.Ref<ChildReadGate>>()(
+  "t3/mcp/OrchestratorMcpService.test/ChildReadGateRef",
+) {}
+
 describe("OrchestratorMcpService organs", () => {
   const codexInstanceId = ProviderInstanceId.make("codex");
   const altInstanceId = ProviderInstanceId.make("codex-alt");
@@ -2892,6 +2902,8 @@ describe("OrchestratorMcpService organs", () => {
     options: {
       readonly providers?: Ref.Ref<ReadonlyArray<ServerProvider>>;
       readonly allowedChildRoles?: { readonly [role: string]: ReadonlyArray<string> };
+      /** While armed, reads of any child thread but the first one read fail. */
+      readonly childReadGate?: Ref.Ref<ChildReadGate>;
     } = {},
   ) => {
     const providers = options.providers;
@@ -2920,13 +2932,43 @@ describe("OrchestratorMcpService organs", () => {
       layerAdapters,
       { runEffectWorker: false },
     );
+    const layerThreadManagement = ThreadManagementService.layer.pipe(
+      Layer.provide(layerOrchestrator),
+      Layer.provide(layerSettings),
+      Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+    );
+    const gate = options.childReadGate;
     const layerOrchestration = Layer.merge(
       layerOrchestrator,
-      ThreadManagementService.layer.pipe(
-        Layer.provide(layerOrchestrator),
-        Layer.provide(layerSettings),
-        Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
-      ),
+      gate === undefined
+        ? layerThreadManagement
+        : Layer.effect(
+            ThreadManagementService.ThreadManagementService,
+            Effect.gen(function* () {
+              const real = yield* ThreadManagementService.ThreadManagementService;
+              const getThreadRecords: typeof real.getThreadRecords = (threadId, fields, filter) =>
+                Ref.modify(gate, (state): readonly [boolean, ChildReadGate] => {
+                  if (!state.armed || threadId === parentThreadId) return [false, state];
+                  if (state.first === null) return [false, { ...state, first: threadId }];
+                  return [threadId !== state.first, state];
+                }).pipe(
+                  Effect.flatMap((fail) =>
+                    fail
+                      ? Effect.fail(
+                          new OrchestratorProjectionError({
+                            threadId,
+                            cause: "injected read failure",
+                          }),
+                        )
+                      : real.getThreadRecords(threadId, fields, filter),
+                  ),
+                ) as ReturnType<typeof real.getThreadRecords>;
+              return ThreadManagementService.ThreadManagementService.of({
+                ...real,
+                getThreadRecords,
+              });
+            }),
+          ).pipe(Layer.provide(layerThreadManagement)),
     );
     const readProviders =
       providers === undefined ? Effect.succeed([provider(codexInstanceId)]) : Ref.get(providers);
@@ -3177,7 +3219,7 @@ describe("OrchestratorMcpService organs", () => {
       assert.equal(error.code, "invalid_request");
       assert.equal(
         error.message,
-        `clientRequestId \`reused\` already started organ \`${first.organId}\` (preset \`scouts\`); use a new clientRequestId.`,
+        `clientRequestId \`reused\` already started organ \`${first.organId}\` for a different preset or goal (preset \`scouts\`); use a new clientRequestId.`,
       );
       assert.lengthOf(yield* parentSubagents, 1);
     }).pipe(Effect.provide(layerOrgans())),
@@ -3240,6 +3282,138 @@ describe("OrchestratorMcpService organs", () => {
       assert.lengthOf(yield* parentSubagents, 2);
     }).pipe(
       Effect.provide(layerOrgans({ allowedChildRoles: { broker: ["implementor", "scout"] } })),
+    ),
+  );
+
+  it.effect("resumes an organ whose cell role was removed after it started", () =>
+    Effect.gen(function* () {
+      yield* createParent();
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const input = {
+        presetId: "scouts",
+        goal: "Look.",
+        cells: [{ role: "scout", count: 2, target }],
+        clientRequestId: "removed-role",
+      };
+      const started = yield* service.startOrgan(scope, input);
+      yield* settings.updateAgentRolePresets((current) => ({
+        ...current,
+        environment: { ...current.environment, removed: ["scout"] },
+      }));
+      const retry = yield* service.startOrgan(scope, input);
+      assert.isUndefined(retry.failed);
+      assert.equal(retry.organId, started.organId);
+      assert.deepEqual(
+        retry.tasks.map((task) => task.taskId),
+        started.tasks.map((task) => task.taskId),
+      );
+      assert.lengthOf(yield* parentSubagents, 2);
+    }).pipe(Effect.provide(layerOrgans())),
+  );
+
+  it.effect("stops a reused key whose cells or full goal differ from the started organ", () =>
+    Effect.gen(function* () {
+      yield* createParent();
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const goal = "a".repeat(600);
+      const input = {
+        presetId: "scouts",
+        goal,
+        cells: [{ role: "scout", target }],
+        clientRequestId: "same-key",
+      };
+      const started = yield* service.startOrgan(scope, input);
+      const otherCells = yield* service.startOrgan(scope, {
+        ...input,
+        cells: [{ role: "research", target }],
+      });
+      assert.equal(otherCells.organId, started.organId);
+      assert.isEmpty(otherCells.tasks);
+      assert.equal(
+        otherCells.failed?.[0]?.reason,
+        `clientRequestId \`same-key\` already started organ \`${started.organId}\` with different cells; use a new clientRequestId.`,
+      );
+      // Same 500-character label, different full goal.
+      const otherGoal = yield* service.startOrgan(scope, { ...input, goal: `${"a".repeat(599)}b` });
+      assert.include(otherGoal.failed?.[0]?.reason ?? "", "for a different preset or goal");
+      assert.lengthOf(yield* parentSubagents, 1);
+    }).pipe(Effect.provide(layerOrgans())),
+  );
+
+  it.effect("reports a resumed organ's refused first cell instead of failing the call", () =>
+    Effect.gen(function* () {
+      yield* createParent({ role: "broker" });
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const organId = OrganService.mintOrganId(scope.requestNamespace, "forged");
+      const parentRun = (yield* threads.getThreadRecords(parentThreadId, ["runs"])).runs[0]!;
+      // A user's raw delegation can label a child with any organ, so the organ has
+      // records although none of this key's cells has a receipt.
+      yield* threads.dispatch({
+        type: "delegated_task.request",
+        commandId: CommandId.make("forged-organ-cell"),
+        parentThreadId,
+        parentRunId: parentRun.id,
+        parentNodeId: parentRun.rootNodeId!,
+        task: "Scout: Look.",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        organ: { id: organId, presetId: "scouts", goal: "Look.", round: 1 },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const result = yield* service.startOrgan(scope, {
+        presetId: "scouts",
+        goal: "Look.",
+        cells: [{ role: "scout", target }],
+        clientRequestId: "forged",
+      });
+      assert.equal(result.organId, organId);
+      assert.isEmpty(result.tasks);
+      assert.equal(result.failed?.[0]?.index, 0);
+      assert.include(result.failed?.[0]?.reason ?? "", "can't start `scout`");
+    }).pipe(Effect.provide(layerOrgans({ allowedChildRoles: { broker: ["implementor"] } }))),
+  );
+
+  it.effect("reports a cell that started but could not be read, and replays it on retry", () =>
+    Effect.gen(function* () {
+      yield* createParent();
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const gate = yield* ChildReadGateRef;
+      const input = {
+        presetId: "scouts",
+        goal: "Look.",
+        cells: [{ role: "scout", count: 2, target }],
+        clientRequestId: "setup-failed",
+      };
+      yield* Ref.set(gate, { armed: true, first: null });
+      const first = yield* service.startOrgan(scope, input);
+      assert.lengthOf(first.tasks, 1);
+      assert.equal(first.failed?.[0]?.index, 1);
+      assert.include(first.failed?.[0]?.reason ?? "", "Cell started but setup failed:");
+      assert.lengthOf(yield* parentSubagents, 2);
+
+      yield* Ref.set(gate, { armed: false, first: null });
+      const retry = yield* service.startOrgan(scope, input);
+      assert.equal(retry.organId, first.organId);
+      assert.isUndefined(retry.failed);
+      assert.equal(retry.tasks[0]?.taskId, first.tasks[0]?.taskId);
+      assert.deepEqual(
+        retry.tasks.map((task) => task.taskId),
+        (yield* parentSubagents).map((task) => task.id),
+      );
+    }).pipe(
+      Effect.provide(
+        Effect.gen(function* () {
+          const gate = yield* Ref.make<ChildReadGate>({ armed: false, first: null });
+          return Layer.merge(
+            layerOrgans({ childReadGate: gate }),
+            Layer.succeed(ChildReadGateRef, gate),
+          );
+        }).pipe(Layer.unwrap),
+      ),
     ),
   );
 

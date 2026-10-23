@@ -413,13 +413,17 @@ The organ id is a hash of the provider session and the request key
 (`clientRequestId`, or a random key when absent), and cell _i_ uses the
 command id `start-organ` with that key and index _i_. A keyed retry therefore
 returns the same organ, replays the cells that started, and starts only the
-missing ones; key-less calls always start a new organ. A retry is not re-checked
-against allowed child roles for cells that already started, so it still replays
-after the caller's role changes; only a missing cell can be refused, and it is
-reported in `failed`. A cell the server rejected stays rejected under that key:
-add it with `delegate_task` and `organ: { id, round: 1 }`. Reusing a key for a
-different preset or goal is refused. A `delegate_task` round with a key that was
-already accepted replays the same way.
+missing ones; key-less calls always start a new organ. A cell that started is
+replayed from its receipt without resolving its role, target or allowed child
+roles again, so a retry still replays after the caller's role list narrows or the
+cell's role or provider is removed. Only a missing cell can be refused, and it is
+reported in `failed`; once the organ has cells, the call always returns its
+`organId`. A cell the server rejected stays rejected under that key: add it with
+`delegate_task` and `organ: { id, round: 1 }`. Reusing a key for a different
+preset, goal or cells starts nothing new: the call is refused, or stops at the
+first cell that differs. If the organ preset itself was removed, a retry is refused with the
+organ id. A `delegate_task` round with a key that was already accepted replays
+the same way.
 
 Cells are dispatched in order through the `delegate_task` path with
 `completionWake: "always"`, each titled with its role, number and the goal. When

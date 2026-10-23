@@ -2028,48 +2028,73 @@ const make = Effect.gen(function* () {
     readonly commandId: CommandId;
     readonly organ: OrganLabel | undefined;
     readonly completionWake: "always" | "settled_only";
+    /**
+     * The command has a receipt, so dispatch replays it and ignores the payload:
+     * nothing that may have changed since (role, provider, project) is resolved.
+     */
+    readonly replay?: boolean;
   }): Effect.Effect<
-    { readonly finish: Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure> },
+    {
+      readonly taskId: NodeId;
+      readonly finish: Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
+    },
     OrchestratorMcpFailure
   > =>
     Effect.gen(function* () {
       const { scope, parent, parentRun, parentNodeId, preset, providers, input, key } = args;
       const { commandId, organ, completionWake } = args;
       const isolation = input.isolation ?? preset?.isolation;
-      const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
-      const target = yield* resolveRequestTarget({
-        parent,
-        target: input.target,
-        preset,
-        providers,
-        skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
-      });
-      const { runtimeMode, interactionMode } = yield* resolvePresetModes({
-        parentRuntimeMode: parent.thread.runtimeMode,
-        parentInteractionMode: parent.thread.interactionMode,
-        requestedRuntimeMode: input.runtimeMode,
-        requestedInteractionMode: input.interactionMode,
-        preset,
-        target,
-      });
-      let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
-      if (isolation === "worktree" && !isRetryOfAcceptedDelegation) {
-        const project = yield* requireProject(parent.thread.projectId);
-        if (input.branch !== undefined) yield* assertNewBranchName(project, input.branch);
-        const base =
-          input.baseRef === undefined
-            ? {
-                baseRef: yield* resolveParentCommit(project, parent.thread.worktreePath),
-                startFromOrigin: false,
+      const resolved =
+        args.replay === true
+          ? {
+              modelSelection: parent.thread.modelSelection,
+              runtimeMode: parent.thread.runtimeMode,
+              interactionMode: parent.thread.interactionMode,
+              workspaceStrategy: undefined,
+            }
+          : yield* Effect.gen(function* () {
+              const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
+              const target = yield* resolveRequestTarget({
+                parent,
+                target: input.target,
+                preset,
+                providers,
+                skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
+              });
+              const { runtimeMode, interactionMode } = yield* resolvePresetModes({
+                parentRuntimeMode: parent.thread.runtimeMode,
+                parentInteractionMode: parent.thread.interactionMode,
+                requestedRuntimeMode: input.runtimeMode,
+                requestedInteractionMode: input.interactionMode,
+                preset,
+                target,
+              });
+              let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
+              if (isolation === "worktree" && !isRetryOfAcceptedDelegation) {
+                const project = yield* requireProject(parent.thread.projectId);
+                if (input.branch !== undefined) yield* assertNewBranchName(project, input.branch);
+                const base =
+                  input.baseRef === undefined
+                    ? {
+                        baseRef: yield* resolveParentCommit(project, parent.thread.worktreePath),
+                        startFromOrigin: false,
+                      }
+                    : yield* resolveDelegatedBase(project, input.baseRef);
+                workspaceStrategy = {
+                  type: "worktree",
+                  baseRef: base.baseRef,
+                  ...(input.branch === undefined ? {} : { branch: input.branch }),
+                  startFromOrigin: base.startFromOrigin,
+                };
               }
-            : yield* resolveDelegatedBase(project, input.baseRef);
-        workspaceStrategy = {
-          type: "worktree",
-          baseRef: base.baseRef,
-          ...(input.branch === undefined ? {} : { branch: input.branch }),
-          startFromOrigin: base.startFromOrigin,
-        };
-      }
+              return {
+                modelSelection: target.modelSelection,
+                runtimeMode,
+                interactionMode,
+                workspaceStrategy,
+              };
+            });
+      const { modelSelection, runtimeMode, interactionMode, workspaceStrategy } = resolved;
       // ThreadManagementService.dispatch is the chokepoint for this command
       // type's own enablement check, using the same command id and its
       // receipt-replay exemption, so no separate assert runs here.
@@ -2084,7 +2109,7 @@ const make = Effect.gen(function* () {
           parentNodeId,
           task: taskPrompt(input),
           ...(input.title === undefined ? {} : { title: input.title }),
-          modelSelection: target.modelSelection,
+          modelSelection,
           runtimeMode,
           interactionMode,
           ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
@@ -2177,7 +2202,7 @@ const make = Effect.gen(function* () {
           );
         return yield* readTask(scope, taskId, Option.isNone(waited), true);
       });
-      return { finish };
+      return { taskId, finish };
     });
 
   return OrchestratorMcpService.of({
@@ -2686,12 +2711,12 @@ const make = Effect.gen(function* () {
             operation: "start-organ",
             index: cell.index,
           });
-          if (cell.refusal !== undefined && !(yield* threadManagement.hasReceipt(commandId))) {
-            return partial(cell.index, cell.refusal);
-          }
-          const preset = findAgentRolePresetIn(rolePresets, cell.role);
+          // A cell that started replays whatever changed since; only new cells are checked.
+          const replay = yield* threadManagement.hasReceipt(commandId);
+          if (!replay && cell.refusal !== undefined) return partial(cell.index, cell.refusal);
+          const preset = replay ? undefined : findAgentRolePresetIn(rolePresets, cell.role);
           const submitted =
-            preset === undefined
+            !replay && preset === undefined
               ? Result.fail(
                   failure("invalid_request", unknownAgentRolePresetMessage(cell.role, rolePresets)),
                 )
@@ -2713,11 +2738,35 @@ const make = Effect.gen(function* () {
                   commandId,
                   organ: plan.organ,
                   completionWake: "always",
+                  replay,
                 }).pipe(Effect.result);
           if (Result.isFailure(submitted)) {
             // Nothing started, so there is no organ to report.
-            if (tasks.length === 0) return yield* submitted.failure;
+            if (tasks.length === 0 && !plan.resumed) return yield* submitted.failure;
             return partial(cell.index, submitted.failure.message);
+          }
+          // Replays are matched by index, so a reused key must plan the same cells.
+          const record = replay
+            ? parent.subagents.find((task) => task.id === submitted.success.taskId)
+            : undefined;
+          const mismatch =
+            record === undefined
+              ? "match"
+              : OrganService.replayedCellMatches(cell, input.goal, {
+                  title: record.title,
+                  prompt: record.prompt,
+                });
+          if (mismatch === "cells") {
+            return partial(
+              cell.index,
+              `clientRequestId \`${key}\` already started organ \`${plan.organ.id}\` with different cells; use a new clientRequestId.`,
+            );
+          }
+          if (mismatch === "goal") {
+            return partial(
+              cell.index,
+              OrganService.reusedKeyMessage(key, plan.organ.id, plan.organ.presetId),
+            );
           }
           const finished = yield* submitted.success.finish.pipe(Effect.result);
           if (Result.isFailure(finished)) {

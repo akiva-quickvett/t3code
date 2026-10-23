@@ -229,7 +229,7 @@ describe("planOrganStart on a retry", () => {
   it("refuses a key that already started a different organ", () => {
     assert.strictEqual(
       refusal(start(DEFAULT_SERVER_SETTINGS, { presetId: "research", subagents: [{ organ }] })),
-      `clientRequestId \`key-1\` already started organ \`${organ.id}\` (preset \`scouts\`); use a new clientRequestId.`,
+      `clientRequestId \`key-1\` already started organ \`${organ.id}\` for a different preset or goal (preset \`scouts\`); use a new clientRequestId.`,
     );
     assert.include(
       refusal(
@@ -240,6 +240,36 @@ describe("planOrganStart on a retry", () => {
         }),
       ),
       "already started organ",
+    );
+  });
+
+  it("names the organ when its preset was removed after it started", () => {
+    const removed: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      organPresets: { environment: { overrides: {}, removed: ["scouts"] }, projects: {} },
+    };
+    assert.include(
+      refusal(start(removed, { presetId: "scouts", subagents: [{ organ }] })),
+      `organ \`${organ.id}\` cannot resume`,
+    );
+    assert.include(
+      refusal(start(removed, { presetId: "scouts" })),
+      'Unknown organ preset "scouts"',
+    );
+  });
+
+  it("matches a replayed cell by its role, number and full goal", () => {
+    const cell = { index: 1, role: "scout" };
+    const goal = "x".repeat(600);
+    const record = { title: "scout 2: xxx...", prompt: `Scout: ${goal}` };
+    assert.strictEqual(OrganService.replayedCellMatches(cell, goal, record), "match");
+    assert.strictEqual(
+      OrganService.replayedCellMatches({ ...cell, role: "research" }, goal, record),
+      "cells",
+    );
+    assert.strictEqual(
+      OrganService.replayedCellMatches(cell, `${"x".repeat(599)}y`, record),
+      "goal",
     );
   });
 
