@@ -33,6 +33,7 @@ import {
   RunId,
   type ScheduledTaskId,
   ThreadId,
+  type ThreadSnoozeScope,
   type TurnItemId,
 } from "@t3tools/contracts";
 import { threadTranscriptHeader } from "@t3tools/shared/threadTranscript";
@@ -410,8 +411,10 @@ export interface ThreadManagementServiceShape {
     readonly threadId: ThreadId;
     readonly commandId: CommandId;
     readonly byOwnAgent: boolean;
+    readonly scope?: ThreadSnoozeScope;
   }) => Effect.Effect<
-    { readonly sequence: number } | { readonly settlesWhenTurnEnds: true },
+    | { readonly sequence: number; readonly settlesWhenIdle?: true }
+    | { readonly settlesWhenTurnEnds: true },
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
   >;
   readonly interruptThread: (
@@ -960,6 +963,17 @@ const make = Effect.gen(function* () {
   )(function* (input) {
     const shell = input.byOwnAgent ? yield* orchestrator.getThreadShell(input.threadId) : null;
     if (shell != null && shell.activeRunId !== null) {
+      // The agent's own turn keeps its tree busy, so a tree settle records a
+      // wait that applies once the tree is idle, and persists across restarts.
+      if (input.scope === "tree") {
+        yield* dispatch({
+          type: "thread.settle",
+          commandId: input.commandId,
+          threadId: input.threadId,
+          scope: "tree",
+        });
+        return { settlesWhenTurnEnds: true } as const;
+      }
       yield* settleAfterRun({
         projectId: shell.projectId,
         threadId: shell.id,
@@ -971,8 +985,12 @@ const make = Effect.gen(function* () {
       type: "thread.settle",
       commandId: input.commandId,
       threadId: input.threadId,
+      ...(input.scope === undefined ? {} : { scope: input.scope }),
     });
-    return { sequence: result.sequence };
+    return {
+      sequence: result.sequence,
+      ...(result.waitsForIdle === true ? { settlesWhenIdle: true as const } : {}),
+    };
   });
 
   const interruptThread: ThreadManagementServiceShape["interruptThread"] = (input) =>
