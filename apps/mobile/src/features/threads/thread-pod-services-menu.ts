@@ -33,7 +33,16 @@ export function buildThreadPodServicesMenuItems(
       title: "Pod services",
       image: "globe",
       subactions: services.flatMap(({ name, reachLabel, reachable }) => [
-        ...(reachable ? [{ id: `pod-open:${name}`, title: `Open ${name}`, image: "safari" }] : []),
+        ...(reachable
+          ? [
+              {
+                id: `pod-open:${name}`,
+                title: `Open ${name}`,
+                ...(reachLabel === null ? {} : { subtitle: reachLabel }),
+                image: "safari",
+              },
+            ]
+          : []),
         {
           id: `pod-copy:${name}`,
           title: `Copy ${name} URL`,

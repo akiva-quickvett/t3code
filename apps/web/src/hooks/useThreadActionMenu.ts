@@ -99,6 +99,8 @@ export function useThreadActionMenu(input: {
   });
   const handleNewThread = useNewThreadHandler();
   const podServiceMenu = useThreadPodServiceMenu();
+  // ThreadPodChip usually holds the stream open already; this covers the
+  // header while it renames, when the chip is not shown.
   useMountPodRuntime(threadRef?.environmentId ?? null);
   const startTicketThread = useStartTicketThread();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);

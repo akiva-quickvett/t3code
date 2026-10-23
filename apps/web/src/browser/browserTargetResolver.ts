@@ -92,7 +92,8 @@ const reachesEnvironmentLoopback = (target: ConnectionTarget): boolean =>
 /**
  * Whether this client's own browser shares the environment host's loopback:
  * the desktop app on its own backend, or a browser that reached the server on
- * a loopback address.
+ * a loopback address. An SSH local forward looks like loopback too, so this
+ * only picks which URL to copy; never gate Open on it.
  */
 export function clientReachesEnvironmentLoopback(environmentId: EnvironmentId): boolean {
   const connection = readPreparedConnection(environmentId);

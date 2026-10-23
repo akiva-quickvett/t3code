@@ -77,7 +77,7 @@ export function useThreadPodServiceMenu() {
       copyToClipboard(link.copyUrl, { name: link.name, url: link.copyUrl });
       return;
     }
-    void openIn(threadRef.environmentId, menu.pod, link, threadRef.threadId);
+    void openIn(threadRef.environmentId, menu.pod, link, threadRef.threadId, { navigate: true });
   };
 
   return { read, run };

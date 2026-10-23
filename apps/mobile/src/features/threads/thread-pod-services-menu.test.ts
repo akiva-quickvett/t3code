@@ -37,7 +37,7 @@ describe("thread pod services menu", () => {
     );
     const [menu] = buildThreadPodServicesMenuItems(services);
     expect(menu?.subactions?.map((action) => [action.id, action.title, action.subtitle])).toEqual([
-      ["pod-open:web", "Open web", undefined],
+      ["pod-open:web", "Open web", "tailnet"],
       ["pod-copy:web", "Copy web URL", "tailnet"],
       ["pod-copy:api", "Copy api URL", "host only"],
     ]);
