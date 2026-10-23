@@ -1,4 +1,5 @@
 import type {
+  OrchestrationDot,
   OrchestrationV2TurnItemStatus,
   OrchestrationV2ThreadShell,
   OrchestrationProjectShell,
@@ -42,13 +43,13 @@ export function summarizeSubagentStatuses(
 export function summarizeOrganCells(
   cells: ReadonlyArray<{
     readonly status: OrchestrationV2TurnItemStatus;
-    readonly needsYou: boolean;
+    readonly dot: OrchestrationDot;
   }>,
 ): string {
   let needsYou = 0;
   const statuses: OrchestrationV2TurnItemStatus[] = [];
   for (const cell of cells) {
-    if (cell.needsYou) needsYou += 1;
+    if (cell.dot === "needs-you") needsYou += 1;
     else statuses.push(cell.status);
   }
   const rest = summarizeSubagentStatuses(statuses);

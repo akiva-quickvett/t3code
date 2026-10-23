@@ -170,19 +170,19 @@ describe("summarizeOrganCells", () => {
   it("leads with cells that need the user", () => {
     expect(
       summarizeOrganCells([
-        { status: "waiting", needsYou: true },
-        { status: "running", needsYou: false },
-        { status: "failed", needsYou: false },
+        { status: "waiting", dot: "needs-you" },
+        { status: "running", dot: "working" },
+        { status: "failed", dot: "failed" },
       ]),
     ).toBe("1 needs you · 1 working · 1 failed");
   });
 
   it("omits empty buckets", () => {
-    expect(summarizeOrganCells([{ status: "running", needsYou: true }])).toBe("1 needs you");
+    expect(summarizeOrganCells([{ status: "running", dot: "needs-you" }])).toBe("1 needs you");
     expect(
       summarizeOrganCells([
-        { status: "completed", needsYou: false },
-        { status: "completed", needsYou: false },
+        { status: "completed", dot: "idle" },
+        { status: "completed", dot: "idle" },
       ]),
     ).toBe("2 done");
     expect(summarizeOrganCells([])).toBe("");
