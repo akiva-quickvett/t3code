@@ -14,6 +14,26 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it("keeps the orchestration feature flags optional", () => {
+    const older = decodeDescriptor(descriptor).capabilities;
+    expect([older.orchestrationMetas, older.organPresets, older.orchestrationStats]).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    const capabilities = {
+      orchestrationMetas: true,
+      organPresets: true,
+      orchestrationStats: false,
+    };
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, ...capabilities },
+      }).capabilities,
+    ).toMatchObject(capabilities);
+  });
+
   it("keeps settled cleanup optional alongside current worktree capabilities", () => {
     expect(decodeDescriptor(descriptor).capabilities.settledWorktreeCleanup).toBeUndefined();
     const capabilities = {

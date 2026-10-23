@@ -46,6 +46,8 @@ import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { AgentUsageHeadroom } from "./providerUsageLimits.ts";
 import { AgentRolePresetRunsIn, ThreadRolePreset } from "./agentRole.ts";
 import { PodRuntimeId, PodRuntimeState } from "./podRuntime.ts";
+import { OrganCellCount, OrganId } from "./organPreset.ts";
+import { OrchestrationStatsSnapshot } from "./orchestrationStats.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
   description: "Complete task or message text for the target agent.",
@@ -229,6 +231,15 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
     }),
   ),
   interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
+  organ: Schema.optional(
+    Schema.Struct({
+      id: OrganId,
+      round: Schema.optional(PositiveInt),
+    }).annotate({
+      description:
+        "Makes this child a cell of an organ from start_organ. Set round for a later round of that organ.",
+    }),
+  ),
 });
 export type OrchestratorMcpDelegateTaskInput = typeof OrchestratorMcpDelegateTaskInput.Type;
 
@@ -258,6 +269,131 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   }),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
+
+export const OrchestratorMcpStartOrganCell = Schema.Struct({
+  role: OrchestratorMcpRolePreset,
+  count: Schema.optional(OrganCellCount),
+  target: Schema.optional(OrchestratorMcpTarget),
+});
+export type OrchestratorMcpStartOrganCell = typeof OrchestratorMcpStartOrganCell.Type;
+
+export const OrchestratorMcpStartOrganInput = Schema.Struct({
+  presetId: TrimmedNonEmptyString.check(Schema.isMaxLength(64)).annotate({
+    description: "Organ preset id from orchestrator_capabilities.organPresets.",
+  }),
+  goal: OrchestratorMcpPrompt.annotate({
+    description: "The organ's brief, sent to every cell. Its first 500 characters label the organ.",
+  }),
+  cells: Schema.optional(
+    Schema.Array(OrchestratorMcpStartOrganCell)
+      .check(Schema.isMinLength(1), Schema.isMaxLength(16))
+      .annotate({ description: "Replaces the preset's cells for this start." }),
+  ),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpStartOrganInput = typeof OrchestratorMcpStartOrganInput.Type;
+
+export const OrchestratorMcpStartOrganResult = Schema.Struct({
+  organId: OrganId,
+  round: PositiveInt,
+  tasks: Schema.Array(OrchestratorMcpDelegateTaskResult),
+  /** Cells that did not start, by their index in the expanded cell list; absent when all started. */
+  failed: Schema.optional(
+    Schema.Array(Schema.Struct({ index: NonNegativeInt, reason: Schema.String })),
+  ),
+});
+export type OrchestratorMcpStartOrganResult = typeof OrchestratorMcpStartOrganResult.Type;
+
+/** Static status dots shared by the Orchestration sidebar and t3_orchestration_tree. */
+export const OrchestrationDot = Schema.Literals([
+  "needs-you",
+  "failed",
+  "limited",
+  "woke",
+  "working",
+  "waiting",
+  "done-unread",
+  "idle",
+]);
+export type OrchestrationDot = typeof OrchestrationDot.Type;
+
+export const OrchestratorMcpOrchestrationTreeInput = Schema.Struct({
+  metaThreadId: Schema.optional(
+    ThreadId.annotate({ description: "Only this meta's tree; omitted, every meta's." }),
+  ),
+});
+export type OrchestratorMcpOrchestrationTreeInput =
+  typeof OrchestratorMcpOrchestrationTreeInput.Type;
+
+export const OrchestratorMcpOrchestrationTreeCell = Schema.Struct({
+  threadId: ThreadId,
+  role: Schema.NullOr(Schema.String),
+  model: Schema.NullOr(Schema.String),
+  status: OrchestratorMcpDelegatedTaskStatus,
+  dot: OrchestrationDot,
+});
+
+export const OrchestratorMcpOrchestrationTreeOrgan = Schema.Struct({
+  id: OrganId,
+  presetId: Schema.String,
+  goal: Schema.String,
+  round: PositiveInt,
+  cells: Schema.Array(OrchestratorMcpOrchestrationTreeCell),
+});
+
+export const OrchestratorMcpOrchestrationTreePod = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String,
+  dot: OrchestrationDot,
+  repoTag: Schema.optional(Schema.String),
+  organs: Schema.Array(OrchestratorMcpOrchestrationTreeOrgan),
+});
+
+export const OrchestratorMcpOrchestrationTreeSlice = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String,
+  dot: OrchestrationDot,
+  pods: Schema.Array(OrchestratorMcpOrchestrationTreePod),
+});
+
+export const OrchestratorMcpOrchestrationTree = Schema.Struct({
+  projects: Schema.Array(
+    Schema.Struct({
+      projectId: ProjectId,
+      branches: Schema.Array(
+        Schema.Struct({
+          branch: Schema.NullOr(Schema.String),
+          slices: Schema.Array(OrchestratorMcpOrchestrationTreeSlice),
+        }),
+      ),
+    }),
+  ),
+});
+export type OrchestratorMcpOrchestrationTree = typeof OrchestratorMcpOrchestrationTree.Type;
+
+export const OrchestratorMcpOrchestrationTreeResult = Schema.Struct({
+  metas: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      title: Schema.String,
+      dot: OrchestrationDot,
+      unread: NonNegativeInt,
+    }),
+  ),
+  noMeta: OrchestratorMcpOrchestrationTree,
+  trees: Schema.Record(ThreadId, OrchestratorMcpOrchestrationTree),
+  stale: Schema.Boolean,
+});
+export type OrchestratorMcpOrchestrationTreeResult =
+  typeof OrchestratorMcpOrchestrationTreeResult.Type;
+
+export const OrchestratorMcpOrchestrationStatsInput = Schema.Struct({});
+export type OrchestratorMcpOrchestrationStatsInput =
+  typeof OrchestratorMcpOrchestrationStatsInput.Type;
+
+export const OrchestratorMcpOrchestrationStatsResult = OrchestrationStatsSnapshot;
+export type OrchestratorMcpOrchestrationStatsResult =
+  typeof OrchestratorMcpOrchestrationStatsResult.Type;
 
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,
@@ -584,12 +720,35 @@ export const OrchestratorMcpRolePresetSummary = Schema.Struct({
     model: Schema.String,
   }),
   runsIn: Schema.optional(AgentRolePresetRunsIn),
-  /** Advisory: the roles this one may delegate to. The server does not enforce it. */
-  allowedChildRoles: Schema.optional(Schema.Array(Schema.String)),
+  allowedChildRoles: Schema.optional(
+    Schema.Array(Schema.String).annotate({
+      description: "Enforced for organ delegations; advisory otherwise.",
+    }),
+  ),
   /** Set when no enabled instance can run the preset's target. */
   unavailableReason: Schema.optional(Schema.String),
 });
 export type OrchestratorMcpRolePresetSummary = typeof OrchestratorMcpRolePresetSummary.Type;
+
+export const OrchestratorMcpOrganPresetSummary = Schema.Struct({
+  id: Schema.String,
+  label: Schema.String,
+  goalTemplate: Schema.String,
+  cells: Schema.Array(
+    Schema.Struct({
+      role: Schema.String,
+      count: Schema.Number,
+      target: Schema.optional(
+        Schema.Struct({
+          providerInstanceId: Schema.optional(ProviderInstanceId),
+          driverKind: Schema.optional(ProviderDriverKind),
+          model: Schema.String,
+        }),
+      ),
+    }),
+  ),
+});
+export type OrchestratorMcpOrganPresetSummary = typeof OrchestratorMcpOrganPresetSummary.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
@@ -600,6 +759,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   providers: Schema.Array(OrchestratorMcpProviderCapability),
   /** Missing on older servers. */
   rolePresets: Schema.optional(Schema.Array(OrchestratorMcpRolePresetSummary)),
+  /** Missing on older servers. */
+  organPresets: Schema.optional(Schema.Array(OrchestratorMcpOrganPresetSummary)),
   features: Schema.Struct({
     appOwnedSubagents: Schema.Boolean,
     asyncPolling: Schema.Boolean,
@@ -610,6 +771,10 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     scheduledTasks: Schema.Boolean,
     /** Missing on older servers, which have neither supervised launches nor follow-up wakes. */
     supervisedWakes: Schema.optional(Schema.Boolean),
+    /** Threads can be metas (`thread.meta.set`). Missing on older servers. */
+    metas: Schema.optional(Schema.Boolean),
+    /** start_organ and delegate_task's `organ`. Missing on older servers, which drop the label. */
+    organs: Schema.optional(Schema.Boolean),
     maxBatchThreads: Schema.Number,
     /** t3_usage_limits. Missing on older servers. */
     usageLimits: Schema.optional(Schema.Boolean),
