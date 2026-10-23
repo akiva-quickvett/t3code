@@ -376,6 +376,13 @@ export const OrchestrationV2SnoozeWhenIdle = Schema.Struct({
 });
 export type OrchestrationV2SnoozeWhenIdle = typeof OrchestrationV2SnoozeWhenIdle.Type;
 
+/** A tree settle asked for while work in the tree was active; it applies once that work ends. */
+export const OrchestrationV2SettleWhenIdle = Schema.Struct({
+  requestedAt: IsoDateTime,
+  scope: ThreadSnoozeScope,
+});
+export type OrchestrationV2SettleWhenIdle = typeof OrchestrationV2SettleWhenIdle.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -418,6 +425,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozeWhenIdle: Schema.optional(Schema.NullOr(OrchestrationV2SnoozeWhenIdle)),
+  settleWhenIdle: Schema.optional(Schema.NullOr(OrchestrationV2SettleWhenIdle)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -1885,6 +1893,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozeWhenIdle: Schema.optional(Schema.NullOr(OrchestrationV2SnoozeWhenIdle)),
+  settleWhenIdle: Schema.optional(Schema.NullOr(OrchestrationV2SettleWhenIdle)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2630,6 +2639,16 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     settledAt: Schema.optional(Schema.DateTimeUtc),
+    /**
+     * Absent means `thread`; `tree` also settles every thread under it in the
+     * agent tree, and waits for work in the tree to end instead of refusing.
+     */
+    scope: Schema.optional(ThreadSnoozeScope),
+    /**
+     * Set by the server when it applies a tree settle that waited for idle:
+     * the root takes it only while that request is still the pending one.
+     */
+    whenIdleRequestedAt: Schema.optional(IsoDateTime),
   }),
   /**
    * Rejected when the thread changed after `snapshotAt` or carries any explicit
@@ -2648,6 +2667,8 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     reason: Schema.Literal("user"),
+    /** Absent means `thread`; `tree` also unsettles every settled thread under it in the agent tree. */
+    scope: Schema.optional(ThreadSnoozeScope),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.snooze"),

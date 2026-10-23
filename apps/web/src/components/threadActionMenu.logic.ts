@@ -3,6 +3,7 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/model
 import { agentTreeDescendants } from "@t3tools/client-runtime/state/thread-relationships";
 import {
   type SnoozePreset,
+  type ThreadSettleTreeState,
   threadHasActiveWork,
   threadTreeHasActiveWork,
 } from "@t3tools/client-runtime/state/thread-settled";
@@ -16,6 +17,8 @@ export type ThreadActionMenuId =
   | "unpin"
   | "settle"
   | "unsettle"
+  | "settle-tree"
+  | "unsettle-tree"
   | "auto-settle"
   | "auto-settle:enabled"
   | "auto-settle:disabled"
@@ -83,6 +86,8 @@ export interface ThreadActionMenuState {
   } | null;
   readonly isPinned: boolean;
   readonly isSettled: boolean;
+  /** A tree settle waits for work to end; un-settling cancels it. */
+  readonly isSettlePending?: boolean;
   readonly autoSettleEnabled: boolean;
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
@@ -102,6 +107,8 @@ export interface ThreadActionMenuState {
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
   /** Present when the server snoozes agent trees; absent keeps the single-thread menu. */
   readonly snoozeTree?: ThreadSnoozeTreeMenuState;
+  /** Present when the server settles agent trees; absent keeps the single-thread menu. */
+  readonly settleTree?: ThreadSettleTreeState;
 }
 
 export interface ThreadSnoozeTreeMenuState {
@@ -199,6 +206,29 @@ function snoozeMenuItems(
   ];
 }
 
+/**
+ * Settling acts on the thread alone by default; the subtree variants reach
+ * the agents under it, including ones a collapsed row or the settled shelf
+ * hides. A subtree unsettle reopens what that subtree settle settled, which
+ * only the server knows, so it is offered whenever there are agents.
+ */
+function settleTreeMenuItems(
+  state: ThreadActionMenuState,
+): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
+  const tree = state.settleTree;
+  if (tree === undefined) return [];
+  return [
+    ...(state.isSettled && tree.hasDescendants
+      ? [{ id: "unsettle-tree" as const, label: "Unsettle with subtree", icon: "circle-check" }]
+      : []),
+    // On a settled root this re-settles agents woken since; a settle already
+    // waiting is not asked for twice.
+    ...(tree.hasUnsettledDescendants && state.isSettlePending !== true
+      ? [{ id: "settle-tree" as const, label: "Settle with subtree", icon: "circle-check" }]
+      : []),
+  ];
+}
+
 /** Local navigation, read markers, and copying remain available to read-only clients. */
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
   return ![
@@ -241,9 +271,12 @@ export function buildThreadActionMenuItems(
       ? [
           state.isSettled
             ? { id: "unsettle" as const, label: "Un-settle thread", icon: "circle-check" }
-            : { id: "settle" as const, label: "Settle thread", icon: "circle-check" },
+            : state.isSettlePending === true
+              ? { id: "unsettle" as const, label: "Cancel settle when idle", icon: "circle-check" }
+              : { id: "settle" as const, label: "Settle thread", icon: "circle-check" },
         ]
       : []),
+    ...(state.supports.settlement ? settleTreeMenuItems(state) : []),
     ...(state.supports.snooze ? snoozeMenuItems(state) : []),
     { id: "rename", label: "Rename thread", icon: "pencil", separatorBefore: true },
     ...(state.supports.titleRegeneration

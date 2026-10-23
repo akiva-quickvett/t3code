@@ -331,6 +331,14 @@ export function readEnvironmentSupportsSnoozeTree(environmentId: EnvironmentId):
   );
 }
 
+/** Settle and un-settle can cover the agent tree. */
+export function readEnvironmentSupportsSettleTree(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadSettleTree === true
+  );
+}
+
 export function readEnvironmentSupportsVisitedTracking(environmentId: EnvironmentId): boolean {
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities

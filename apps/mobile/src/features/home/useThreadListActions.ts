@@ -152,30 +152,31 @@ function useThreadActionExecutor(
         );
         return false;
       }
-      const result = await withThreadDismissal(
-        key,
-        async () =>
-          action === "unsettle"
-            ? // reason "user" pins the thread active: auto-settle stays
-              // suppressed until real activity clears the pin server-side.
-              await unsettleMutation({
-                environmentId: thread.environmentId,
-                input: { threadId: thread.id, reason: "user" },
-              })
-            : await (
-                action === "settle"
-                  ? settleMutation
-                  : action === "archive"
-                    ? archiveMutation
-                    : action === "unarchive"
-                      ? unarchiveMutation
-                      : deleteMutation
-              )({
-                environmentId: thread.environmentId,
-                input: { threadId: thread.id },
-              }),
-        (result) => result._tag === "Success",
-      );
+      const run = async () =>
+        action === "unsettle"
+          ? // reason "user" pins the thread active: auto-settle stays
+            // suppressed until real activity clears the pin server-side.
+            await unsettleMutation({
+              environmentId: thread.environmentId,
+              input: { threadId: thread.id, reason: "user" },
+            })
+          : await (
+              action === "settle"
+                ? settleMutation
+                : action === "archive"
+                  ? archiveMutation
+                  : action === "unarchive"
+                    ? unarchiveMutation
+                    : deleteMutation
+            )({
+              environmentId: thread.environmentId,
+              input: { threadId: thread.id },
+            });
+      // Cancelling a pending subtree settle leaves the row where it is, so it must not animate out.
+      const result =
+        action === "unsettle" && thread.settledOverride !== "settled"
+          ? await run()
+          : await withThreadDismissal(key, run, (result) => result._tag === "Success");
       if (result._tag === "Failure") {
         Dialog.alert(actionFailureTitle(action), actionFailureMessage(action, result.cause));
         return false;

@@ -165,6 +165,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * follow their threads' snooze; absent on stock servers, which ignore both.
    */
   threadSnoozeTree: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Server takes `scope` on thread settle and unsettle, and a tree settle waits
+   * for the work in the tree to end; absent on stock servers, which ignore it.
+   */
+  threadSettleTree: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

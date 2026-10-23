@@ -89,10 +89,14 @@ export interface ThreadCommandInput extends CommandMetadata {
 export type DeleteThreadInput = ThreadCommandInput;
 export type ArchiveThreadInput = ThreadCommandInput;
 export type UnarchiveThreadInput = ThreadCommandInput;
-export type SettleThreadInput = ThreadCommandInput;
+export interface SettleThreadInput extends ThreadCommandInput {
+  /** Only for servers that settle agent trees; others ignore it. */
+  readonly scope?: ThreadSnoozeScope;
+}
 
 export interface UnsettleThreadInput extends ThreadCommandInput {
   readonly reason: "user";
+  readonly scope?: ThreadSnoozeScope;
 }
 
 export interface PinThreadInput extends ThreadCommandInput {
@@ -416,13 +420,7 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
 });
 
 function simpleThreadCommand(
-  type:
-    | "thread.delete"
-    | "thread.archive"
-    | "thread.unarchive"
-    | "thread.settle"
-    | "thread.pin"
-    | "thread.unpin",
+  type: "thread.delete" | "thread.archive" | "thread.unarchive" | "thread.pin" | "thread.unpin",
   input: ThreadCommandInput,
 ) {
   return allocateCommandId(input).pipe(
@@ -451,7 +449,12 @@ export const unarchiveThread = Effect.fn("EnvironmentCommands.unarchiveThread")(
 export const settleThread = Effect.fn("EnvironmentCommands.settleThread")(function* (
   input: SettleThreadInput,
 ) {
-  return yield* simpleThreadCommand("thread.settle", input);
+  return yield* dispatch({
+    type: "thread.settle",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    ...(input.scope === undefined ? {} : { scope: input.scope }),
+  });
 });
 
 export const pinThread = Effect.fn("EnvironmentCommands.pinThread")(function* (
@@ -517,6 +520,7 @@ export const unsettleThread = Effect.fn("EnvironmentCommands.unsettleThread")(fu
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     reason: input.reason,
+    ...(input.scope === undefined ? {} : { scope: input.scope }),
   });
 });
 

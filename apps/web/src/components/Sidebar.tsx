@@ -35,7 +35,9 @@ import {
   canSnooze,
   effectiveSnoozed,
   hasQueuedTurnStart,
+  isSettlePending,
   QUEUED_TURN_START_GRACE_MS,
+  threadSettleTreeState,
   threadTreeHasActiveWork,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
@@ -145,6 +147,7 @@ import { showThreadInAgentTree } from "../state/agentTree";
 import {
   type AgentTree,
   type AgentTreeRow,
+  agentTreeDescendants,
   deriveAgentTree,
   flattenAgentTree,
 } from "@t3tools/client-runtime/state/thread-relationships";
@@ -153,7 +156,9 @@ import {
   useThreadSelectionStore,
 } from "../threadSelectionStore";
 import {
+  type ThreadSettleOptions,
   type ThreadSnoozeOptions,
+  treeSettleWaitsForIdle,
   useAcknowledgeThreadWoke,
   useThreadActions,
 } from "../hooks/useThreadActions";
@@ -175,6 +180,7 @@ import {
   usePrimaryEnvironmentId,
 } from "../state/environments";
 import {
+  readEnvironmentSupportsSettleTree,
   readEnvironmentSupportsSnoozeTree,
   readThreadShell,
   readThreadShells,
@@ -2300,6 +2306,29 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       </Tooltip>
     );
 
+  // A subtree settle waiting for the tree's work to end; the row's un-settle cancels it.
+  const settlePending = isSettlePending(thread);
+  // A settled root can also wait on a re-settle; its button stays an un-settle.
+  const cancelsSettle = settlePending && variantAction !== "unsettle";
+  const settleWhenIdleIndicator = settlePending ? (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <CircleCheckIcon
+            aria-label="Settles when idle"
+            role="img"
+            className="size-3 shrink-0 text-muted-foreground/65"
+          />
+        }
+      />
+      <TooltipPopup>Settles once its work ends</TooltipPopup>
+    </Tooltip>
+  ) : null;
+  const handleCancelSettlePointerDown = (event: ReactPointerEvent) => {
+    if (!event.isPrimary || event.button !== 0) return;
+    event.stopPropagation();
+  };
+
   if (variant === "slim") {
     return (
       <li
@@ -2359,8 +2388,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 <ThreadRoleBadge thread={thread} shrink />
               </span>
             )}
-            <PodChip environmentId={thread.environmentId} worktreePath={thread.worktreePath} slim />
+            <PodChip
+              environmentId={thread.environmentId}
+              worktreePath={thread.worktreePath}
+              slim
+              labeled={variantAction === "unsettle"}
+            />
             {snoozeWhenIdleIndicator}
+            {settleWhenIdleIndicator}
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -2433,15 +2468,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       <AlarmClockOffIcon className="mb-px size-3" />
                     </button>
                   )
-                ) : !props.settlementSupported ? null : variantAction === "unsettle" ? (
+                ) : !props.settlementSupported ? null : variantAction === "unsettle" ||
+                  settlePending ? (
                   <Tooltip>
                     <TooltipTrigger
                       render={
                         <button
                           type="button"
-                          aria-label="Un-settle thread"
+                          aria-label={
+                            cancelsSettle ? "Cancel settle when idle" : "Un-settle thread"
+                          }
                           onClick={handleUnsettleClick}
-                          onPointerDown={handleActionPointerDown}
+                          onPointerDown={
+                            cancelsSettle ? handleCancelSettlePointerDown : handleActionPointerDown
+                          }
                           className={cn(
                             "pointer-events-none absolute inset-y-0 right-0 -mr-1 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-any-hover/sidebar-row:pointer-events-auto group-any-hover/sidebar-row:opacity-100",
                             isWoke && "group-any-hover/sidebar-row:static",
@@ -2451,7 +2491,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     >
                       <Undo2Icon className="mb-px size-3.5" />
                     </TooltipTrigger>
-                    <TooltipPopup side="top">Un-settle thread</TooltipPopup>
+                    <TooltipPopup side="top">
+                      {cancelsSettle ? "Cancel settle when idle" : "Un-settle thread"}
+                    </TooltipPopup>
                   </Tooltip>
                 ) : (
                   <button
@@ -2530,6 +2572,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 <span className="flex-1" />
               )}
               {snoozeWhenIdleIndicator}
+              {settleWhenIdleIndicator}
               {pinIndicator}
               {sortable?.isDragging ? (
                 dragDestination
@@ -2646,7 +2689,25 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           timestampFormat={props.timestampFormat}
                         />
                       ) : null}
-                      {props.settlementSupported ? (
+                      {!props.settlementSupported ? null : settlePending ? (
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <button
+                                type="button"
+                                aria-label="Cancel settle when idle"
+                                onClick={handleUnsettleClick}
+                                onPointerDown={handleCancelSettlePointerDown}
+                                className="-mr-1 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground"
+                              />
+                            }
+                          >
+                            <Undo2Icon className="size-3.5" />
+                            Cancel
+                          </TooltipTrigger>
+                          <TooltipPopup>Cancel settle when idle</TooltipPopup>
+                        </Tooltip>
+                      ) : (
                         <Tooltip>
                           <TooltipTrigger
                             render={
@@ -2664,7 +2725,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           </TooltipTrigger>
                           <TooltipPopup>Settle thread</TooltipPopup>
                         </Tooltip>
-                      ) : null}
+                      )}
                     </span>
                   ) : null}
                 </span>
@@ -3490,14 +3551,19 @@ export default function Sidebar() {
 
   const attemptSettle = (
     threadRef: ScopedThreadRef,
-    opts: { coSettlingKeys?: ReadonlySet<string> } = {},
+    opts: { coSettlingKeys?: ReadonlySet<string>; settle?: ThreadSettleOptions } = {},
   ) => {
     void (async () => {
       const threadKey = scopedThreadKey(threadRef);
       if (settlingThreadKeysRef.current.has(threadKey)) return;
       settlingThreadKeysRef.current.add(threadKey);
       const navigateAfterSettle = planForwardNavigation(threadKey, opts.coSettlingKeys);
-      const result = await settleThread(threadRef);
+      // A subtree settle is not shown before the server applies it, and the
+      // reply can beat the projection, so its outcome is predicted up front.
+      const treeSettle =
+        opts.settle?.scope === "tree" && readEnvironmentSupportsSettleTree(threadRef.environmentId);
+      const treeSettleWaits = treeSettle && treeSettleWaitsForIdle(threadRef);
+      const result = await settleThread(threadRef, opts.settle);
       settlingThreadKeysRef.current.delete(threadKey);
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
@@ -3513,13 +3579,15 @@ export default function Sidebar() {
         return;
       }
       if (
-        shouldNavigateAfterThreadPark({
-          threadKey,
-          currentThreadKey: routeThreadKeyRef.current,
-          action: "settle",
-          now: new Date().toISOString(),
-          thread: readThreadShell(threadRef),
-        })
+        treeSettle
+          ? !treeSettleWaits && threadKey === routeThreadKeyRef.current
+          : shouldNavigateAfterThreadPark({
+              threadKey,
+              currentThreadKey: routeThreadKeyRef.current,
+              action: "settle",
+              now: new Date().toISOString(),
+              thread: readThreadShell(threadRef),
+            })
       ) {
         navigateAfterSettle?.();
       }
@@ -3530,13 +3598,13 @@ export default function Sidebar() {
     const coSettlingKeys = new Set(threadKeys);
     for (const threadKey of threadKeys) {
       const thread = threadByKeyRef.current.get(threadKey);
-      if (!thread || thread.settledOverride === "settled") continue;
+      if (!thread || thread.settledOverride === "settled" || isSettlePending(thread)) continue;
       attemptSettle(scopeThreadRef(thread.environmentId, thread.id), { coSettlingKeys });
     }
   };
-  const attemptUnsettle = (threadRef: ScopedThreadRef) => {
+  const attemptUnsettle = (threadRef: ScopedThreadRef, options: ThreadSettleOptions = {}) => {
     void (async () => {
-      const result = await unsettleThread(threadRef);
+      const result = await unsettleThread(threadRef, options);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -4092,6 +4160,18 @@ export default function Sidebar() {
       }
     })();
   };
+  /** A tree settle or snooze parks these with the thread, so navigation must skip them all. */
+  const withAgentTreeKeys = (
+    threadRef: ScopedThreadRef,
+    keys: ReadonlySet<string> | undefined,
+  ): ReadonlySet<string> => {
+    const root = readThreadShell(threadRef);
+    return new Set([
+      ...(keys ?? []),
+      scopedThreadKey(threadRef),
+      ...(root === null ? [] : agentTreeDescendants(root, readThreadShells()).map(threadShellKey)),
+    ]);
+  };
   /** A quick snooze covers the tree and waits for its work rather than being refused. */
   const quickSnoozeOptions = (threadRef: ScopedThreadRef): ThreadSnoozeOptions => {
     const thread = readThreadShell(threadRef);
@@ -4112,7 +4192,13 @@ export default function Sidebar() {
       return { status: "skipped" } as const;
     }
     snoozingThreadKeysRef.current.add(threadKey);
-    const navigateAfterSnooze = planForwardNavigation(threadKey, opts.coSnoozingKeys);
+    const snoozesTree =
+      readEnvironmentSupportsSnoozeTree(threadRef.environmentId) &&
+      (opts.snooze?.scope ?? "tree") === "tree";
+    const navigateAfterSnooze = planForwardNavigation(
+      threadKey,
+      snoozesTree ? withAgentTreeKeys(threadRef, opts.coSnoozingKeys) : opts.coSnoozingKeys,
+    );
     const result = await snoozeThread(
       threadRef,
       preset.snoozedUntil,
@@ -4503,6 +4589,12 @@ export default function Sidebar() {
           shell !== null && readEnvironmentSupportsSnoozeTree(thread.environmentId)
             ? threadSnoozeTreeMenuState(shell, readThreadShells(), new Date().toISOString())
             : undefined;
+        const settleTree =
+          shell !== null &&
+          supportsSettlement &&
+          readEnvironmentSupportsSettleTree(thread.environmentId)
+            ? threadSettleTreeState(shell, readThreadShells())
+            : undefined;
         const threadProjectGroup =
           projectGroupsRef.current.find((project) =>
             project.memberProjectRefs.some(
@@ -4527,6 +4619,7 @@ export default function Sidebar() {
                 : null,
               isPinned,
               isSettled,
+              isSettlePending: supportsSettlement && isSettlePending(thread),
               autoSettleEnabled: thread.autoSettleDisabledAt == null,
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
@@ -4543,6 +4636,7 @@ export default function Sidebar() {
               },
               snoozePresets,
               ...(snoozeTree === undefined ? {} : { snoozeTree }),
+              ...(settleTree === undefined ? {} : { settleTree }),
             }),
             position,
           ),
@@ -4609,6 +4703,15 @@ export default function Sidebar() {
             return;
           case "unsettle":
             attemptUnsettle(threadRef);
+            return;
+          case "settle-tree":
+            attemptSettle(threadRef, {
+              settle: { scope: "tree" },
+              coSettlingKeys: withAgentTreeKeys(threadRef, undefined),
+            });
+            return;
+          case "unsettle-tree":
+            attemptUnsettle(threadRef, { scope: "tree" });
             return;
           case "cancel-snooze-when-idle":
             attemptUnsnooze(threadRef, { scope: "thread" });

@@ -97,6 +97,8 @@ export function resolveThreadListV2SwipeActions(input: {
   readonly snoozeSupported: boolean;
   readonly snoozable: boolean;
   readonly snoozed?: boolean;
+  /** A subtree settle waits for work to end; un-settling cancels it. */
+  readonly settlePending?: boolean;
 }): {
   readonly primary: Exclude<ThreadListV2SwipeAction, "snooze">;
   readonly secondary: "snooze" | null;
@@ -105,7 +107,7 @@ export function resolveThreadListV2SwipeActions(input: {
     return { primary: "unsnooze", secondary: null };
   }
   const primary = input.settlementSupported
-    ? input.variant === "slim"
+    ? input.variant === "slim" || input.settlePending === true
       ? "unsettle"
       : "settle"
     : "archive";
