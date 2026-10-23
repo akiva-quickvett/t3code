@@ -132,6 +132,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_usage_limits: tool(["Read", "Reading", "Read", "usage limits"], "usage-limits"),
   t3_usage_thread_tree: tool(["Read", "Reading", "Read", "thread tree usage"], "usage-thread-tree"),
   delegate_task: tool(["Delegate", "Delegating", "Delegated", "a child task"], "delegate"),
+  start_organ: tool(["Start", "Starting", "Started", "an organ"], "delegate"),
   task_status: tool(["Get", "Getting", "Got", "delegated task status"], "task-status"),
   task_cancel: tool(
     ["Cancel", "Canceling", "Requested cancellation of", "delegated task"],

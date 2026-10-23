@@ -6930,19 +6930,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.title === undefined ? {} : { title: command.title }),
         ordinal: parentProjection.subagents.length + 1,
       });
+      const childThreadBase = makeSubagentChildThread({
+        parentThread: parentProjection.thread,
+        childThreadId,
+        parentNodeId: taskNodeId,
+        activeProviderThreadId: null,
+        providerInstanceId: command.modelSelection.instanceId,
+        modelSelection: command.modelSelection,
+        title: taskTitle,
+        now,
+        createdBy: command.createdBy,
+        creationSource: command.creationSource,
+      });
       const childThread: OrchestrationV2AppThread = {
-        ...makeSubagentChildThread({
-          parentThread: parentProjection.thread,
-          childThreadId,
-          parentNodeId: taskNodeId,
-          activeProviderThreadId: null,
-          providerInstanceId: command.modelSelection.instanceId,
-          modelSelection: command.modelSelection,
-          title: taskTitle,
-          now,
-          createdBy: command.createdBy,
-          creationSource: command.creationSource,
-        }),
+        ...childThreadBase,
+        // The builder rebuilds lineage, so the organ label goes on after it.
+        ...(command.organ === undefined
+          ? {}
+          : { lineage: { ...childThreadBase.lineage, organ: command.organ } }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
         ...(command.rolePreset === undefined ? {} : { rolePreset: command.rolePreset }),
@@ -6964,6 +6969,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         title: command.title ?? null,
         model: command.modelSelection.model,
         ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
+        ...(command.organ === undefined ? {} : { organ: command.organ }),
         status: "running",
         result: null,
         startedAt: now,

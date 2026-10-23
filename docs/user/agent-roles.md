@@ -18,7 +18,8 @@ that had it keep its name, marked as removed. The instructions reach the agent w
 the conversation.
 
 Agents see the same roles and can start threads and subagents with one, so a reviewer an agent
-delegates to gets the reviewer's model and instructions.
+delegates to gets the reviewer's model and instructions. Allowed child roles are enforced when an
+organ starts or adds a round; other delegations treat them as advice.
 
 ## New ticket
 
