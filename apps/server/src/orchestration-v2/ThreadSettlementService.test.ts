@@ -661,6 +661,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     updateSettings,
     updateProviderInstance: () => Effect.die("Unexpected provider mutation"),
     updateAgentRolePresets: () => Effect.die("Unexpected role preset mutation"),
+    updateOrganPresets: () => Effect.die("Unexpected organ preset mutation"),
     withSettingsSnapshot: (use) => Ref.get(settings).pipe(Effect.flatMap(use)),
     streamChanges: Stream.fromPubSub(settingsChanges),
     subscribeChanges: PubSub.subscribe(settingsChanges).pipe(

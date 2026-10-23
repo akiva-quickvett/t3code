@@ -458,6 +458,39 @@ it.effect("thread resume across compacted history keeps message order and final 
   ),
 );
 
+it.effect("pushes no settings update and no organ layers for a change only organ presets see", () =>
+  Effect.gen(function* () {
+    const withOrgan = {
+      ...DEFAULT_SERVER_SETTINGS,
+      organPresets: {
+        environment: {
+          overrides: {
+            scouts: {
+              id: "scouts",
+              label: "Wide scouts",
+              goalTemplate: "Scout: {goal}",
+              cells: [{ role: "scout", count: 6 }],
+            },
+          },
+          removed: ["research"],
+        },
+        projects: {},
+      },
+    };
+    const events = yield* clientSettingsUpdates(
+      Stream.make(DEFAULT_SERVER_SETTINGS, withOrgan, {
+        ...withOrgan,
+        enableProviderUpdateChecks: false,
+      }),
+    ).pipe(Stream.runCollect);
+
+    assert.deepEqual(
+      Array.from(events, (event) => event.payload.settings.organPresets),
+      [DEFAULT_SERVER_SETTINGS.organPresets, DEFAULT_SERVER_SETTINGS.organPresets],
+    );
+  }),
+);
+
 it.effect("pushes no settings update for a change only role presets see", () =>
   Effect.gen(function* () {
     const withRole = {

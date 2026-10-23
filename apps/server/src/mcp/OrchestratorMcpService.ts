@@ -103,6 +103,7 @@ import { podRefusalReason } from "../provider/PodProviderSessions.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
+import { buildOrganPresetList } from "../organs/OrganPresetService.ts";
 import {
   buildAgentRolePresetList,
   findAgentRolePresetIn,
@@ -2296,6 +2297,7 @@ const make = Effect.gen(function* () {
         const modelPreferences = settings.providerModelPreferences ?? {};
         const now = yield* Clock.currentTimeMillis;
         const rolePresets = yield* loadRolePresets(parent?.thread.projectId);
+        const organPresetList = buildOrganPresetList(settings, parent?.thread.projectId);
         return {
           parentThreadId: parent?.thread.id ?? null,
           inheritedProviderInstanceId: parent?.thread.modelSelection.instanceId ?? null,
@@ -2356,6 +2358,28 @@ const make = Effect.gen(function* () {
             ...(preset.unavailable === null
               ? {}
               : { unavailableReason: preset.unavailable.reason }),
+          })),
+          organPresets: organPresetList.presets.map((preset) => ({
+            id: preset.id,
+            label: preset.label,
+            goalTemplate: preset.goalTemplate,
+            cells: preset.cells.map((cell) => ({
+              role: cell.role,
+              count: cell.count,
+              ...(cell.target === undefined
+                ? {}
+                : {
+                    target: {
+                      ...(cell.target.providerInstanceId === undefined
+                        ? {}
+                        : { providerInstanceId: cell.target.providerInstanceId }),
+                      ...(cell.target.driverKind === undefined
+                        ? {}
+                        : { driverKind: cell.target.driverKind }),
+                      model: cell.target.model,
+                    },
+                  }),
+            })),
           })),
           features: {
             appOwnedSubagents: true,

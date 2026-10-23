@@ -266,6 +266,7 @@ export const make = Effect.gen(function* () {
       ...(desktopAppUpdate ? { desktopAppUpdate: true } : {}),
       serverBrowser: true,
       agentRolePresets: true,
+      organPresets: true,
       pullRequestLabelRules: true,
       scheduledTaskScripts: true,
       chatChannels: true,

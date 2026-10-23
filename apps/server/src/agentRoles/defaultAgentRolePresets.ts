@@ -5,7 +5,6 @@ import {
 } from "@t3tools/contracts";
 
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
-const CURSOR = ProviderDriverKind.make("cursor");
 
 const claude = (model: string, effort: string): AgentRolePresetTarget => ({
   driverKind: CLAUDE,
@@ -17,11 +16,6 @@ const OPUS_HIGH = claude("claude-opus-5-5", "high");
 const OPUS_XHIGH = claude("claude-opus-5-5", "xhigh");
 const SONNET_HIGH = claude("claude-sonnet-5-5", "high");
 const FABLE_HIGH = claude("claude-fable-5-1", "high");
-const GROK_HIGH: AgentRolePresetTarget = {
-  driverKind: CURSOR,
-  model: "grok-4.7",
-  options: [{ id: "effort", value: "high" }],
-};
 
 const SKILL = "t3-orchestration";
 
@@ -70,10 +64,12 @@ export const DEFAULT_AGENT_ROLE_PRESETS: ReadonlyArray<AgentRolePreset> = [
       allowedChildRoles: [
         "broker",
         "research",
+        "designer",
         "scout",
         "review-t1",
         "review-t2",
         "review-t3",
+        "review-t3-grok",
         "ticket",
       ],
     },
@@ -90,6 +86,7 @@ export const DEFAULT_AGENT_ROLE_PRESETS: ReadonlyArray<AgentRolePreset> = [
         "tester",
         "scout",
         "research",
+        "designer",
         "review-t1",
         "review-t2",
         "review-t3",
@@ -128,14 +125,21 @@ export const DEFAULT_AGENT_ROLE_PRESETS: ReadonlyArray<AgentRolePreset> = [
     "Investigate approaches, libraries and edge cases in depth. Return options with trade-offs and a ranked recommendation.",
     { isolation: "shared" },
   ),
+  preset(
+    "designer",
+    "Designer",
+    OPUS_HIGH,
+    "Decide the design locks you're asked for. For each, log the options you rejected and why. Follow the t3-orchestration skill's design-loop section.",
+    { isolation: "shared" },
+  ),
   reviewer(1, SONNET_HIGH, { isolation: "shared" }),
   reviewer(2, OPUS_HIGH, { isolation: "shared" }),
   reviewer(3, OPUS_HIGH, { isolation: "shared" }),
   preset(
     "review-t3-grok",
-    "Reviewer (tier 3, Grok)",
-    GROK_HIGH,
-    "The second tier 3 reviewer, beside the Opus one: assume the code is wrong and try to break it. Never edit code. Reply once per round: each finding with file, line, severity and a concrete fix.",
+    "Reviewer (tier 3, second)",
+    OPUS_HIGH,
+    "The second tier 3 reviewer: assume the code is wrong and try to break it, independently of the other tier 3 reviewer. Never edit code. Reply once per round: each finding with file, line, severity and a concrete fix.",
     { isolation: "shared", runsIn: "host" },
   ),
   reviewer(4, OPUS_XHIGH, { isolation: "shared" }),

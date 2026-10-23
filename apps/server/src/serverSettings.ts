@@ -129,12 +129,16 @@ const normalizeServerSettings = (
   );
 
 /**
- * Role presets reach clients merged, through agentRoles.subscribe, so the raw
- * layers stay out of every settings push.
+ * Role and organ presets reach clients merged, through agentRoles.subscribe
+ * and organPresets.subscribe, so the raw layers stay out of every settings push.
  */
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
-  const withoutRoles = { ...settings, agentRolePresets: DEFAULT_SERVER_SETTINGS.agentRolePresets };
-  return mapSettingsSecrets(withoutRoles, (secret) =>
+  const withoutPresets = {
+    ...settings,
+    agentRolePresets: DEFAULT_SERVER_SETTINGS.agentRolePresets,
+    organPresets: DEFAULT_SERVER_SETTINGS.organPresets,
+  };
+  return mapSettingsSecrets(withoutPresets, (secret) =>
     secret.sensitive
       ? { value: "", redacted: secret.redacted || secret.value.length > 0 }
       : { value: secret.value, redacted: false },
@@ -194,6 +198,10 @@ export class ServerSettingsService extends Context.Service<
 
     readonly updateAgentRolePresets: (
       update: (current: ServerSettings["agentRolePresets"]) => ServerSettings["agentRolePresets"],
+    ) => Effect.Effect<ServerSettings, ServerSettingsError>;
+
+    readonly updateOrganPresets: (
+      update: (current: ServerSettings["organPresets"]) => ServerSettings["organPresets"],
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
     readonly withSettingsSnapshot: <A, E, R>(
@@ -267,6 +275,13 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
           Effect.succeed({
             ...currentSettings,
             agentRolePresets: update(currentSettings.agentRolePresets),
+          }),
+        ),
+      updateOrganPresets: (update) =>
+        updateTestSettings((currentSettings) =>
+          Effect.succeed({
+            ...currentSettings,
+            organPresets: update(currentSettings.organPresets),
           }),
         ),
       withSettingsSnapshot: (use) =>
@@ -1179,6 +1194,10 @@ const make = Effect.gen(function* () {
     updateAgentRolePresets: (update) =>
       updateAndPersistSettings((current) =>
         Effect.succeed({ ...current, agentRolePresets: update(current.agentRolePresets) }),
+      ),
+    updateOrganPresets: (update) =>
+      updateAndPersistSettings((current) =>
+        Effect.succeed({ ...current, organPresets: update(current.organPresets) }),
       ),
     withSettingsSnapshot,
     get streamChanges() {
