@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  NodeId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -9,8 +10,10 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import {
+  deriveOrganGroups,
   deriveWorkflowGroups,
   isWorkflowScriptMessage,
+  organIdsBySubagentId,
   projectedSubagentsToRuntime,
   resolveWorkflowOpening,
   workflowOpeningHeadline,
@@ -383,5 +386,144 @@ describe("resolveWorkflowOpening", () => {
       description: null,
       agents: null,
     });
+  });
+});
+
+describe("deriveOrganGroups", () => {
+  type OrganRecord = Parameters<typeof deriveOrganGroups>[0][number];
+  type CellShell = NonNullable<ReturnType<Parameters<typeof deriveOrganGroups>[1]>>;
+  const organ = (id: string, round: number) => ({
+    id: `organ_${id}`,
+    presetId: "implementation",
+    goal: `Goal of ${id}`,
+    round,
+  });
+  const record = (
+    id: string,
+    child: string | null,
+    label: ReturnType<typeof organ> | undefined,
+    overrides: Partial<OrganRecord> = {},
+  ): OrganRecord => ({
+    id: NodeId.make(id),
+    childThreadId: child === null ? null : ThreadId.make(child),
+    ...(label === undefined ? {} : { organ: label }),
+    status: "running",
+    model: "gpt-5.5",
+    title: id,
+    updatedAt: at("2026-08-01T10:00:00.000Z"),
+    ...overrides,
+  });
+  const shell = (overrides: Partial<CellShell> = {}): CellShell => ({
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    ...overrides,
+  });
+  const noShells = () => undefined;
+
+  it("puts a later round into the existing organ group", () => {
+    const groups = deriveOrganGroups(
+      [
+        record("a", "child-a", organ("one", 1)),
+        record("b", "child-b", organ("one", 1)),
+        record("plain", "child-plain", undefined),
+        record("c", "child-c", organ("one", 1)),
+        record("other", "child-other", organ("two", 1)),
+        record("d", "child-d", organ("one", 2)),
+      ],
+      noShells,
+    );
+    expect(groups.map((group) => group.organId)).toEqual(["organ_one", "organ_two"]);
+    expect(groups[0]).toMatchObject({ presetId: "implementation", goal: "Goal of one" });
+    expect(
+      groups[0]!.rounds.map(({ round, cells }) => [round, cells.map((cell) => cell.subagentId)]),
+    ).toEqual([
+      [1, ["a", "b", "c"]],
+      [2, ["d"]],
+    ]);
+  });
+
+  it("lists a followed-up cell once with its latest record's status", () => {
+    const [group] = deriveOrganGroups(
+      [
+        record("follow-up", "child-a", organ("one", 1), {
+          status: "running",
+          updatedAt: at("2026-08-01T10:05:00.000Z"),
+        }),
+        record("first", "child-a", organ("one", 1), {
+          status: "completed",
+          updatedAt: at("2026-08-01T10:01:00.000Z"),
+        }),
+        record("b", "child-b", organ("one", 1)),
+      ],
+      noShells,
+    );
+    expect(group!.rounds).toHaveLength(1);
+    expect(
+      group!.rounds[0]!.cells.map(({ childThreadId, subagentId, status }) => ({
+        childThreadId,
+        subagentId,
+        status,
+      })),
+    ).toEqual([
+      { childThreadId: "child-a", subagentId: "follow-up", status: "running" },
+      { childThreadId: "child-b", subagentId: "b", status: "running" },
+    ]);
+  });
+
+  it("takes each cell's role and attention from the child's own shell", () => {
+    const shells = new Map([
+      ["child-a", shell({ rolePreset: { id: "reviewer", label: "Reviewer" } })],
+      ["child-b", shell({ hasPendingApprovals: true })],
+    ]);
+    const [group] = deriveOrganGroups(
+      [
+        record("a", "child-a", organ("one", 1)),
+        record("b", "child-b", organ("one", 1)),
+        record("pending", null, organ("one", 1)),
+      ],
+      (childThreadId) => shells.get(childThreadId),
+    );
+    expect(
+      group!.rounds[0]!.cells.map(({ subagentId, role, needsYou }) => ({
+        subagentId,
+        role,
+        needsYou,
+      })),
+    ).toEqual([
+      { subagentId: "a", role: { id: "reviewer", label: "Reviewer" }, needsYou: false },
+      { subagentId: "b", role: null, needsYou: true },
+      { subagentId: "pending", role: null, needsYou: false },
+    ]);
+  });
+
+  it.each([
+    { statuses: ["running", "completed"], running: true, outcome: undefined },
+    { statuses: ["idle", "completed"], running: false, outcome: undefined },
+    { statuses: ["completed", "completed"], running: false, outcome: "completed" },
+    { statuses: ["completed", "interrupted"], running: false, outcome: "stopped" },
+    { statuses: ["cancelled", "failed"], running: false, outcome: "failed" },
+  ] as const)(
+    "derives running $running and outcome $outcome from $statuses",
+    ({ statuses, running, outcome }) => {
+      const [group] = deriveOrganGroups(
+        statuses.map((status, index) =>
+          record(`cell-${index}`, `child-${index}`, organ("one", 1), { status }),
+        ),
+        noShells,
+      );
+      expect(group!.running).toBe(running);
+      expect(group!.outcome).toBe(outcome);
+    },
+  );
+
+  it("ignores unlabelled records and returns the same empty result without organs", () => {
+    const unlabelled = [record("a", "child-a", undefined), record("b", "child-b", undefined)];
+    const first = deriveOrganGroups(unlabelled, noShells);
+    expect(first).toEqual([]);
+    expect(deriveOrganGroups([], noShells)).toBe(first);
+    expect(organIdsBySubagentId(unlabelled)).toBeUndefined();
+    expect(organIdsBySubagentId([...unlabelled, record("c", "child-c", organ("one", 2))])).toEqual(
+      new Map([["c", "organ_one"]]),
+    );
   });
 });

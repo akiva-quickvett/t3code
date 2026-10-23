@@ -48,6 +48,7 @@ import {
 } from "../../types";
 import {
   type MessageId,
+  type OrganId,
   type WorktreeSetupSnapshot,
   type OrchestrationV2ProjectedTurnItem,
   type RunAttemptId,
@@ -586,6 +587,8 @@ type MessagesTimelineRowContent =
       createdAt: string;
       projectedItem: OrchestrationV2ProjectedTurnItem;
       subagents?: ReadonlyArray<OrchestrationV2ProjectedTurnItem>;
+      /** The row holds every cell of this organ; its id is `organ:<organId>`. */
+      organId?: OrganId;
       resourceSummary?: boolean;
     }
   | {
@@ -1235,6 +1238,41 @@ function attachTrailingToolGroupsToAssistant(
   return result;
 }
 
+/**
+ * Each organ's subagent items in timeline order, across runs and turns. A follow-up task shares
+ * its cell's child thread, so the later item takes the earlier one's slot.
+ */
+function organSubagentItems(
+  entries: ReadonlyArray<TimelineEntry>,
+  organIdBySubagentId: ReadonlyMap<string, OrganId>,
+): ReadonlyMap<OrganId, { readonly items: ReadonlyArray<OrchestrationV2ProjectedTurnItem> }> {
+  const organs = new Map<
+    OrganId,
+    { items: OrchestrationV2ProjectedTurnItem[]; slotByChild: Map<string, number> }
+  >();
+  for (const entry of entries) {
+    if (entry.kind !== "event") continue;
+    const { item } = entry.projectedItem;
+    if (item.type !== "subagent") continue;
+    const organId = organIdBySubagentId.get(item.subagentId);
+    if (organId === undefined) continue;
+    let organ = organs.get(organId);
+    if (organ === undefined) {
+      organ = { items: [], slotByChild: new Map() };
+      organs.set(organId, organ);
+    }
+    const slot =
+      item.childThreadId === null ? undefined : organ.slotByChild.get(item.childThreadId);
+    if (slot !== undefined) {
+      organ.items[slot] = entry.projectedItem;
+      continue;
+    }
+    if (item.childThreadId !== null) organ.slotByChild.set(item.childThreadId, organ.items.length);
+    organ.items.push(entry.projectedItem);
+  }
+  return organs;
+}
+
 // Delegation already has a durable child card. Remove its tool row only after
 // the returned task ID identifies that child; pending calls can share a prompt.
 function withoutSubagentDelegationRows(entries: ReadonlyArray<TimelineEntry>) {
@@ -1335,6 +1373,11 @@ export function deriveMessagesTimelineRows(input: {
   supportsConversationRollback: boolean;
   liveAgentTaskIds?: ReadonlySet<string> | undefined;
   worktreeSetup?: WorktreeSetupSnapshot | null;
+  /**
+   * Labelled subagents group by organ instead of by adjacency. Must be reference-stable across
+   * renders (memoize on `projection.subagents`), or the streaming fast path never applies.
+   */
+  organIdBySubagentId?: ReadonlyMap<string, OrganId> | undefined;
 }): MessagesTimelineRow[] {
   const timelineEntries = timelineRowEntries(input.timelineEntries);
   const turnDiffSummaryByAssistantMessageId = new Map<MessageId, TurnDiffSummary>();
@@ -1502,6 +1545,13 @@ export function deriveMessagesTimelineRows(input: {
       ),
     );
   };
+
+  const organIdBySubagentId = input.organIdBySubagentId?.size
+    ? input.organIdBySubagentId
+    : undefined;
+  const organItems =
+    organIdBySubagentId && organSubagentItems(timelineEntries, organIdBySubagentId);
+  const placedOrganIds = new Set<OrganId>();
 
   for (let index = 0; index < timelineEntries.length; index += 1) {
     const timelineEntry = timelineEntries[index];
@@ -1763,10 +1813,29 @@ export function deriveMessagesTimelineRows(input: {
     }
 
     if (timelineEntry.kind === "event") {
+      const { item } = timelineEntry.projectedItem;
+      const organId =
+        item.type === "subagent" ? organIdBySubagentId?.get(item.subagentId) : undefined;
+      if (organItems && organId !== undefined) {
+        // The organ's first visible item places the whole organ; later rounds join it.
+        if (placedOrganIds.has(organId)) continue;
+        placedOrganIds.add(organId);
+        const subagents = organItems.get(organId)!.items;
+        nextRows.push({
+          kind: "event",
+          id: `organ:${organId}`,
+          createdAt: timelineEntry.createdAt,
+          projectedItem: subagents[0]!,
+          subagents,
+          organId,
+        });
+        continue;
+      }
       const previous = nextRows.at(-1);
       if (
         timelineEntry.projectedItem.item.type === "subagent" &&
         previous?.kind === "event" &&
+        previous.organId === undefined &&
         previous.projectedItem.item.type === "subagent" &&
         previous.projectedItem.item.runId === timelineEntry.projectedItem.item.runId &&
         previous.projectedItem.item.providerTurnId ===
