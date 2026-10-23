@@ -91,7 +91,11 @@ import {
 } from "@t3tools/client-runtime/errors";
 import { readPastedComposerContext } from "./composerInlineTokenPaste";
 import { isPasteAsTextShortcut } from "@t3tools/client-runtime/text-paste";
-import { effectiveSnoozed, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  effectiveSnoozed,
+  isSettlePending,
+  threadWokeAt,
+} from "@t3tools/client-runtime/state/thread-settled";
 import { childThreadInputsTitle } from "@t3tools/client-runtime/state/threads";
 import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
 import {
@@ -5625,7 +5629,11 @@ export default function ChatView(props: ChatViewProps) {
       "thread.settle": () => {
         if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return false;
         if (!isServerThread || !activeThreadRef || !supportsSettlement) return;
-        if (activeThreadSettled) {
+        // A subtree settle waiting for work is not settled yet; this cancels it.
+        if (
+          activeThreadSettled ||
+          (activeThreadShell != null && isSettlePending(activeThreadShell))
+        ) {
           void handleUnsettleActiveThreadStable();
           return;
         }

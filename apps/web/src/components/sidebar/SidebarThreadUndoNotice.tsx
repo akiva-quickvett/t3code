@@ -17,7 +17,10 @@ export function SidebarThreadUndoNotice() {
   return (
     <Alert role="status" variant="sidebar">
       <AlertDescription>
-        {notice.action} {notice.count} {noun},{" "}
+        {notice.action === "Settles when idle"
+          ? `${notice.count} ${noun} ${notice.count === 1 ? "settles" : "settle"} when idle`
+          : `${notice.action} ${notice.count} ${noun}`}
+        ,{" "}
         <InlineButton onClick={undoLatestThreadAction}>
           {shortcut ? `${shortcut} to undo` : "Undo"}
         </InlineButton>

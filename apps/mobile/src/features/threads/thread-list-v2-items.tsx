@@ -19,7 +19,11 @@ import type {
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
 import { AuthOrchestrationOperateScope, type EnvironmentMachineKind } from "@t3tools/contracts";
-import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  canSnooze,
+  isSettlePending,
+  resolveSnoozePresets,
+} from "@t3tools/client-runtime/state/thread-settled";
 import type { MenuAction } from "@react-native-menu/menu";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { Pressable, useWindowDimensions, View } from "react-native";
@@ -625,6 +629,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const handleMoveDown = useCallback(() => onMoveThread?.(thread, "down"), [onMoveThread, thread]);
   const handleArchive = useCallback(() => onArchiveThread(thread), [onArchiveThread, thread]);
 
+  // A subtree settle started elsewhere may be waiting on this thread's work; its way out is un-settle.
+  const settlePending = props.settlementSupported && isSettlePending(thread);
+  // A settled row waiting on a re-settle keeps its plain un-settle.
+  const cancelsSettle = settlePending && variant !== "slim";
   const canUnsettle = variant === "slim";
   // The React Compiler caches render results on props and state, so a clock read
   // in render would stay frozen until `thread` changes: the gate could never
@@ -649,6 +657,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     snoozeSupported: props.snoozeSupported,
     snoozable: canSnooze(thread, { now: snoozeGateNow }),
     snoozed: snoozedRow,
+    settlePending,
   });
   const snoozePresets = useMemo(
     () => (swipeActions.secondary === "snooze" ? resolveSnoozePresets(new Date()) : ([] as const)),
@@ -736,9 +745,16 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     ],
     [props.titleRegenerationSupported, thread.titleRegeneration],
   );
+  const settleMenuAction = useMemo<MenuAction>(
+    () =>
+      settlePending
+        ? { id: "unsettle", title: "Cancel settle when idle", image: "arrow.uturn.backward" }
+        : CARD_MENU_ACTIONS[0]!,
+    [settlePending],
+  );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () => [
-      { id: "settle", title: "Settle", image: "checkmark" },
+      settleMenuAction,
       {
         id: "snooze",
         title: "Snooze",
@@ -750,17 +766,23 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       ...autoSettleMenuItems,
       { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
     ],
-    [arrangementMenuItems, autoSettleMenuItems, snoozePresetActions, titleMenuItems],
+    [
+      arrangementMenuItems,
+      autoSettleMenuItems,
+      settleMenuAction,
+      snoozePresetActions,
+      titleMenuItems,
+    ],
   );
   const cardMenuActions = useMemo<MenuAction[]>(
     () => [
-      CARD_MENU_ACTIONS[0]!,
+      settleMenuAction,
       ...arrangementMenuItems,
       ...titleMenuItems,
       ...autoSettleMenuItems,
       ...CARD_MENU_ACTIONS.slice(1),
     ],
-    [arrangementMenuItems, autoSettleMenuItems, titleMenuItems],
+    [arrangementMenuItems, autoSettleMenuItems, settleMenuAction, titleMenuItems],
   );
   const slimMenuActions = useMemo<MenuAction[]>(
     () => [
@@ -869,9 +891,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     }
     return swipeActions.primary === "unsettle"
       ? {
-          accessibilityLabel: `Un-settle ${thread.title}`,
+          accessibilityLabel: cancelsSettle
+            ? `Cancel settle when idle for ${thread.title}`
+            : `Un-settle ${thread.title}`,
           icon: "arrow.uturn.backward" as const,
-          label: "Un-settle",
+          label: cancelsSettle ? "Cancel settle when idle" : "Un-settle",
           onPress: handleUnsettle,
         }
       : {
@@ -885,6 +909,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     handleSettle,
     handleUnsettle,
     handleUnsnooze,
+    cancelsSettle,
     swipeActions.primary,
     thread.title,
   ]);
@@ -943,6 +968,16 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             tintColorClassName={rowAppearance.mutedIconTintClassName}
             type="monochrome"
           />
+        ) : null}
+        {settlePending ? (
+          <View accessible accessibilityLabel="Settles when idle">
+            <SymbolView
+              name="checkmark.circle"
+              size={11}
+              tintColorClassName={rowAppearance.mutedIconTintClassName}
+              type="monochrome"
+            />
+          </View>
         ) : null}
         {statusLabel ? (
           <View className="flex-row items-center gap-1">

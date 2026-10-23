@@ -26,11 +26,20 @@ const TONE_VARIANT: Readonly<Record<PodRuntimeTone, "success" | "info" | "second
   failed: "error",
 };
 
-/** A pod whose agents cannot reach T3 warns, whatever its state's tone. */
+/**
+ * A pod whose agents cannot reach T3 warns, whatever its state's tone. Only
+ * a plain up, down or changing state gets a short label; a failure or
+ * warning keeps its icon and explains itself in the tooltip.
+ */
 function podChipLook(pod: PodRuntimeSnapshot) {
+  const presentation = podRuntimeStatePresentation(pod.state);
   return podMcpListenerProblem(pod) === undefined
-    ? { variant: TONE_VARIANT[podRuntimeStatePresentation(pod.state).tone], Icon: BoxIcon }
-    : { variant: "warning" as const, Icon: TriangleAlertIcon };
+    ? {
+        variant: TONE_VARIANT[presentation.tone],
+        Icon: BoxIcon,
+        label: presentation.tone === "failed" ? null : presentation.label,
+      }
+    : { variant: "warning" as const, Icon: TriangleAlertIcon, label: null };
 }
 
 function PodChipMenu(props: {
@@ -123,6 +132,11 @@ export function PodChip(props: {
   readonly threadId?: ThreadId | null;
   /** A sidebar row has no room for a menu; the chip only shows the state. */
   readonly slim?: boolean;
+  /**
+   * Names the state beside the icon. A settled thread's pod stops once its
+   * threads park, so its row says whether un-settling has a pod to start.
+   */
+  readonly labeled?: boolean;
 }) {
   const pod = useWorktreePod(props.environmentId, props.worktreePath);
   if (pod === undefined) return null;
@@ -141,6 +155,7 @@ export function PodChip(props: {
         render={
           <Badge variant={look.variant} size="sm" aria-label={podRuntimeTitle(pod)}>
             <look.Icon />
+            {props.labeled === true ? look.label : null}
           </Badge>
         }
       />

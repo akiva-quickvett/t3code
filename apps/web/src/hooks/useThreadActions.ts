@@ -5,7 +5,12 @@ import {
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  canSnooze,
+  isSettlePending,
+  threadTreeHasSettleBlocker,
+  threadWokeAt,
+} from "@t3tools/client-runtime/state/thread-settled";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import {
   AuthOrchestrationOperateScope,
@@ -42,6 +47,7 @@ import {
   readEnvironmentSupportsPinReorder,
   readEnvironmentSupportsActiveReorder,
   readEnvironmentSupportsSettlement,
+  readEnvironmentSupportsSettleTree,
   readEnvironmentSupportsSnooze,
   readEnvironmentSupportsSnoozeTree,
   readEnvironmentSupportsVisitedTracking,
@@ -129,6 +135,31 @@ function snoozeScopeInput(
     scope: options.scope ?? ("tree" as const),
     ...(options.whenIdle === true ? { whenIdle: true } : {}),
   };
+}
+
+export interface ThreadSettleOptions {
+  /** Defaults to the thread alone, as settling always has. */
+  readonly scope?: ThreadSnoozeScope;
+}
+
+/** Servers that settle one thread get today's command, unchanged. */
+function settleScopeInput(
+  environmentId: EnvironmentId,
+  options: ThreadSettleOptions,
+): { readonly scope?: "tree" } {
+  return options.scope === "tree" && readEnvironmentSupportsSettleTree(environmentId)
+    ? { scope: "tree" }
+    : {};
+}
+
+/** Whether a subtree settle of the thread would wait for work in its tree to end. */
+export function treeSettleWaitsForIdle(target: ScopedThreadRef): boolean {
+  const root = readThreadShell(target);
+  return (
+    root !== null &&
+    readEnvironmentSupportsSettleTree(target.environmentId) &&
+    threadTreeHasSettleBlocker(root, readThreadShells(), { now: new Date().toISOString() })
+  );
 }
 
 function topOfPinnedRunOrderKey(): string | undefined {
@@ -696,7 +727,7 @@ export function useThreadActions() {
     );
   };
 
-  const unsettleThread = async (target: ScopedThreadRef) => {
+  const unsettleThread = async (target: ScopedThreadRef, options: ThreadSettleOptions = {}) => {
     if (!readEnvironmentSupportsSettlement(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
@@ -712,7 +743,11 @@ export function useThreadActions() {
     // inactivity) stays suppressed until real activity clears the pin.
     return unsettleThreadMutation({
       environmentId: target.environmentId,
-      input: { threadId: target.threadId, reason: "user" },
+      input: {
+        threadId: target.threadId,
+        reason: "user",
+        ...settleScopeInput(target.environmentId, options),
+      },
     });
   };
 
@@ -790,7 +825,7 @@ export function useThreadActions() {
     return result;
   };
 
-  const settleThread = async (target: ScopedThreadRef) => {
+  const settleThread = async (target: ScopedThreadRef, options: ThreadSettleOptions = {}) => {
     if (!readEnvironmentSupportsSettlement(target.environmentId)) {
       return AsyncResult.failure(
         Cause.fail(
@@ -814,10 +849,14 @@ export function useThreadActions() {
     // treats either as a promotion that un-settles; settling supersedes them.
     ThreadUndo.invalidate("pin", scopedThreadKey(target));
     ThreadUndo.invalidate("snooze", scopedThreadKey(target));
+    const scopeInput = settleScopeInput(target.environmentId, options);
+    // The dispatch reply carries no "waits for idle" flag, so predict it with
+    // the server's own blocker rules, or see the wait if the shell shows it.
+    const predictsWait = scopeInput.scope === "tree" && treeSettleWaitsForIdle(target);
     const action = ThreadUndo.begin("settle", scopedThreadKey(target));
     const result = await settleThreadMutation({
       environmentId: target.environmentId,
-      input: { threadId: target.threadId },
+      input: { threadId: target.threadId, ...scopeInput },
     });
     if (result._tag !== "Success") {
       action.finish();
@@ -826,20 +865,27 @@ export function useThreadActions() {
     if (wokeAt !== null) {
       markThreadVisited(scopedThreadKey(target), wokeAt);
     }
+    const settled = readThreadShell(target);
     showThreadUndoNotice({
-      action: "Settled",
+      action:
+        predictsWait || (settled !== null && isSettlePending(settled))
+          ? "Settles when idle"
+          : "Settled",
       claim: action,
+      // Un-settling cancels a wait, or reopens what the settle closed. Only a
+      // settle that applied cleared the pin and snooze, so only those come back.
       undo: async () => {
-        const unsettled = await unsettleThread(target);
+        const unsettled = await unsettleThread(target, options);
         if (unsettled._tag !== "Success") return unsettled;
-        if (wasPinned) {
+        const current = readThreadShell(target);
+        if (wasPinned && current?.pinnedAt == null) {
           const pinned = await pinThread(
             target,
             pinOrderKey == null ? {} : { orderKey: pinOrderKey },
           );
           if (pinned._tag !== "Success") return pinned;
         }
-        if (snoozedUntil !== null) {
+        if (snoozedUntil !== null && current?.snoozedUntil == null) {
           return snoozeThreadMutation({
             environmentId: target.environmentId,
             input: { threadId: target.threadId, snoozedUntil },

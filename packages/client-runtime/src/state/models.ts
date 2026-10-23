@@ -126,6 +126,8 @@ export interface EnvironmentThreadShell {
   readonly snoozedAt: string | null;
   /** A snooze waiting for the thread's (or its tree's) work to end. */
   readonly snoozeWhenIdle?: import("@t3tools/contracts").OrchestrationV2SnoozeWhenIdle | null;
+  /** A tree settle waiting for the tree's work to end; the thread is not settled yet. */
+  readonly settleWhenIdle?: import("@t3tools/contracts").OrchestrationV2SettleWhenIdle | null;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecovery | null;
   readonly pinnedAt: string | null;
   readonly autoSettleDisabledAt?: string | null;
@@ -271,6 +273,7 @@ export function presentThreadShell(
     snoozedUntil: nullableIso(thread.snoozedUntil ?? null),
     snoozedAt: nullableIso(thread.snoozedAt ?? null),
     snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
+    settleWhenIdle: thread.settleWhenIdle ?? null,
     limitRecovery: thread.limitRecovery ?? null,
     pinnedAt: nullableIso(thread.pinnedAt ?? null),
     autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),

@@ -43,6 +43,7 @@ const threadShell = vi.hoisted(() => ({
   pinOrderKey: "a0",
   pinnedAt: null as string | null,
   snoozedUntil: null as string | null,
+  settleWhenIdle: null as { requestedAt: string; scope: "tree" } | null,
   projectId: "project",
   environmentId: "undo-env",
   session: null,
@@ -52,8 +53,10 @@ vi.mock("../state/entities", async (original) => ({
   readEnvironmentSupportsPinning: () => true,
   readEnvironmentSupportsPinReorder: () => true,
   readEnvironmentSupportsSettlement: () => true,
+  readEnvironmentSupportsSettleTree: () => true,
   readEnvironmentSupportsSnooze: () => true,
   readThreadShell: () => threadShell,
+  readThreadShells: () => [],
 }));
 vi.mock("../state/use-atom-command", () => ({
   useAtomCommand: (command: unknown) => {
@@ -99,6 +102,7 @@ beforeEach(() => {
   router.state.matches[0]!.params = {};
   threadShell.pinnedAt = null;
   threadShell.snoozedUntil = null;
+  threadShell.settleWhenIdle = null;
 });
 afterEach(() => {
   vi.runAllTimers();
@@ -185,6 +189,12 @@ describe("settle and snooze Undo", () => {
     const snoozedUntil = "2030-01-01T09:00:00.000Z";
     threadShell.pinnedAt = "2026-01-01T00:00:00.000Z";
     threadShell.snoozedUntil = snoozedUntil;
+    // An applied settle drops the pin and the snooze.
+    commands.settle.mockImplementation(async () => {
+      threadShell.pinnedAt = null;
+      threadShell.snoozedUntil = null;
+      return { _tag: "Success", value: undefined };
+    });
     const actions = useThreadActions();
     await actions.settleThread(target);
     await currentUndo()();
@@ -197,6 +207,35 @@ describe("settle and snooze Undo", () => {
       environmentId: target.environmentId,
       input: { threadId: target.threadId, snoozedUntil },
     });
+  });
+
+  it("undoes a subtree settle with one subtree un-settle of the root", async () => {
+    const actions = useThreadActions();
+    await actions.settleThread(target, { scope: "tree" });
+    expect(commands.settle).toHaveBeenCalledExactlyOnceWith({
+      environmentId: target.environmentId,
+      input: { threadId: target.threadId, scope: "tree" },
+    });
+    await currentUndo()();
+    expect(commands.unsettle).toHaveBeenCalledExactlyOnceWith({
+      environmentId: target.environmentId,
+      input: { threadId: target.threadId, reason: "user", scope: "tree" },
+    });
+  });
+
+  it("says a waiting subtree settle settles when idle, and undoes it without re-pinning", async () => {
+    // A settle still waiting has not dropped the pin.
+    threadShell.pinnedAt = "2026-01-01T00:00:00.000Z";
+    threadShell.settleWhenIdle = { requestedAt: "2026-01-01T00:00:00.000Z", scope: "tree" };
+    const actions = useThreadActions();
+    await actions.settleThread(target, { scope: "tree" });
+    expect(useThreadUndoNotice.getState().notice).toMatchObject({ action: "Settles when idle" });
+    await currentUndo()();
+    expect(commands.unsettle).toHaveBeenCalledExactlyOnceWith({
+      environmentId: target.environmentId,
+      input: { threadId: target.threadId, reason: "user", scope: "tree" },
+    });
+    expect(commands.pin).not.toHaveBeenCalled();
   });
 
   it("expires an older unpin Undo when the thread is settled", async () => {

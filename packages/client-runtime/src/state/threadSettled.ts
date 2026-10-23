@@ -177,6 +177,92 @@ export function threadTreeHasActiveWork<
   );
 }
 
+const SETTLE_BLOCKING_RUN_STATUSES = new Set(["preparing", "starting", "running", "waiting"]);
+
+type SettleBlockerShell = QueuedThreadShell & {
+  readonly hasPendingApprovals: boolean;
+  readonly latestUserAuthoredMessageAt?: string | null;
+};
+
+/**
+ * Mirrors the server's settle blocker from the shell: an approval, a run in
+ * flight, or a turn a person queued. Background work never blocks a settle.
+ * The shell cannot tell whether a pending question takes a typed answer, but
+ * one that needs the live provider keeps its run waiting, which counts here;
+ * likewise an approval the shell does not flag. A queued turn whose latest
+ * message is a delivery (a child's result, a wake) is cancelled by the settle
+ * rather than waited for.
+ */
+export function threadHasSettleBlocker(
+  shell: SettleBlockerShell,
+  options: { readonly now: string },
+): boolean {
+  if (shell.hasPendingApprovals) return true;
+  const status = (shell.runtime ?? shell.session)?.status;
+  if (status !== undefined && SETTLE_BLOCKING_RUN_STATUSES.has(status)) return true;
+  const queuedByPerson =
+    shell.latestUserAuthoredMessageAt === undefined ||
+    (shell.latestUserAuthoredMessageAt !== null &&
+      shell.latestUserAuthoredMessageAt === shell.latestUserMessageAt);
+  return queuedByPerson && (status === "queued" || hasQueuedTurnStart(shell, options));
+}
+
+/**
+ * Whether a tree settle of `root` would wait: the server checks the root
+ * whatever its state, and every unarchived, unsettled thread under it.
+ */
+export function threadTreeHasSettleBlocker<
+  T extends AgentTreeThread &
+    SettleBlockerShell & {
+      readonly archivedAt: string | null;
+      readonly settledOverride: "settled" | "active" | null;
+    },
+>(root: T, threads: ReadonlyArray<T>, options: { readonly now: string }): boolean {
+  return [
+    root,
+    ...agentTreeDescendants(root, threads).filter(
+      (thread) => thread.archivedAt === null && thread.settledOverride !== "settled",
+    ),
+  ].some((thread) => threadHasSettleBlocker(thread, options));
+}
+
+/**
+ * A tree settle is waiting for work in the tree to end. The thread is not
+ * settled yet, so its way out is an un-settle, which cancels the wait.
+ */
+export function isSettlePending(shell: {
+  readonly settleWhenIdle?: { readonly requestedAt: string } | null | undefined;
+}): boolean {
+  return shell.settleWhenIdle != null;
+}
+
+export interface ThreadSettleTreeState {
+  /** A tree settle would settle something under the thread. */
+  readonly hasUnsettledDescendants: boolean;
+  /**
+   * The thread has agents under it, so a tree un-settle may reopen some: the
+   * server knows which ones its tree settle closed.
+   */
+  readonly hasDescendants: boolean;
+}
+
+/** Which tree-scoped settle actions could change anything under `root`; archived threads do not count. */
+export function threadSettleTreeState<
+  T extends AgentTreeThread & {
+    readonly archivedAt: string | null;
+    readonly settledOverride: "settled" | "active" | null;
+  },
+>(root: T, threads: ReadonlyArray<T>): ThreadSettleTreeState {
+  let hasUnsettledDescendants = false;
+  let hasDescendants = false;
+  for (const thread of agentTreeDescendants(root, threads)) {
+    if (thread.archivedAt !== null) continue;
+    hasDescendants = true;
+    if (thread.settledOverride !== "settled") hasUnsettledDescendants = true;
+  }
+  return { hasUnsettledDescendants, hasDescendants };
+}
+
 export function effectiveSnoozed(
   shell: ThreadSnoozeShell,
   options: { readonly now: string },

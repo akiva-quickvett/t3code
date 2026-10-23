@@ -260,6 +260,18 @@ describe("resolveThreadListV2SwipeActions", () => {
     ).toEqual({ primary: "settle", secondary: "snooze" });
   });
 
+  it("offers un-settle on an active row whose subtree settle waits for work", () => {
+    expect(
+      resolveThreadListV2SwipeActions({
+        variant: "card",
+        settlementSupported: true,
+        snoozeSupported: true,
+        snoozable: true,
+        settlePending: true,
+      }).primary,
+    ).toBe("unsettle");
+  });
+
   it("offers un-settle and snooze for settled history", () => {
     expect(
       resolveThreadListV2SwipeActions({
