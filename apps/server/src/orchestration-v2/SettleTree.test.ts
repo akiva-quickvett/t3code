@@ -529,6 +529,55 @@ it.layer(layerTest)("settle trees", (it) => {
     }),
   );
 
+  it.effect("a thread reopened and settled on its own leaves the tree's unsettle", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("settle:tree-before-pin"),
+        threadId: ids.meta,
+        scope: "tree",
+      });
+      assert.equal((yield* threadOf(ids.cell)).settledByTree, ids.meta);
+      // Pinning reopens the cell; settling it again is its own settle.
+      yield* orchestrator.dispatch({
+        type: "thread.pin",
+        commandId: CommandId.make("pin:cell"),
+        threadId: ids.cell,
+      });
+      assert.equal(yield* settledOverrideOf(ids.cell), "active");
+      assert.isNull((yield* threadOf(ids.cell)).settledByTree ?? null);
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("settle:cell-alone"),
+        threadId: ids.cell,
+      });
+      assert.isNull((yield* threadOf(ids.cell)).settledByTree ?? null);
+
+      yield* orchestrator.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("unsettle:tree-after-pin"),
+        threadId: ids.meta,
+        reason: "user",
+        scope: "tree",
+      });
+      for (const threadId of [ids.meta, ids.slice, ids.freshCell])
+        assert.equal(yield* settledOverrideOf(threadId), "active", threadId);
+      assert.equal(yield* settledOverrideOf(ids.cell), "settled");
+
+      // A mark only the cascade sets is dropped when a client sends it.
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("settle:fresh-cell-forged"),
+        threadId: ids.freshCell,
+        settledByTree: ids.meta,
+      });
+      assert.isNull((yield* threadOf(ids.freshCell)).settledByTree ?? null);
+      yield* sweep;
+      calls.length = 0;
+    }),
+  );
+
   it.effect("a send to a settled pod thread unsettles it, which starts its pod", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

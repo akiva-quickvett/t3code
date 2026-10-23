@@ -2988,9 +2988,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             activeOrderKey: null,
             // Settling the root alone, as auto-settle does, leaves the tree's wait standing.
             ...(command.whenIdleRequestedAt === undefined ? {} : { settleWhenIdle: null }),
-            ...(command.settledByTree === undefined
-              ? {}
-              : { settledByTree: command.settledByTree }),
+            // A thread settles fresh without a mark it kept from an earlier tree
+            // settle; one already settled keeps the mark of the tree that did it.
+            settledByTree:
+              command.settledByTree ?? (alreadySettled ? (thread.settledByTree ?? null) : null),
             updatedAt: alreadySettled ? thread.updatedAt : now,
           };
         }
@@ -3052,6 +3053,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             settledOverride:
               thread.settledOverride === "settled" ? "active" : thread.settledOverride,
             settledAt: thread.settledOverride === "settled" ? null : thread.settledAt,
+            settledByTree:
+              thread.settledOverride === "settled" ? null : (thread.settledByTree ?? null),
             snoozedUntil: null,
             snoozedAt: null,
             snoozeWhenIdle: null,
@@ -11890,7 +11893,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // Each descendant is marked with the root, which is how the root's tree
         // unsettle tells them from threads settled on their own; the root keeps
         // its own mark, if an outer tree settled it.
-        const { whenIdleRequestedAt, settledByTree: _settledByTree, ...settle } = command;
+        const { whenIdleRequestedAt, ...settle } = command;
         const cascade = { ...settle, settledByTree: command.threadId };
         if (whenIdleRequestedAt === undefined) {
           const result = yield* dispatchWithReceipt({ ...settle, scope: "thread" });
@@ -11934,14 +11937,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     (effect) => treeCascades.withPermits(1)(effect),
   );
 
-  const dispatchCommand = (command: OrchestrationV2ServerCommand) =>
-    (command.type === "thread.snooze" ||
+  const dispatchCommand = (input: OrchestrationV2ServerCommand) => {
+    // Only the tree cascade marks a thread as settled by a tree, and it
+    // dispatches below this; a mark sent from outside is dropped.
+    const command =
+      input.type === "thread.settle" && input.settledByTree !== undefined
+        ? (({ settledByTree: _settledByTree, ...settle }) => settle)(input)
+        : input;
+    return (command.type === "thread.snooze" ||
       command.type === "thread.unsnooze" ||
       command.type === "thread.settle" ||
       command.type === "thread.unsettle") &&
-    command.scope === "tree"
+      command.scope === "tree"
       ? dispatchTreeCascade(command)
       : dispatchWithReceipt(command);
+  };
 
   const handleRunUpdate = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
