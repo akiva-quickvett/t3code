@@ -3891,44 +3891,50 @@ describe("orchestration v2 provider switching", () => {
   describe("role presets at turn start", () => {
     const SCOUT = { id: "scout", label: "Scout" };
 
-    /** Two turns on a thread created with the scout role; the role can be cleared between them. */
-    const runTwoTurns = (input: {
+    /** Turns on a thread created with the scout role, on Cursor unless a turn picks Codex. */
+    const runTurns = (input: {
       readonly name: string;
       readonly readsRoleInstructions?: true;
-      readonly clearRoleBeforeSecondTurn?: boolean;
+      readonly turns: ReadonlyArray<{
+        readonly text: string;
+        readonly provider?: "codex";
+        readonly clearRoleBefore?: true;
+        /** Detaches the Cursor session first, so this turn resumes its native thread. */
+        readonly detachCursorBefore?: true;
+      }>;
+      readonly failCursorResumeOnce?: true;
     }) =>
       Effect.gen(function* () {
         const cwd = yield* checkpointWorkspace(input.name);
         const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const failResumeOnce = yield* Ref.make(input.failCursorResumeOnce === true);
+        const nativeThreadGeneration = yield* Ref.make(0);
         const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
           makeTestAdapter({
             instanceId: CURSOR_MODEL_SELECTION.instanceId,
             driver: CURSOR_DRIVER,
             capabilities: CursorProviderCapabilitiesV2,
             modelSelection: CURSOR_MODEL_SELECTION,
-            responseByRunOrdinal: { 1: "First answer", 2: "Second answer" },
+            responseByRunOrdinal: {},
             capturedTurns,
+            failResumeOnce,
+            nativeThreadGeneration,
             ...(input.readsRoleInstructions === undefined
               ? {}
               : { readsRoleInstructions: input.readsRoleInstructions }),
+          }),
+          makeTestAdapter({
+            instanceId: CODEX_MODEL_SELECTION.instanceId,
+            driver: CODEX_DRIVER,
+            capabilities: CodexProviderCapabilitiesV2,
+            modelSelection: CODEX_MODEL_SELECTION,
+            responseByRunOrdinal: {},
+            capturedTurns,
           }),
         ]);
         const projection = yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-          const dispatch = (ordinal: number, text: string) =>
-            orchestrator.dispatch({
-              type: "message.dispatch",
-              commandId: CommandId.make(`${input.name}:${ordinal}`),
-              threadId,
-              messageId: MessageId.make(`${input.name}:${ordinal}`),
-              createdBy: "user",
-              creationSource: "web",
-              text,
-              attachments: [],
-              modelSelection: CURSOR_MODEL_SELECTION,
-              dispatchMode: { type: "start_immediately" },
-            });
           const completed = (ordinal: number) =>
             orchestrator.streamStoredEvents.pipe(
               Stream.filter(
@@ -3955,18 +3961,45 @@ describe("orchestration v2 provider switching", () => {
             worktreePath: null,
             rolePreset: SCOUT,
           });
-          yield* dispatch(1, "First request");
-          yield* completed(1);
-          if (input.clearRoleBeforeSecondTurn === true) {
+          for (const [index, turn] of input.turns.entries()) {
+            const ordinal = index + 1;
+            if (turn.clearRoleBefore === true) {
+              yield* orchestrator.dispatch({
+                type: "thread.metadata.update",
+                commandId: CommandId.make(`${input.name}:clear-role:${ordinal}`),
+                threadId,
+                rolePreset: null,
+              });
+            }
+            if (turn.detachCursorBefore === true) {
+              const cursorSession = (yield* orchestrator.getThreadProjection(
+                threadId,
+              )).providerSessions.find(
+                (session) => session.providerInstanceId === CURSOR_MODEL_SELECTION.instanceId,
+              )!;
+              yield* orchestrator.dispatch({
+                type: "provider-session.detach",
+                commandId: CommandId.make(`${input.name}:detach:${ordinal}`),
+                threadId,
+                providerSessionId: cursorSession.id,
+              });
+              yield* worker.drain();
+            }
             yield* orchestrator.dispatch({
-              type: "thread.metadata.update",
-              commandId: CommandId.make(`${input.name}:clear-role`),
+              type: "message.dispatch",
+              commandId: CommandId.make(`${input.name}:${ordinal}`),
               threadId,
-              rolePreset: null,
+              messageId: MessageId.make(`${input.name}:${ordinal}`),
+              createdBy: "user",
+              creationSource: "web",
+              text: turn.text,
+              attachments: [],
+              modelSelection:
+                turn.provider === "codex" ? CODEX_MODEL_SELECTION : CURSOR_MODEL_SELECTION,
+              dispatchMode: { type: "start_immediately" },
             });
+            yield* completed(ordinal);
           }
-          yield* dispatch(2, "Second request");
-          yield* completed(2);
           return yield* orchestrator.getThreadProjection(threadId);
         }).pipe(
           Effect.provide(
@@ -3989,11 +4022,32 @@ describe("orchestration v2 provider switching", () => {
           turnItems: projection.turnItems,
           visibleTurnItems: projection.visibleTurnItems,
         });
-        assert.include(projected, "First request");
+        assert.include(projected, input.turns[0]!.text);
         assert.notInclude(projected, "<t3_role_instructions");
         assert.notInclude(projected, ROLE_CLEARED_NOTE);
-        return yield* Ref.get(capturedTurns);
+        return { projection, turns: yield* Ref.get(capturedTurns) };
       });
+
+    const runTwoTurns = (input: {
+      readonly name: string;
+      readonly readsRoleInstructions?: true;
+      readonly clearRoleBeforeSecondTurn?: boolean;
+    }) =>
+      runTurns({
+        name: input.name,
+        ...(input.readsRoleInstructions === undefined
+          ? {}
+          : { readsRoleInstructions: input.readsRoleInstructions }),
+        turns: [
+          { text: "First request" },
+          {
+            text: "Second request",
+            ...(input.clearRoleBeforeSecondTurn === true ? { clearRoleBefore: true } : {}),
+          },
+        ],
+      }).pipe(Effect.map(({ turns }) => turns));
+
+    const ROLE_TAG = '<t3_role_instructions role="scout">';
 
     it.live("prefixes the role to the provider's first prompt only", () =>
       Effect.scoped(
@@ -4033,6 +4087,67 @@ describe("orchestration v2 provider switching", () => {
           assert.include(turns[1]?.text, "Second request");
         }),
       ),
+    );
+
+    it.live("sends the role again on the first turn after a compaction", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { turns } = yield* runTurns({
+            name: "role-compact",
+            turns: [{ text: "First request" }, { text: "/compact" }, { text: "Third request" }],
+          });
+          assert.include(turns[0]?.text, ROLE_TAG);
+          assert.equal(turns[1]?.text, "/compact");
+          assert.include(turns[2]?.text, ROLE_TAG);
+          assert.include(turns[2]?.text, "Third request");
+        }),
+      ),
+    );
+
+    it.live("sends the role on the first turn of a handoff to a new provider thread", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { projection, turns } = yield* runTurns({
+            name: "role-handoff",
+            turns: [{ text: "First request" }, { text: "Codex request", provider: "codex" }],
+          });
+          assert.notEqual(
+            projection.runs[0]?.providerThreadId,
+            projection.runs[1]?.providerThreadId,
+          );
+          assert.include(turns[1]?.text, ROLE_TAG);
+          assert.include(turns[1]?.text, "Codex request");
+        }),
+      ),
+    );
+
+    it.live.each([
+      ["resumes the native thread", false, false],
+      ["falls back to a fresh native session", true, true],
+    ] as const)(
+      "on switching back to a provider thread that %s, sends the role only if the session is fresh",
+      ([, failResume, expectsRole]) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const { projection, turns } = yield* runTurns({
+              name: `role-switch-back-${failResume}`,
+              turns: [
+                { text: "First request" },
+                { text: "Codex request", provider: "codex" },
+                { text: "Back on Cursor", detachCursorBefore: true },
+              ],
+              ...(failResume ? { failCursorResumeOnce: true } : {}),
+            });
+            assert.equal(
+              projection.runs[0]?.providerThreadId,
+              projection.runs[2]?.providerThreadId,
+            );
+            assert.equal(turns[2]?.nativeThreadId === turns[0]?.nativeThreadId, !failResume);
+            assert.include(turns[2]?.text, "Back on Cursor");
+            if (expectsRole) assert.include(turns[2]?.text, ROLE_TAG);
+            else assert.notInclude(turns[2]?.text, ROLE_TAG);
+          }),
+        ),
     );
   });
 });

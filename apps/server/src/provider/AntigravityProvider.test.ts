@@ -25,6 +25,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderHostLive from "./ProviderHostLive.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import { COMPACT_SLASH_COMMAND } from "@t3tools/provider-core/server/snapshotProbe";
 import {
   buildAntigravityModelsFromSession,
   makeAntigravityProvider,
@@ -107,6 +108,7 @@ const commands = [
 ] satisfies ReadonlyArray<EffectAcpSchema.AvailableCommand>;
 
 const expectedCommands = [
+  COMPACT_SLASH_COMMAND,
   { name: "plan", description: "Create a plan", input: { hint: "What to plan" } },
   { name: "logout", description: "Sign out of Google" },
 ];
@@ -329,7 +331,8 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
           harness.provider.snapshot.streamChanges.pipe(
             Stream.filter(
               (snapshot) =>
-                snapshot.auth.status === "authenticated" && snapshot.slashCommands.length > 0,
+                snapshot.auth.status === "authenticated" &&
+                snapshot.slashCommands.some((command) => command.name === "plan"),
             ),
           ),
         );
@@ -347,6 +350,31 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
           expectedCommands,
         );
         expect(yield* Ref.get(harness.probeCalls)).toBe(1);
+      }),
+    ),
+  );
+
+  it.effect("advertises compact exactly once in every ready snapshot", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.initialize;
+        yield* harness.provider.onSessionStarted(started, "/workspace");
+        const beforeNative = yield* harness.provider.snapshot.getSnapshot;
+        expect(beforeNative.status).toBe("ready");
+        expect(beforeNative.slashCommands).toEqual([COMPACT_SLASH_COMMAND]);
+        expect((yield* harness.provider.snapshotForCwd("/workspace")).slashCommands).toEqual([
+          COMPACT_SLASH_COMMAND,
+        ]);
+
+        yield* harness.provider.onAvailableCommands(
+          [...commands, { name: "compact", description: "Native compact" }],
+          "/workspace",
+        );
+        const countCompact = (snapshot: { slashCommands: ReadonlyArray<{ name: string }> }) =>
+          snapshot.slashCommands.filter((command) => command.name === "compact").length;
+        expect(countCompact(yield* harness.provider.snapshot.getSnapshot)).toBe(1);
+        expect(countCompact(yield* harness.provider.snapshotForCwd("/workspace"))).toBe(1);
       }),
     ),
   );
@@ -625,7 +653,7 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
             auth: { status: "authenticated" },
           });
           expect(snapshot.models).toHaveLength(installed ? 11 : 0);
-          expect(snapshot.slashCommands).toHaveLength(installed ? 2 : 0);
+          expect(snapshot.slashCommands).toHaveLength(installed ? 3 : 0);
           expect(snapshot.workspaceSnapshots).toHaveLength(installed ? 1 : 0);
           expect(snapshot.supportsTextGeneration).toBe(installed);
         }

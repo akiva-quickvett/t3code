@@ -2028,6 +2028,44 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           }
           yield* completeReasoning(input.context);
           yield* completeAssistant(input.context);
+          // Cursor reports no compaction event of its own, so a completed
+          // /compress turn is the only signal that the context was compacted.
+          if (
+            input.status === "completed" &&
+            input.context.input.message.text.trim() === "/compress" &&
+            input.context.input.message.attachments.length === 0
+          ) {
+            const nativeItemId = `${input.context.run.runId}:compaction`;
+            yield* emitProviderEvent({
+              type: "turn_item.updated",
+              driver: CursorAgentSdk.CURSOR_PROVIDER,
+              turnItem: {
+                id: idAllocator.derive.turnItemFromProviderItem({
+                  driver: CursorAgentSdk.CURSOR_PROVIDER,
+                  nativeItemId,
+                }),
+                threadId: input.context.input.threadId,
+                runId: input.context.input.runId,
+                nodeId: input.context.input.rootNodeId,
+                providerThreadId: input.context.input.providerThread.id,
+                providerTurnId: input.context.providerTurnId,
+                nativeItemRef: {
+                  driver: CursorAgentSdk.CURSOR_PROVIDER,
+                  nativeId: nativeItemId,
+                  strength: "weak",
+                },
+                parentItemId: null,
+                ordinal: yield* resolveItemOrdinal(input.context, nativeItemId),
+                type: "compaction",
+                driver: CursorAgentSdk.CURSOR_PROVIDER,
+                status: "completed",
+                title: "Context compacted",
+                startedAt: input.context.startedAt,
+                completedAt,
+                updatedAt: completedAt,
+              },
+            });
+          }
           yield* emitProviderEvent({
             type: "provider_turn.updated",
             driver: CursorAgentSdk.CURSOR_PROVIDER,

@@ -71,7 +71,7 @@ export const AgentRolePreset = Schema.Struct({
   contextWindow: Schema.optional(AgentRolePresetContextWindow),
   instructions: TrimmedString.check(Schema.isMaxLength(AGENT_ROLE_PRESET_INSTRUCTIONS_MAX_LENGTH)),
   skills: Schema.optional(Schema.Array(SkillName).check(Schema.isMaxLength(32))),
-  /** Listed for the orchestration skill; the server does not enforce it. */
+  /** Enforced for organ delegations; advisory otherwise. */
   allowedChildRoles: Schema.optional(Schema.Array(AgentRolePresetId).check(Schema.isMaxLength(64))),
 });
 export type AgentRolePreset = typeof AgentRolePreset.Type;

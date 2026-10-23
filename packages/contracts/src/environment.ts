@@ -152,6 +152,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   serverBrowser: Schema.optionalKey(Schema.Boolean),
   /** Server answers the agentRoles.* RPCs and records thread roles; absent on stock servers. */
   agentRolePresets: Schema.optionalKey(Schema.Boolean),
+  /** Server takes `thread.meta.set` and keeps metas out of tree settle and snooze; absent on stock servers. */
+  orchestrationMetas: Schema.optionalKey(Schema.Boolean),
+  /** Server answers the organPresets.* RPCs; absent on stock servers, whose clients hide Organs settings. */
+  organPresets: Schema.optionalKey(Schema.Boolean),
+  /** Server answers orchestration.subscribeStats; absent on stock servers, whose clients hide the stats strip. */
+  orchestrationStats: Schema.optionalKey(Schema.Boolean),
   /** Server reads the `pullRequestLabelRules` setting and applies Agent labels; absent on stock servers. */
   pullRequestLabelRules: Schema.optionalKey(Schema.Boolean),
   /** Server runs scheduled tasks whose `action` is a project script; absent on stock servers. */

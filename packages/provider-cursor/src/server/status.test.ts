@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import type { CursorSettings } from "../settings.ts";
 import { CursorSettings as CursorSettingsSchema } from "../settings.ts";
 import { createModelCapabilities } from "@t3tools/shared/model";
+import { COMPACT_SLASH_COMMAND } from "@t3tools/provider-core/server/snapshotProbe";
 
 import {
   buildCursorCapabilitiesFromSdkModel,
@@ -125,6 +126,26 @@ describe("buildCursorProviderSnapshot", () => {
       supportsConversationRollback: false,
     });
   });
+});
+
+describe("Cursor slash commands", () => {
+  it.effect("advertises compact exactly once before and after the SDK probe", () =>
+    Effect.gen(function* () {
+      const initial = yield* buildInitialCursorProviderSnapshot(baseCursorSettings);
+      const ready = buildCursorProviderSnapshot({
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        cursorSettings: baseCursorSettings,
+        parsed: {
+          version: null,
+          status: "ready",
+          auth: { status: "authenticated", type: "api-key", label: "Cursor API key" },
+        },
+      });
+
+      expect(initial.slashCommands).toEqual([COMPACT_SLASH_COMMAND]);
+      expect(ready.slashCommands).toEqual([COMPACT_SLASH_COMMAND]);
+    }),
+  );
 });
 
 describe("Cursor SDK model discovery", () => {
