@@ -38,6 +38,24 @@ export function summarizeSubagentStatuses(
     .join(" · ");
 }
 
+/** A cell that needs the user counts only as "needs you", whatever its run status says. */
+export function summarizeOrganCells(
+  cells: ReadonlyArray<{
+    readonly status: OrchestrationV2TurnItemStatus;
+    readonly needsYou: boolean;
+  }>,
+): string {
+  let needsYou = 0;
+  const statuses: OrchestrationV2TurnItemStatus[] = [];
+  for (const cell of cells) {
+    if (cell.needsYou) needsYou += 1;
+    else statuses.push(cell.status);
+  }
+  const rest = summarizeSubagentStatuses(statuses);
+  if (needsYou === 0) return rest;
+  return rest === "" ? `${needsYou} needs you` : `${needsYou} needs you · ${rest}`;
+}
+
 export function formatSubagentDisplayTitle(title: string): string {
   const displayTitle = title.replace(/^Subagent:\s*/i, "");
   const path = /^\/root\/(?:[^/]+\/)*([^/]+)\/?$/u.exec(displayTitle);

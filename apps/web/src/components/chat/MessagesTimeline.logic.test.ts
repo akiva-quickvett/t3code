@@ -4756,6 +4756,109 @@ describe("linked timeline resources", () => {
     expect(rows[1]).toMatchObject({ subagents: [{ item: { id: "a" } }, { item: { id: "b" } }] });
   });
 
+  describe("organ grouping", () => {
+    const otherRun = RunId.make("other-run");
+    const cell = (id: string, eventRunId = runId, child: string | null = `child-${id}`) => {
+      const entry = event(id, "subagent", eventRunId);
+      return {
+        ...entry,
+        projectedItem: {
+          item: { ...entry.projectedItem.item, subagentId: id, childThreadId: child },
+        } as OrchestrationV2ProjectedTurnItem,
+      };
+    };
+    const timelineEntries = [
+      cell("a"),
+      cell("b"),
+      cell("c"),
+      event("created", "thread_created"),
+      cell("d", otherRun),
+      cell("e", otherRun),
+    ];
+    const expandedRunIds = new Set([runId, otherRun]);
+
+    it("groups an organ across runs at its first record and keeps adjacency for the rest", () => {
+      const rows = deriveMessagesTimelineRows({
+        ...common,
+        timelineEntries,
+        expandedRunIds,
+        organIdBySubagentId: new Map([
+          ["a", "organ_review-1"],
+          ["d", "organ_review-1"],
+        ]),
+      });
+      expect(rows.map((row) => row.id)).toEqual([
+        "turn-fold:resource-run",
+        "organ:organ_review-1",
+        "b",
+        "created",
+        "turn-fold:other-run",
+        "e",
+      ]);
+      expect(rows[1]).toMatchObject({
+        organId: "organ_review-1",
+        subagents: [{ item: { id: "a" } }, { item: { id: "d" } }],
+      });
+      expect(rows[2]).toMatchObject({ subagents: [{ item: { id: "b" } }, { item: { id: "c" } }] });
+      expect(rows[5]).not.toHaveProperty("subagents");
+    });
+
+    it("shows a followed-up cell once, as its latest item", () => {
+      const rows = deriveMessagesTimelineRows({
+        ...common,
+        timelineEntries: [cell("a"), cell("b"), cell("follow-up", otherRun, "child-a")],
+        expandedRunIds,
+        organIdBySubagentId: new Map([
+          ["a", "organ_review-1"],
+          ["b", "organ_review-1"],
+          ["follow-up", "organ_review-1"],
+        ]),
+      });
+      expect(rows.filter((row) => row.kind === "event")).toMatchObject([
+        {
+          id: "organ:organ_review-1",
+          subagents: [{ item: { id: "follow-up" } }, { item: { id: "b" } }],
+        },
+      ]);
+    });
+
+    it("splits an adjacency group around an organ in the same turn", () => {
+      const rows = deriveMessagesTimelineRows({
+        ...common,
+        timelineEntries: [cell("a"), cell("labelled"), cell("b")],
+        expandedRunIds,
+        organIdBySubagentId: new Map([["labelled", "organ_review-1"]]),
+      });
+      expect(rows.filter((row) => row.kind === "event").map((row) => row.id)).toEqual([
+        "a",
+        "organ:organ_review-1",
+        "b",
+      ]);
+      expect(rows.find((row) => row.id === "a")).not.toHaveProperty("subagents");
+      expect(rows.find((row) => row.id === "b")).not.toHaveProperty("subagents");
+    });
+
+    it("leaves unlabelled subagent rows exactly as before", () => {
+      const before = deriveMessagesTimelineRows({ ...common, timelineEntries, expandedRunIds });
+      expect(
+        deriveMessagesTimelineRows({
+          ...common,
+          timelineEntries,
+          expandedRunIds,
+          organIdBySubagentId: new Map([["elsewhere", "organ_review-1"]]),
+        }),
+      ).toEqual(before);
+      expect(
+        deriveMessagesTimelineRows({
+          ...common,
+          timelineEntries,
+          expandedRunIds,
+          organIdBySubagentId: new Map(),
+        }),
+      ).toEqual(before);
+    });
+  });
+
   it.each([
     { status: "completed", envelope: "direct", role: "general" },
     { status: "completed", envelope: "structured", role: "general" },

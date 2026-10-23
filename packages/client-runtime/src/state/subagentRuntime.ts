@@ -5,6 +5,10 @@ import type {
   OrchestrationV2Subagent,
   OrchestrationV2SubagentWorkflow,
   OrchestrationV2TurnItem,
+  OrganId,
+  OrganLabel,
+  ThreadId,
+  ThreadRolePreset,
 } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive, isProviderNativeSubagentThread } from "@t3tools/contracts";
 
@@ -289,6 +293,133 @@ export function deriveWorkflowGroups(
 
     return { workflow, phases, unphasedMembers };
   });
+}
+
+type OrganRecord = Pick<
+  OrchestrationV2Subagent,
+  "id" | "childThreadId" | "organ" | "status" | "model" | "title" | "updatedAt"
+>;
+
+export interface OrganCellShell {
+  readonly rolePreset?: ThreadRolePreset | null | undefined;
+  readonly hasPendingApprovals: boolean;
+  readonly hasPendingUserInput: boolean;
+}
+
+export interface OrganCell {
+  readonly childThreadId: ThreadId | null;
+  /** The latest record's id; follow-up records replace the first one's. */
+  readonly subagentId: string;
+  readonly title: string | null;
+  readonly role: ThreadRolePreset | null;
+  readonly model: string | null;
+  readonly status: OrchestrationV2Subagent["status"];
+  readonly needsYou: boolean;
+}
+
+export interface OrganGroup {
+  readonly organId: OrganId;
+  readonly presetId: OrganLabel["presetId"];
+  readonly goal: string;
+  readonly rounds: ReadonlyArray<{
+    readonly round: number;
+    readonly cells: ReadonlyArray<OrganCell>;
+  }>;
+  readonly running: boolean;
+  /** Set once every cell is terminal. */
+  readonly outcome?: "completed" | "failed" | "stopped";
+}
+
+const NO_ORGAN_GROUPS: ReadonlyArray<OrganGroup> = [];
+
+/**
+ * One group per organ, in order of its first record. A follow-up task copies its cell's label,
+ * so records sharing a child thread are one cell: it keeps the round it started in and takes the
+ * latest record's status. The role comes from the child's shell because the parent's record
+ * never carries it.
+ */
+export function deriveOrganGroups(
+  subagents: ReadonlyArray<OrganRecord>,
+  shellOf: (childThreadId: ThreadId) => OrganCellShell | null | undefined,
+): ReadonlyArray<OrganGroup> {
+  const organs = new Map<
+    OrganId,
+    { label: OrganLabel; cells: Map<string, { round: number; record: OrganRecord }> }
+  >();
+  for (const record of subagents) {
+    if (record.organ === undefined) continue;
+    let organ = organs.get(record.organ.id);
+    if (organ === undefined) {
+      organ = { label: record.organ, cells: new Map() };
+      organs.set(record.organ.id, organ);
+    }
+    const key = record.childThreadId ?? record.id;
+    const cell = organ.cells.get(key);
+    if (cell === undefined) {
+      organ.cells.set(key, { round: record.organ.round, record });
+    } else if (
+      DateTime.toEpochMillis(record.updatedAt) >= DateTime.toEpochMillis(cell.record.updatedAt)
+    ) {
+      cell.record = record;
+    }
+  }
+  if (organs.size === 0) return NO_ORGAN_GROUPS;
+
+  return Array.from(organs.values(), ({ label, cells }) => {
+    const rounds = new Map<number, OrganCell[]>();
+    let running = false;
+    let settled = true;
+    let failed = false;
+    let stopped = false;
+    for (const { round, record } of cells.values()) {
+      const shell = record.childThreadId === null ? null : shellOf(record.childThreadId);
+      const status = record.status;
+      running ||= isOrchestrationV2WorkActive(status);
+      settled &&= isTerminalSubagentStatus(status);
+      failed ||= status === "failed";
+      stopped ||= status === "cancelled" || status === "interrupted";
+      let roundCells = rounds.get(round);
+      if (roundCells === undefined) {
+        roundCells = [];
+        rounds.set(round, roundCells);
+      }
+      roundCells.push({
+        childThreadId: record.childThreadId,
+        subagentId: record.id,
+        title: record.title,
+        role: shell?.rolePreset ?? null,
+        model: record.model,
+        status,
+        needsYou: shell != null && (shell.hasPendingApprovals || shell.hasPendingUserInput),
+      });
+    }
+    return {
+      organId: label.id,
+      presetId: label.presetId,
+      goal: label.goal,
+      rounds: Array.from(rounds, ([round, roundCells]) => ({ round, cells: roundCells })).sort(
+        (a, b) => a.round - b.round,
+      ),
+      running,
+      ...(settled ? { outcome: failed ? "failed" : stopped ? "stopped" : "completed" } : {}),
+    } satisfies OrganGroup;
+  });
+}
+
+/**
+ * Which organ each labelled subagent record belongs to, for timeline grouping. Undefined when no
+ * record is labelled, so threads without organs keep a stable (absent) input.
+ */
+export function organIdsBySubagentId(
+  subagents: ReadonlyArray<Pick<OrchestrationV2Subagent, "id" | "organ">>,
+): ReadonlyMap<string, OrganId> | undefined {
+  let byId: Map<string, OrganId> | undefined;
+  for (const subagent of subagents) {
+    if (subagent.organ === undefined) continue;
+    byId ??= new Map();
+    byId.set(subagent.id, subagent.organ.id);
+  }
+  return byId;
 }
 
 // Workflow scripts open with their `meta` export, after any leading comments.
