@@ -2012,25 +2012,30 @@ const make = Effect.gen(function* () {
 
   /**
    * Everything delegate_task does once the caller, its live run and the role
-   * preset are settled; start_organ runs it once per cell.
+   * preset are settled; start_organ runs it once per cell. It succeeds once the
+   * child exists; `finish` prepares and reads it, so a caller can tell a child
+   * that started but failed setup from one that never started.
    */
-  const dispatchDelegation = (args: {
+  const submitDelegation = (args: {
     readonly scope: McpThreadInvocationScope;
     readonly parent: Effect.Success<ReturnType<typeof loadProjection>>;
     readonly parentRun: OrchestrationV2Run;
     readonly parentNodeId: NodeId;
     readonly preset: AgentRolePreset | undefined;
+    readonly providers: ReadonlyArray<ServerProvider>;
     readonly input: OrchestratorMcpDelegateTaskInput;
     readonly key: string;
     readonly commandId: CommandId;
     readonly organ: OrganLabel | undefined;
     readonly completionWake: "always" | "settled_only";
-  }): Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure> =>
+  }): Effect.Effect<
+    { readonly finish: Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure> },
+    OrchestratorMcpFailure
+  > =>
     Effect.gen(function* () {
-      const { scope, parent, parentRun, parentNodeId, preset, input, key, commandId } = args;
-      const { organ, completionWake } = args;
+      const { scope, parent, parentRun, parentNodeId, preset, providers, input, key } = args;
+      const { commandId, organ, completionWake } = args;
       const isolation = input.isolation ?? preset?.isolation;
-      const providers = yield* loadProviders;
       const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
       const target = yield* resolveRequestTarget({
         parent,
@@ -2109,66 +2114,70 @@ const make = Effect.gen(function* () {
       }
       const taskId = taskEvent.event.payload.id;
       const childThreadId = taskEvent.event.payload.childThreadId;
-      const childRunEvent = result.storedEvents.find(
-        (stored) => stored.event.type === "run.created" && stored.event.threadId === childThreadId,
-      );
-      if (
-        childThreadId !== null &&
-        childRunEvent?.event.type === "run.created" &&
-        childRunEvent.event.payload.workspacePreparation !== undefined
-      ) {
-        yield* threadLaunch.prepareRun({
-          commandId,
-          threadId: childThreadId,
-          runId: childRunEvent.event.payload.id,
-        });
-      }
-
-      if (input.mode !== "wait") {
-        return yield* readTask(scope, taskId, false, true);
-      }
-      const timeoutMs = Math.min(
-        MAX_WAIT_TIMEOUT_MS,
-        Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
-      );
-      const waited = yield* waitForTask(scope, taskId, timeoutMs);
-      if (Option.isSome(waited) && isTerminalTaskStatus(waited.value.status)) {
-        return waited.value;
-      }
-      // An incomplete wait gives up delivery: upgrade so a later terminal
-      // wakes the parent even mid-turn.
-      yield* threadManagement
-        .dispatch({
-          type: "delegated_task.wake-policy",
-          commandId: stableCommandId({
-            scope,
-            requestKey: key,
-            operation: "delegate-task-wake-policy",
-          }),
-          parentThreadId: scope.thread.threadId,
-          taskId,
-          completionWake: "always",
-        })
-        .pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
-              taskId,
-              outcome:
-                error._tag === "OrchestratorCommandPreviouslyRejectedError"
-                  ? "previously_rejected"
-                  : "dispatch_failed",
-              error,
-            }),
-          ),
-          Effect.catchCause((cause) =>
-            Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
-              taskId,
-              outcome: "defect",
-              cause,
-            }),
-          ),
+      const finish = Effect.gen(function* () {
+        const childRunEvent = result.storedEvents.find(
+          (stored) =>
+            stored.event.type === "run.created" && stored.event.threadId === childThreadId,
         );
-      return yield* readTask(scope, taskId, Option.isNone(waited), true);
+        if (
+          childThreadId !== null &&
+          childRunEvent?.event.type === "run.created" &&
+          childRunEvent.event.payload.workspacePreparation !== undefined
+        ) {
+          yield* threadLaunch.prepareRun({
+            commandId,
+            threadId: childThreadId,
+            runId: childRunEvent.event.payload.id,
+          });
+        }
+
+        if (input.mode !== "wait") {
+          return yield* readTask(scope, taskId, false, true);
+        }
+        const timeoutMs = Math.min(
+          MAX_WAIT_TIMEOUT_MS,
+          Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+        );
+        const waited = yield* waitForTask(scope, taskId, timeoutMs);
+        if (Option.isSome(waited) && isTerminalTaskStatus(waited.value.status)) {
+          return waited.value;
+        }
+        // An incomplete wait gives up delivery: upgrade so a later terminal
+        // wakes the parent even mid-turn.
+        yield* threadManagement
+          .dispatch({
+            type: "delegated_task.wake-policy",
+            commandId: stableCommandId({
+              scope,
+              requestKey: key,
+              operation: "delegate-task-wake-policy",
+            }),
+            parentThreadId: scope.thread.threadId,
+            taskId,
+            completionWake: "always",
+          })
+          .pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
+                taskId,
+                outcome:
+                  error._tag === "OrchestratorCommandPreviouslyRejectedError"
+                    ? "previously_rejected"
+                    : "dispatch_failed",
+                error,
+              }),
+            ),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
+                taskId,
+                outcome: "defect",
+                cause,
+              }),
+            ),
+          );
+        return yield* readTask(scope, taskId, Option.isNone(waited), true);
+      });
+      return { finish };
     });
 
   return OrchestratorMcpService.of({
@@ -2598,8 +2607,11 @@ const make = Effect.gen(function* () {
             "Delegated tasks require an active run owned by this MCP provider session.",
           );
         }
+        const key = yield* requestKey(input.clientRequestId);
+        const commandId = stableCommandId({ scope, requestKey: key, operation: "delegate-task" });
+        // An accepted round replays its receipt, even if the organ's rules changed since.
         const organ =
-          input.organ === undefined
+          input.organ === undefined || (yield* threadManagement.hasReceipt(commandId))
             ? undefined
             : yield* organs
                 .planRound({
@@ -2609,22 +2621,23 @@ const make = Effect.gen(function* () {
                   role: preset?.id,
                 })
                 .pipe(Effect.mapError((refusal) => failure("invalid_request", refusal.message)));
-        const key = yield* requestKey(input.clientRequestId);
-        return yield* dispatchDelegation({
+        const submitted = yield* submitDelegation({
           scope,
           parent,
           parentRun,
           parentNodeId: parentRun.rootNodeId,
           preset,
+          providers: yield* loadProviders,
           input,
           key,
-          commandId: stableCommandId({ scope, requestKey: key, operation: "delegate-task" }),
+          commandId,
           organ,
           // Async delegations wake the parent on every child terminal; wait
           // delegations deliver through the blocking tool call, so a wake is
           // only needed if the parent settled first (timeout, disconnect).
           completionWake: input.mode === "wait" ? "settled_only" : "always",
         });
+        return yield* submitted.finish;
       }),
     startOrgan: (callerScope, input) =>
       Effect.gen(function* () {
@@ -2652,49 +2665,68 @@ const make = Effect.gen(function* () {
             presetId: input.presetId,
             goal: input.goal,
             cells: input.cells,
+            subagents: parent.subagents,
             requestNamespace: scope.requestNamespace,
             requestKey: key,
           })
           .pipe(Effect.mapError((refusal) => failure("invalid_request", refusal.message)));
+        const providers = yield* loadProviders;
+        const rolePresets = yield* loadRolePresets(parent.thread.projectId);
         const tasks: Array<OrchestratorMcpDelegateTaskResult> = [];
+        const partial = (index: number, reason: string) => ({
+          organId: plan.organ.id,
+          round: plan.organ.round,
+          tasks,
+          failed: [{ index, reason }],
+        });
         for (const cell of plan.cells) {
-          const started = yield* Effect.gen(function* () {
-            const preset = yield* requirePreset(parent.thread.projectId, cell.role);
-            return yield* dispatchDelegation({
-              scope,
-              parent,
-              parentRun,
-              parentNodeId,
-              preset,
-              input: {
-                task: cell.prompt,
-                preset: cell.role,
-                ...(cell.target === undefined ? {} : { target: cell.target }),
-                mode: "async",
-              },
-              key,
-              commandId: stableCommandId({
-                scope,
-                requestKey: key,
-                operation: "start-organ",
-                index: cell.index,
-              }),
-              organ: plan.organ,
-              completionWake: "always",
-            });
-          }).pipe(Effect.result);
-          if (Result.isSuccess(started)) {
-            tasks.push(started.success);
-            continue;
+          const commandId = stableCommandId({
+            scope,
+            requestKey: key,
+            operation: "start-organ",
+            index: cell.index,
+          });
+          if (cell.refusal !== undefined && !(yield* threadManagement.hasReceipt(commandId))) {
+            return partial(cell.index, cell.refusal);
           }
-          // Nothing started, so there is no organ to report.
-          if (tasks.length === 0) return yield* started.failure;
-          return {
-            organId: plan.organ.id,
-            round: plan.organ.round,
-            tasks,
-            failed: [{ index: cell.index, reason: started.failure.message }],
-          };
+          const preset = findAgentRolePresetIn(rolePresets, cell.role);
+          const submitted =
+            preset === undefined
+              ? Result.fail(
+                  failure("invalid_request", unknownAgentRolePresetMessage(cell.role, rolePresets)),
+                )
+              : yield* submitDelegation({
+                  scope,
+                  parent,
+                  parentRun,
+                  parentNodeId,
+                  preset,
+                  providers,
+                  input: {
+                    task: cell.prompt,
+                    title: cell.title,
+                    preset: cell.role,
+                    ...(cell.target === undefined ? {} : { target: cell.target }),
+                    mode: "async",
+                  },
+                  key,
+                  commandId,
+                  organ: plan.organ,
+                  completionWake: "always",
+                }).pipe(Effect.result);
+          if (Result.isFailure(submitted)) {
+            // Nothing started, so there is no organ to report.
+            if (tasks.length === 0) return yield* submitted.failure;
+            return partial(cell.index, submitted.failure.message);
+          }
+          const finished = yield* submitted.success.finish.pipe(Effect.result);
+          if (Result.isFailure(finished)) {
+            return partial(
+              cell.index,
+              `Cell started but setup failed: ${finished.failure.message}`,
+            );
+          }
+          tasks.push(finished.success);
         }
         return { organId: plan.organ.id, round: plan.organ.round, tasks };
       }),

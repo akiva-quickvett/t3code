@@ -40,6 +40,12 @@ export interface OrganCellPlan {
   readonly target?: OrchestratorMcpTarget;
   /** The expanded goal template, carrying the full goal. */
   readonly prompt: string;
+  readonly title: string;
+  /**
+   * Set only when the organ already started under this key: a cell its starter
+   * may no longer start fails on its own, while cells that started still replay.
+   */
+  readonly refusal?: string;
 }
 
 export interface OrganStartPlan {
@@ -52,6 +58,8 @@ export interface OrganStartInput {
   readonly presetId: string;
   readonly goal: string;
   readonly cells?: ReadonlyArray<OrchestratorMcpStartOrganCell> | undefined;
+  /** The starter's subagent records, which show whether this key already started the organ. */
+  readonly subagents: ReadonlyArray<{ readonly organ?: OrganLabel | undefined }>;
   /** The MCP request namespace (the provider session) and the call's request key. */
   readonly requestNamespace: string;
   readonly requestKey: string;
@@ -76,15 +84,26 @@ export function mintOrganId(requestNamespace: string, requestKey: string): Organ
   return `organ_${digest.slice(0, 32)}`;
 }
 
+/** Cuts at a code unit boundary, so a surrogate pair is never split. */
+function clip(text: string, length: number, ellipsis: string): string {
+  if (text.length <= length) return text;
+  const end = length - ellipsis.length;
+  const code = text.charCodeAt(end - 1);
+  return `${text.slice(0, code >= 0xd800 && code <= 0xdbff ? end - 1 : end)}${ellipsis}`;
+}
+
 export function organGoalLabel(goal: string): string {
-  return goal.length <= ORGAN_GOAL_MAX_LENGTH
-    ? goal
-    : `${goal.slice(0, ORGAN_GOAL_MAX_LENGTH - 1)}…`;
+  return clip(goal, ORGAN_GOAL_MAX_LENGTH, "…");
 }
 
 function expandGoalTemplate(template: string, goal: string): string {
-  if (template.includes("{goal}")) return template.replaceAll("{goal}", goal);
+  // split/join, not replaceAll: a string replacement would expand `$&` and friends in the goal.
+  if (template.includes("{goal}")) return template.split("{goal}").join(goal);
   return template.length === 0 ? goal : `${template}\n\n${goal}`;
+}
+
+function cellTitle(role: string, index: number, goal: string): string {
+  return clip(`${role} ${index + 1}: ${goal.replace(/\s+/g, " ").trim()}`, 80, "...");
 }
 
 function toMcpTarget(target: AgentRolePresetTarget): OrchestratorMcpTarget {
@@ -116,7 +135,7 @@ function checkCellRoles(
 ): string | undefined {
   const unknown = unknownOrganCellRoles(settings, starter.projectId, roles);
   if (unknown.length > 0) {
-    return `${unknown.length === 1 ? "Role" : "Roles"} ${unknown.map((role) => `\`${role}\``).join(", ")} ${unknown.length === 1 ? "is" : "are"} not defined for this project. Nothing was started.`;
+    return `${unknown.length === 1 ? "Role" : "Roles"} ${unknown.map((role) => `\`${role}\``).join(", ")} ${unknown.length === 1 ? "is" : "are"} not defined for this project.`;
   }
   if (starter.rolePreset == null) return undefined;
   const starterId = starter.rolePreset.id;
@@ -157,30 +176,49 @@ export function planOrganStart(
       count: cell.count,
       target: cell.target === undefined ? undefined : toMcpTarget(cell.target),
     }));
-  const refusal = checkCellRoles(
-    settings,
-    input.starter,
-    sourceCells.map((cell) => cell.role),
+  const organ: OrganLabel = {
+    id: mintOrganId(input.requestNamespace, input.requestKey),
+    presetId: preset.id,
+    goal: organGoalLabel(input.goal),
+    round: 1,
+  };
+  const started = input.subagents.flatMap((task) =>
+    task.organ?.id === organ.id ? [task.organ] : [],
   );
-  if (refusal !== undefined) return new OrganRefusal({ message: refusal });
+  const other = started.find(
+    (label) => label.presetId !== organ.presetId || label.goal !== organ.goal,
+  );
+  if (other !== undefined) {
+    return new OrganRefusal({
+      message: `clientRequestId \`${input.requestKey}\` already started organ \`${organ.id}\` (preset \`${other.presetId}\`); use a new clientRequestId.`,
+    });
+  }
+  // A new organ is refused whole. A retry of a started one is replayed instead:
+  // only a cell that never started can still be refused, and then on its own.
+  if (started.length === 0) {
+    const refusal = checkCellRoles(
+      settings,
+      input.starter,
+      sourceCells.map((cell) => cell.role),
+    );
+    if (refusal !== undefined) return new OrganRefusal({ message: refusal });
+  }
   const prompt = expandGoalTemplate(preset.goalTemplate, input.goal);
   const cells = sourceCells
     .flatMap((cell) => Array.from({ length: cell.count }, () => cell))
-    .map((cell, index): OrganCellPlan => ({
-      index,
-      role: cell.role,
-      ...(cell.target === undefined ? {} : { target: cell.target }),
-      prompt,
-    }));
-  return {
-    organ: {
-      id: mintOrganId(input.requestNamespace, input.requestKey),
-      presetId: preset.id,
-      goal: organGoalLabel(input.goal),
-      round: 1,
-    },
-    cells,
-  };
+    .map((cell, index): OrganCellPlan => {
+      const refusal =
+        started.length === 0 ? undefined : checkCellRoles(settings, input.starter, [cell.role]);
+      return {
+        index,
+        role: cell.role,
+        ...(cell.target === undefined ? {} : { target: cell.target }),
+        prompt,
+        title: cellTitle(cell.role, index, organ.goal),
+        ...(refusal === undefined ? {} : { refusal }),
+      };
+    });
+  return { organ, cells };
 }
 
 export function planOrganRound(
@@ -225,7 +263,7 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettingsService.ServerSettingsService;
   const withSettings = <A>(plan: (settings: ServerSettings) => A | OrganRefusal) =>
     serverSettings.getSettings.pipe(
-      Effect.mapError(() => new OrganRefusal({ message: "Could not read organ presets." })),
+      Effect.orDie,
       Effect.flatMap((settings) => {
         const result = plan(settings);
         return isOrganRefusal(result) ? Effect.fail(result) : Effect.succeed(result);

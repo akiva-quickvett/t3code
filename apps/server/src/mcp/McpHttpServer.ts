@@ -767,6 +767,7 @@ const registerHtmlPreview = Effect.fn("McpHttpServer.registerHtmlPreview")(funct
  */
 const HANDOFF_TOOLS: ReadonlySet<string> = new Set([
   "delegate_task",
+  "start_organ",
   "create_threads",
   "t3_thread_launch",
   "t3_thread_send",
@@ -794,6 +795,7 @@ const resultThreadIds = (content: unknown): ReadonlyArray<string> => {
   if (typeof content !== "object" || content === null) return [];
   const record = content as Readonly<Record<string, unknown>>;
   if (Array.isArray(record.threads)) return record.threads.flatMap(resultThreadIds);
+  if (Array.isArray(record.tasks)) return record.tasks.flatMap(resultThreadIds);
   const key = resultThreadKeys.find((candidate) => typeof record[candidate] === "string");
   return key === undefined ? [] : [record[key] as string];
 };

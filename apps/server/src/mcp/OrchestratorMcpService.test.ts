@@ -2930,9 +2930,10 @@ describe("OrchestratorMcpService organs", () => {
     );
     const readProviders =
       providers === undefined ? Effect.succeed([provider(codexInstanceId)]) : Ref.get(providers);
+    // Settings are exposed too, so a test can change them between calls.
     return layerOrchestratorService.pipe(
       Layer.provideMerge(layerOrchestration),
-      Layer.provide(
+      Layer.provideMerge(
         Layer.mergeAll(
           layerAdapters,
           Layer.mock(ProviderRegistry.ProviderRegistry)({
@@ -3152,6 +3153,94 @@ describe("OrchestratorMcpService organs", () => {
       assert.equal(plain.status, "running");
       assert.isUndefined((yield* parentSubagents)[0]?.organ);
     }).pipe(Effect.provide(layerOrgans({ allowedChildRoles: { slice: ["scout"] } }))),
+  );
+
+  it.effect("refuses a key reused for a different organ", () =>
+    Effect.gen(function* () {
+      yield* createParent();
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const cells = [{ role: "scout", target }];
+      const first = yield* service.startOrgan(scope, {
+        presetId: "scouts",
+        goal: "Look.",
+        cells,
+        clientRequestId: "reused",
+      });
+      const error = yield* service
+        .startOrgan(scope, {
+          presetId: "research",
+          goal: "Look.",
+          cells,
+          clientRequestId: "reused",
+        })
+        .pipe(Effect.flip);
+      assert.equal(error.code, "invalid_request");
+      assert.equal(
+        error.message,
+        `clientRequestId \`reused\` already started organ \`${first.organId}\` (preset \`scouts\`); use a new clientRequestId.`,
+      );
+      assert.lengthOf(yield* parentSubagents, 1);
+    }).pipe(Effect.provide(layerOrgans())),
+  );
+
+  it.effect("replays accepted organ calls after the starter's allowed roles narrow", () =>
+    Effect.gen(function* () {
+      yield* createParent({ role: "broker" });
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const startInput = {
+        presetId: "scouts",
+        goal: "Look.",
+        cells: [{ role: "scout", target }],
+        clientRequestId: "narrowed",
+      };
+      const started = yield* service.startOrgan(scope, startInput);
+      const roundInput = {
+        task: "Look again.",
+        preset: "scout",
+        target,
+        organ: { id: started.organId },
+        clientRequestId: "narrowed-round",
+      };
+      const round = yield* service.delegateTask(scope, roundInput);
+
+      yield* settings.updateAgentRolePresets((current) => ({
+        ...current,
+        environment: {
+          ...current.environment,
+          overrides: {
+            ...current.environment.overrides,
+            broker: {
+              ...current.environment.overrides.broker!,
+              allowedChildRoles: ["implementor"],
+            },
+          },
+        },
+      }));
+      const startRetry = yield* service.startOrgan(scope, startInput);
+      assert.isUndefined(startRetry.failed);
+      assert.equal(startRetry.tasks[0]?.taskId, started.tasks[0]?.taskId);
+      assert.equal((yield* service.delegateTask(scope, roundInput)).taskId, round.taskId);
+
+      // New work under the narrowed list is refused, for a new cell and a new round alike.
+      const grown = yield* service.startOrgan(scope, {
+        ...startInput,
+        cells: [{ role: "scout", count: 2, target }],
+      });
+      assert.equal(grown.tasks[0]?.taskId, started.tasks[0]?.taskId);
+      assert.deepEqual(
+        grown.failed?.map((entry) => entry.index),
+        [1],
+      );
+      assert.include(grown.failed?.[0]?.reason ?? "", "can't start `scout`");
+      const newRound = yield* service
+        .delegateTask(scope, { ...roundInput, clientRequestId: "narrowed-round-2" })
+        .pipe(Effect.flip);
+      assert.include(newRound.message, "can't start `scout`");
+      assert.lengthOf(yield* parentSubagents, 2);
+    }).pipe(
+      Effect.provide(layerOrgans({ allowedChildRoles: { broker: ["implementor", "scout"] } })),
+    ),
   );
 
   it.effect("adds a round to an organ on the parent's records and refuses others", () =>

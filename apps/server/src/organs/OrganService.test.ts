@@ -47,6 +47,7 @@ const start = (
   OrganService.planOrganStart(settings, {
     starter: { projectId },
     goal: "Ship the organ start.",
+    subagents: [],
     requestNamespace: namespace,
     requestKey: "key-1",
     ...input,
@@ -131,11 +132,23 @@ describe("planOrganStart", () => {
   it("names the starter's role, its layer and the missing child role", () => {
     const settings = withEnvironmentRoles(rolePreset("slice", ["broker", "scout"]));
     const message = refusal(
-      start(settings, { presetId: "design", starter: { projectId, rolePreset: { id: "slice" } } }),
+      start(settings, {
+        presetId: "implementation",
+        starter: { projectId, rolePreset: { id: "slice" } },
+      }),
     );
     assert.strictEqual(
       message,
-      "Role `slice` (defined in the environment layer) can't start `designer`; add it to its allowed child roles.",
+      "Role `slice` (defined in the environment layer) can't start `implementor`; add it to its allowed child roles.",
+    );
+    assert.include(
+      refusal(
+        start(withEnvironmentRoles(rolePreset("broker", ["implementor"])), {
+          presetId: "scouts",
+          starter: { projectId, rolePreset: { id: "broker" } },
+        }),
+      ),
+      "can't start `scout`",
     );
   });
 
@@ -175,7 +188,10 @@ describe("planOrganStart", () => {
       [removed, { projectId, rolePreset: { id: "slice" } }],
       [unlisted, { projectId, rolePreset: { id: "slice" } }],
     ] as const) {
-      assert.strictEqual(plan(start(settings, { presetId: "design", starter })).cells.length, 2);
+      assert.strictEqual(
+        plan(start(settings, { presetId: "implementation", starter })).cells.length,
+        1,
+      );
     }
   });
 
@@ -199,6 +215,68 @@ describe("planOrganStart", () => {
     assert.strictEqual(result.organ.goal.length, 500);
     assert.isTrue(result.organ.goal.endsWith("…"));
     assert.isTrue(result.cells.every((cell) => cell.prompt === `Scout: ${goal}`));
+  });
+});
+
+describe("planOrganStart on a retry", () => {
+  const organ = {
+    id: OrganService.mintOrganId(namespace, "key-1"),
+    presetId: "scouts",
+    goal: "Ship the organ start.",
+    round: 1,
+  };
+
+  it("refuses a key that already started a different organ", () => {
+    assert.strictEqual(
+      refusal(start(DEFAULT_SERVER_SETTINGS, { presetId: "research", subagents: [{ organ }] })),
+      `clientRequestId \`key-1\` already started organ \`${organ.id}\` (preset \`scouts\`); use a new clientRequestId.`,
+    );
+    assert.include(
+      refusal(
+        start(DEFAULT_SERVER_SETTINGS, {
+          presetId: "scouts",
+          goal: "Another goal.",
+          subagents: [{ organ }],
+        }),
+      ),
+      "already started organ",
+    );
+  });
+
+  it("refuses cells one by one once the organ started, instead of the whole call", () => {
+    const settings = withEnvironmentRoles(rolePreset("broker", ["implementor"]));
+    const starter = { projectId, rolePreset: { id: "broker" } };
+    assert.include(refusal(start(settings, { presetId: "scouts", starter })), "can't start");
+    const retried = plan(start(settings, { presetId: "scouts", starter, subagents: [{ organ }] }));
+    assert.lengthOf(retried.cells, 3);
+    assert.isTrue(retried.cells.every((cell) => cell.refusal?.includes("can't start `scout`")));
+    const fresh = plan(start(DEFAULT_SERVER_SETTINGS, { presetId: "scouts" }));
+    assert.isTrue(fresh.cells.every((cell) => cell.refusal === undefined));
+  });
+});
+
+describe("cell prompts, titles and labels", () => {
+  it("sends the goal verbatim, replacement patterns included", () => {
+    const goal = "Keep $& and $' and $` and $$ as typed.";
+    assert.strictEqual(
+      plan(start(DEFAULT_SERVER_SETTINGS, { presetId: "scouts", goal })).cells[0]?.prompt,
+      `Scout: ${goal}`,
+    );
+  });
+
+  it("gives each cell a distinct, bounded title", () => {
+    const titles = plan(
+      start(DEFAULT_SERVER_SETTINGS, { presetId: "scouts", goal: "Map\nthe  path. ".repeat(20) }),
+    ).cells.map((cell) => cell.title);
+    assert.strictEqual(new Set(titles).size, 3);
+    assert.isTrue(titles.every((title) => title.length <= 80 && !title.includes("\n")));
+    assert.isTrue(titles[0]?.startsWith("scout 1: Map the path."));
+  });
+
+  it("does not split a surrogate pair at the label cut", () => {
+    const goal = `${"g".repeat(498)}😀${"g".repeat(100)}`;
+    const label = OrganService.organGoalLabel(goal);
+    assert.strictEqual(label, `${"g".repeat(498)}…`);
   });
 });
 
@@ -263,10 +341,10 @@ describe("planOrganRound", () => {
           starter: { projectId, rolePreset: { id: "broker" } },
           subagents,
           organ: { id: organ.id },
-          role: "designer",
+          role: "scout",
         }),
       ),
-      "Role `broker` (defined in the environment layer) can't start `designer`",
+      "Role `broker` (defined in the environment layer) can't start `scout`",
     );
   });
 });
@@ -279,6 +357,7 @@ describe("OrganService", () => {
         starter: { projectId },
         presetId: "research",
         goal: "Compare.",
+        subagents: [],
         requestNamespace: namespace,
         requestKey: "key-1",
       });
@@ -288,6 +367,7 @@ describe("OrganService", () => {
           starter: { projectId },
           presetId: "missing",
           goal: "Compare.",
+          subagents: [],
           requestNamespace: namespace,
           requestKey: "key-1",
         })
