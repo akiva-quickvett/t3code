@@ -89,6 +89,22 @@ const reachesEnvironmentLoopback = (target: ConnectionTarget): boolean =>
   isElectron &&
   (target._tag === "PrimaryConnectionTarget" || isDesktopLocalConnectionTarget(target));
 
+/**
+ * Whether this client's own browser shares the environment host's loopback:
+ * the desktop app on its own backend, or a browser that reached the server on
+ * a loopback address.
+ */
+export function clientReachesEnvironmentLoopback(environmentId: EnvironmentId): boolean {
+  const connection = readPreparedConnection(environmentId);
+  if (!connection) return false;
+  if (reachesEnvironmentLoopback(connection.target)) return true;
+  try {
+    return isLocalLoopbackHost(new URL(connection.httpBaseUrl).hostname.replace(/^\[|\]$/g, ""));
+  } catch {
+    return false;
+  }
+}
+
 export function resolveDiscoveredServerUrl(environmentId: EnvironmentId, rawUrl: string): string {
   try {
     const normalizedUrl = normalizePreviewUrl(rawUrl);

@@ -9,6 +9,7 @@ import {
   type PodRuntimeStreamEvent,
   type PodRuntimeWarning,
 } from "@t3tools/contracts";
+import { isLoopbackHost } from "@t3tools/shared/preview";
 
 import type { EnvironmentThreadShell } from "./models.ts";
 
@@ -60,6 +61,39 @@ export function podServiceLinks(pod: PodRuntimeSnapshot): ReadonlyArray<PodServi
   return pod.services.flatMap(({ name, url, tailnetUrl }) =>
     url === null ? [] : [{ name, url, ...(tailnetUrl === undefined ? {} : { tailnetUrl }) }],
   );
+}
+
+export interface PodServiceShareTarget {
+  readonly url: string;
+  /** How far the URL reaches, shown beside it; null when it simply works from here. */
+  readonly reachLabel: "tailnet" | "host only" | null;
+  /** Whether this client's own browser can open the URL. */
+  readonly reachable: boolean;
+}
+
+const isLoopbackUrl = (url: string) => {
+  try {
+    return isLoopbackHost(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * The URL of a pod's service to hand out from this client. Hostname URLs work
+ * anywhere the hostname router does; a loopback URL only on the environment
+ * host, so the tailnet address of the same port is preferred when published.
+ */
+export function podServiceShareTarget(
+  link: PodServiceLink,
+  clientOnHost: boolean,
+): PodServiceShareTarget {
+  if (!isLoopbackUrl(link.url)) return { url: link.url, reachLabel: null, reachable: true };
+  if (link.tailnetUrl !== undefined)
+    return { url: link.tailnetUrl, reachLabel: "tailnet", reachable: true };
+  return clientOnHost
+    ? { url: link.url, reachLabel: null, reachable: true }
+    : { url: link.url, reachLabel: "host only", reachable: false };
 }
 
 /**

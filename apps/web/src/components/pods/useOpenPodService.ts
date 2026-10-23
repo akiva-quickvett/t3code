@@ -66,8 +66,12 @@ export function useOpenPodService(environmentId: EnvironmentId | null) {
   );
   const navigate = useNavigate();
 
-  const open = async (pod: PodRuntimeSnapshot, link: PodServiceLink, threadId: ThreadId | null) => {
-    if (environmentId === null) return;
+  const openIn = async (
+    environmentId: EnvironmentId,
+    pod: PodRuntimeSnapshot,
+    link: PodServiceLink,
+    threadId: ThreadId | null,
+  ) => {
     let threadRef: ScopedThreadRef;
     if (threadId !== null) threadRef = scopeThreadRef(environmentId, threadId);
     else {
@@ -96,5 +100,11 @@ export function useOpenPodService(environmentId: EnvironmentId | null) {
     });
   };
 
-  return { open, allowed };
+  const open = async (pod: PodRuntimeSnapshot, link: PodServiceLink, threadId: ThreadId | null) => {
+    if (environmentId === null) return;
+    await openIn(environmentId, pod, link, threadId);
+  };
+
+  /** For callers spanning environments, such as the sidebar's thread menu. */
+  return { open, openIn, allowed };
 }

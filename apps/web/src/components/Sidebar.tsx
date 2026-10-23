@@ -203,6 +203,7 @@ import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import {
   buildDraftActionMenuItems,
   buildThreadActionMenuItems,
+  podServiceMenuChoice,
   snoozeMenuChoice,
   threadActionRequiresOperate,
   threadSnoozeTreeMenuState,
@@ -304,6 +305,7 @@ import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarT
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { PodChip } from "./pods/PodChip";
+import { useThreadPodServiceMenu } from "./pods/useThreadPodServiceMenu";
 import { ThreadRoleBadge } from "./roles/RoleBadge";
 import { useStartTicketThread } from "../hooks/useStartTicketThread";
 import { MiddleTruncate } from "./ui/middle-truncate";
@@ -3005,6 +3007,7 @@ export default function Sidebar() {
       );
     },
   });
+  const podServiceMenu = useThreadPodServiceMenu();
   const { copyToClipboard: copyThreadIdToClipboard } = useCopyToClipboard<{ threadId: ThreadId }>({
     onCopy: ({ threadId }) => {
       toastManager.add({
@@ -4503,6 +4506,7 @@ export default function Sidebar() {
           shell !== null && readEnvironmentSupportsSnoozeTree(thread.environmentId)
             ? threadSnoozeTreeMenuState(shell, readThreadShells(), new Date().toISOString())
             : undefined;
+        const podServices = podServiceMenu.read(threadRef, thread.worktreePath);
         const threadProjectGroup =
           projectGroupsRef.current.find((project) =>
             project.memberProjectRefs.some(
@@ -4543,12 +4547,18 @@ export default function Sidebar() {
               },
               snoozePresets,
               ...(snoozeTree === undefined ? {} : { snoozeTree }),
+              ...(podServices === undefined ? {} : { podServices: podServices.state }),
             }),
             position,
           ),
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
         if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
+        const podServiceChoice = podServiceMenuChoice(clicked.value);
+        if (podServiceChoice !== null) {
+          podServiceMenu.run(podServices, podServiceChoice, threadRef);
+          return;
+        }
         const snoozeChoice = snoozeMenuChoice(clicked.value, snoozeTree);
         if (snoozeChoice !== null) {
           const preset =
