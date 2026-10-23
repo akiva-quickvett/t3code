@@ -28,7 +28,8 @@ import { DEFAULT_AGENT_ROLE_PRESETS } from "../agentRoles/defaultAgentRolePreset
 import * as ServerSettingsService from "../serverSettings.ts";
 import { DEFAULT_ORGAN_PRESETS } from "./defaultOrganPresets.ts";
 
-function buildOrganPresetList(
+/** The effective organ presets for a project, or the environment's when `projectId` is undefined. */
+export function buildOrganPresetList(
   settings: ServerSettings,
   projectId: ProjectId | undefined,
 ): OrganPresetList {
@@ -51,20 +52,22 @@ const projectOf = (scope: AgentRolePresetScope) =>
   scope.type === "project" ? scope.projectId : undefined;
 
 /**
- * Roles that do not resolve in the scope's own effective role list. A project
- * scope sees its project's roles; the environment scope sees only its own.
+ * The given roles, deduplicated, that do not resolve in the effective role list
+ * for `projectId`, or for the environment alone when it is undefined.
  */
-function unknownCellRoles(input: OrganPresetSaveInput, settings: ServerSettings) {
-  const roles = new Set(
+export function unknownOrganCellRoles(
+  settings: ServerSettings,
+  projectId: ProjectId | undefined,
+  roles: ReadonlyArray<string>,
+): ReadonlyArray<string> {
+  const known = new Set(
     layerAgentRolePresets({
       defaults: DEFAULT_AGENT_ROLE_PRESETS,
       settings: settings.agentRolePresets,
-      projectId: projectOf(input.scope),
+      projectId,
     }).presets.map((entry) => entry.preset.id),
   );
-  return [...new Set(input.preset.cells.map((cell) => cell.role))].filter(
-    (role) => !roles.has(role),
-  );
+  return [...new Set(roles)].filter((role) => !known.has(role));
 }
 
 const listsEqual = Schema.toEquivalence(OrganPresetList);
@@ -140,10 +143,16 @@ const make = Effect.gen(function* () {
         Effect.flatMap(() => listFor(projectOf(input.scope))),
       );
 
+  // Validated against a snapshot, so a role removed before the write lands leaves an
+  // orphan cell; accepted, because starting an organ re-checks every cell role.
   const save: OrganPresetService["Service"]["save"] = (input) =>
     readSettings.pipe(
       Effect.flatMap((settings) => {
-        const unknown = unknownCellRoles(input, settings);
+        const unknown = unknownOrganCellRoles(
+          settings,
+          projectOf(input.scope),
+          input.preset.cells.map((cell) => cell.role),
+        );
         return unknown.length === 0
           ? edit({ type: "save", ...input })
           : Effect.fail(

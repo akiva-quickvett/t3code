@@ -188,3 +188,24 @@ it.effect("pushes the list only when a settings change alters it", () =>
     );
   }),
 );
+
+it("checks cell roles against one settings snapshot, per project", () => {
+  const settings: ServerSettings = {
+    ...DEFAULT_SERVER_SETTINGS,
+    agentRolePresets: {
+      environment: { overrides: {}, removed: ["scout"] },
+      projects: { [projectId]: { overrides: { auditor }, removed: [] } },
+    },
+  };
+  const roles = ["auditor", "scout", "ghost", "ghost", "implementor"];
+
+  assert.deepEqual(OrganPresetService.unknownOrganCellRoles(settings, undefined, roles), [
+    "auditor",
+    "scout",
+    "ghost",
+  ]);
+  assert.deepEqual(OrganPresetService.unknownOrganCellRoles(settings, projectId, roles), [
+    "scout",
+    "ghost",
+  ]);
+});

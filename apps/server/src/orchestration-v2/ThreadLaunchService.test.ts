@@ -72,7 +72,6 @@ import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import { layerWithoutPods } from "../pod/testkit/layerWithoutPods.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
-import * as OrganPresetService from "../organs/OrganPresetService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
@@ -3358,7 +3357,6 @@ it.effect.each(
               ),
       });
       const layerService = OrchestratorMcpService.layer.pipe(
-        Layer.provide(OrganPresetService.layer),
         Layer.provide(layerWithoutPods),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(harness.layer),
@@ -3582,7 +3580,6 @@ const withDelegatedWorktreeRepo = <A, E>(
       ...options,
     });
     const layerService = OrchestratorMcpService.layer.pipe(
-      Layer.provide(OrganPresetService.layer),
       Layer.provide(layerWithoutPods),
       Layer.provide(NodeCrypto.layer),
       Layer.provide(harness.layer),
