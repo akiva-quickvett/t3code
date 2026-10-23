@@ -416,6 +416,18 @@ describe("deriveOrganGroups", () => {
   const shell = (overrides: Partial<CellShell> = {}): CellShell => ({
     hasPendingApprovals: false,
     hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+    runtimeStatus: null,
+    latestRun: null,
+    lastErrorClass: null,
+    wokeAt: null,
+    backgroundWorkHoldsCompletion: false,
+    lastVisitedAt: null,
+    settled: false,
+    snoozed: false,
+    limitParked: false,
+    environmentConnected: true,
+    shellStatus: "live",
     ...overrides,
   });
   const noShells = () => undefined;
@@ -484,15 +496,41 @@ describe("deriveOrganGroups", () => {
       (childThreadId) => shells.get(childThreadId),
     );
     expect(
-      group!.rounds[0]!.cells.map(({ subagentId, role, needsYou }) => ({
-        subagentId,
-        role,
-        needsYou,
-      })),
+      group!.rounds[0]!.cells.map(({ subagentId, role, dot }) => ({ subagentId, role, dot })),
     ).toEqual([
-      { subagentId: "a", role: { id: "reviewer", label: "Reviewer" }, needsYou: false },
-      { subagentId: "b", role: null, needsYou: true },
-      { subagentId: "pending", role: null, needsYou: false },
+      { subagentId: "a", role: { id: "reviewer", label: "Reviewer" }, dot: "idle" },
+      { subagentId: "b", role: null, dot: "needs-you" },
+      { subagentId: "pending", role: null, dot: "working" },
+    ]);
+  });
+
+  it("resolves a cell's dot from its shell, falling back to the record without one", () => {
+    const shells = new Map([
+      ["child-working", shell({ runtimeStatus: "running" })],
+      ["child-limited", shell({ runtimeStatus: "failed", lastErrorClass: "usage_limit" })],
+      ["child-plan", shell({ hasActionableProposedPlan: true })],
+      ["child-empty", shell({ shellStatus: "empty" })],
+    ]);
+    const [group] = deriveOrganGroups(
+      [
+        record("working", "child-working", organ("one", 1), { status: "completed" }),
+        record("limited", "child-limited", organ("one", 1), { status: "failed" }),
+        record("plan", "child-plan", organ("one", 1)),
+        record("empty-running", "child-empty", organ("one", 1)),
+        record("unloaded-running", "child-unloaded-1", organ("one", 1)),
+        record("unloaded-failed", "child-unloaded-2", organ("one", 1), { status: "failed" }),
+        record("unloaded-done", "child-unloaded-3", organ("one", 1), { status: "completed" }),
+      ],
+      (childThreadId) => shells.get(childThreadId),
+    );
+    expect(group!.rounds[0]!.cells.map(({ subagentId, dot }) => [subagentId, dot])).toEqual([
+      ["working", "working"],
+      ["limited", "limited"],
+      ["plan", "needs-you"],
+      ["empty-running", "working"],
+      ["unloaded-running", "working"],
+      ["unloaded-failed", "failed"],
+      ["unloaded-done", "idle"],
     ]);
   });
 

@@ -1,6 +1,7 @@
 import { groupBy } from "effect/Array";
 import * as DateTime from "effect/DateTime";
 import type {
+  OrchestrationDot,
   OrchestrationV2AppThread,
   OrchestrationV2Subagent,
   OrchestrationV2SubagentWorkflow,
@@ -11,6 +12,10 @@ import type {
   ThreadRolePreset,
 } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive, isProviderNativeSubagentThread } from "@t3tools/contracts";
+import {
+  resolveOrchestrationDot,
+  type OrchestrationDotInput,
+} from "@t3tools/shared/orchestrationTree";
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -300,10 +305,12 @@ type OrganRecord = Pick<
   "id" | "childThreadId" | "organ" | "status" | "model" | "title" | "updatedAt"
 >;
 
-export interface OrganCellShell {
+/**
+ * The child's OrchestrationDotInput; build it with the same mapping the Orchestration sidebar
+ * uses so card and sidebar agree.
+ */
+export interface OrganCellShell extends OrchestrationDotInput {
   readonly rolePreset?: ThreadRolePreset | null | undefined;
-  readonly hasPendingApprovals: boolean;
-  readonly hasPendingUserInput: boolean;
 }
 
 export interface OrganCell {
@@ -314,7 +321,7 @@ export interface OrganCell {
   readonly role: ThreadRolePreset | null;
   readonly model: string | null;
   readonly status: OrchestrationV2Subagent["status"];
-  readonly needsYou: boolean;
+  readonly dot: OrchestrationDot;
 }
 
 export interface OrganGroup {
@@ -328,6 +335,16 @@ export interface OrganGroup {
   readonly running: boolean;
   /** Set once every cell is terminal. */
   readonly outcome?: "completed" | "failed" | "stopped";
+}
+
+/**
+ * Before the child exists, or while it has no shell or the shell has not loaded yet, the parent's
+ * record is the only evidence; it cannot show a request, a wake or a usage limit, so those dots
+ * never come from it.
+ */
+function recordDot(status: OrchestrationV2Subagent["status"]): OrchestrationDot {
+  if (isOrchestrationV2WorkActive(status)) return "working";
+  return status === "failed" ? "failed" : "idle";
 }
 
 const NO_ORGAN_GROUPS: ReadonlyArray<OrganGroup> = [];
@@ -390,7 +407,10 @@ export function deriveOrganGroups(
         role: shell?.rolePreset ?? null,
         model: record.model,
         status,
-        needsYou: shell != null && (shell.hasPendingApprovals || shell.hasPendingUserInput),
+        dot:
+          shell == null || shell.shellStatus === "empty"
+            ? recordDot(status)
+            : resolveOrchestrationDot(shell, null).dot,
       });
     }
     return {
