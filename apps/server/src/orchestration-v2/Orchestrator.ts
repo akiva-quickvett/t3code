@@ -122,6 +122,7 @@ import {
   type ProjectionRecordFilter,
   type ProjectionRecords,
   type ProjectionCheckpointContext,
+  type ProjectionThreadParking,
   type ShellSnapshotOptions,
 } from "./ProjectionStore.ts";
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
@@ -145,6 +146,12 @@ import {
   isForkableSourceRunStatus,
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
+import {
+  SETTLE_BLOCKER_FIELDS,
+  SETTLE_BLOCKER_FILTER,
+  settleBlockedThreads,
+  settleBlocker,
+} from "./settleBlocker.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
@@ -2725,42 +2732,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
     }
-    if (command.type === "thread.settle") {
-      const projection = yield* loadProjectionForCommand(
-        command,
-        ["runs", "runtimeRequests", "messages"],
-        { turnItemTypes: [], messageRoles: ["user"] },
+    if (
+      command.type === "thread.settle" &&
+      command.whenIdleRequestedAt !== undefined &&
+      thread.settleWhenIdle?.requestedAt !== command.whenIdleRequestedAt
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId}'s tree settle waiting for idle was cancelled or replaced.`,
+      });
+    }
+    // A tree settle reaches a single thread's lock only once dispatchTreeCascade
+    // found the tree busy: the root records the wait and settles nothing yet.
+    const recordsSettleWait = command.type === "thread.settle" && command.scope === "tree";
+    if (command.type === "thread.settle" && !recordsSettleWait) {
+      const { blocker, automaticQueuedRuns, pendingRequests } = settleBlocker(
+        yield* loadProjectionForCommand(command, SETTLE_BLOCKER_FIELDS, SETTLE_BLOCKER_FILTER),
       );
-      const automaticMessageIds = new Set(
-        projection.messages
-          .filter(
-            (message) =>
-              message.notification !== undefined || message.delegatedCompletion !== undefined,
-          )
-          .map((message) => message.id),
-      );
-      const automaticQueuedRuns = projection.runs.filter(
-        (run) => run.status === "queued" && automaticMessageIds.has(run.userMessageId),
-      );
-      const runningRunExists = projection.runs.some((run) =>
-        ["preparing", "starting", "running", "waiting"].includes(run.status),
-      );
-      const queuedMessageExists = projection.runs.some(
-        (run) => run.status === "queued" && !automaticQueuedRuns.includes(run),
-      );
-      const pendingRequests = projection.runtimeRequests.filter(
-        (request) => request.status === "pending",
-      );
-      const blockingRequestExists = pendingRequests.some(
-        (request) => request.kind !== "user_input" || request.responseCapability.type !== "message",
-      );
-      const blocker = blockingRequestExists
-        ? "is waiting on an approval or question. Answer it before settling."
-        : runningRunExists
-          ? "is still running. Stop it before settling."
-          : queuedMessageExists
-            ? "has a queued message. Send it or remove it from the queue before settling."
-            : null;
       if (blocker !== null) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -2800,7 +2789,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.type === "thread.model-selection.set" ||
       command.type === "provider.switch" ||
       command.type === "thread.archive" ||
-      command.type === "thread.settle" ||
+      (command.type === "thread.settle" && !recordsSettleWait) ||
       (command.type === "thread.metadata.update" &&
         command.worktreePath !== undefined &&
         command.worktreePath !== thread.worktreePath);
@@ -2968,6 +2957,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return {
             ...thread,
             archivedAt: now,
+            settleWhenIdle: null,
             titleRegeneration: null,
             pullRequests: thread.pullRequests?.map((link) => withPullRequestWatch(link, undefined)),
             updatedAt: now,
@@ -2975,6 +2965,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         case "thread.unarchive":
           return { ...thread, archivedAt: null, updatedAt: now };
         case "thread.settle": {
+          if (recordsSettleWait)
+            return {
+              ...thread,
+              settleWhenIdle: { requestedAt: DateTime.formatIso(now), scope: "tree" },
+              updatedAt: now,
+            };
           const wasPinned = thread.pinnedAt != null;
           const alreadySettled =
             thread.settledOverride === "settled" && thread.settledAt !== null && !wasPinned;
@@ -2988,6 +2984,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             pinnedAt: null,
             pinOrderKey: null,
             activeOrderKey: null,
+            // Settling the root alone, as auto-settle does, leaves the tree's wait standing.
+            ...(command.whenIdleRequestedAt === undefined ? {} : { settleWhenIdle: null }),
             updatedAt: alreadySettled ? thread.updatedAt : now,
           };
         }
@@ -2996,9 +2994,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return {
             ...thread,
             settledOverride: "active",
+            settleWhenIdle: null,
             settledAt: null,
             unsettledAt: alreadyPinnedActive ? (thread.unsettledAt ?? null) : now,
-            updatedAt: alreadyPinnedActive ? thread.updatedAt : now,
+            updatedAt:
+              alreadyPinnedActive && thread.settleWhenIdle == null ? thread.updatedAt : now,
           };
         }
         case "thread.snooze": {
@@ -3421,7 +3421,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         case "thread.unarchive":
           return "thread.unarchived" as const;
         case "thread.settle":
-          return "thread.settled" as const;
+          return recordsSettleWait
+            ? ("thread.metadata-updated" as const)
+            : ("thread.settled" as const);
         case "thread.unsettle":
           return "thread.unsettled" as const;
         case "thread.snooze":
@@ -4869,6 +4871,32 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command,
         )({
           type: "thread.unsnoozed",
+          threadId: command.threadId,
+          providerInstanceId: thread.providerInstanceId,
+          occurredAt: now,
+          payload: thread,
+        });
+        projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      }
+      // Likewise for a tree settle waiting on the root: a child's result is
+      // the work it waits for, while new work sent to the root calls it off.
+      if (
+        projection.thread.settleWhenIdle != null &&
+        command.notification === undefined &&
+        command.delegatedCompletion === undefined &&
+        command.restartContinuationOfRunId === undefined
+      ) {
+        const now = yield* DateTime.now;
+        const thread: OrchestrationV2AppThread = {
+          ...projection.thread,
+          settleWhenIdle: null,
+          updatedAt: now,
+        };
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
           threadId: command.threadId,
           providerInstanceId: thread.providerInstanceId,
           occurredAt: now,
@@ -11738,13 +11766,52 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   /**
    * A tree snooze, wake, settle or unsettle is one command for the caller and
-   * one per thread for the event log, each under its own thread's lock. The
+   * one per thread for the event log, each under its own thread's lock. A busy
+   * tree's settle, or snooze when idle, is recorded on the root and applied by
+   * SnoozeWhenIdleReactor once the tree is idle, the root last. Otherwise the
    * root goes first under the command's own id: if it is refused nothing
    * changed, and once it is in, undoing it on the root undoes the rest.
    * Descendants follow under ids derived from the command's, so a retry with
    * the same id finishes what a failure part way left; a descendant that
    * refused keeps refusing that id, and clients send a new id per click.
    */
+  // Each descendant is tried on its own, so one that refused, such as one a
+  // send reached between the tree's read and its lock, leaves its siblings'
+  // change, and their pods, to follow.
+  const dispatchDescendants = Effect.fn("orchestrationV2.dispatch.treeDescendants")(function* (
+    command: Extract<
+      OrchestrationV2ServerCommand,
+      { readonly type: "thread.snooze" | "thread.unsnooze" | "thread.settle" | "thread.unsettle" }
+    >,
+    descendants: ReadonlyArray<ProjectionThreadParking>,
+  ) {
+    const refused: Array<ThreadId> = [];
+    for (const thread of descendants) {
+      const commandId = CommandId.make(`${command.commandId}:tree:${thread.id}`);
+      const took = yield* dispatchWithReceipt(
+        command.type === "thread.snooze"
+          ? {
+              type: "thread.snooze",
+              commandId,
+              threadId: thread.id,
+              snoozedUntil: command.snoozedUntil,
+              scope: "thread",
+            }
+          : { ...command, commandId, threadId: thread.id, scope: "thread" },
+      ).pipe(
+        Effect.as(true),
+        Effect.catch(() => Effect.succeed(false)),
+      );
+      if (!took) refused.push(thread.id);
+    }
+    if (refused.length > 0)
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `${refused.length === 1 ? "Thread" : "Threads"} ${refused.join(", ")} in this tree refused it; the rest of the tree took it.`,
+      });
+  });
+
   // One tree cascade at a time: two racing on a tree, a snooze and its undo,
   // would otherwise interleave thread by thread and leave it half asleep.
   const treeCascades = yield* Semaphore.make(1);
@@ -11764,77 +11831,101 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
           ),
         );
+      const root = tree.find((thread) => thread.id === command.threadId);
       const descendants = tree.filter((thread) => {
         if (thread.id === command.threadId || thread.archived) return false;
         switch (command.type) {
           case "thread.settle":
             return !thread.settled;
-          // Only a settled thread is reopened: unsettling one that is already
+          // Only what the root's own settle retired is reopened: a thread
+          // settled on its own stays settled, and unsettling one already
           // active would pin it against auto-settle.
           case "thread.unsettle":
-            return thread.settled;
+            return (
+              thread.settled &&
+              thread.settledAt !== null &&
+              root?.settledAt != null &&
+              DateTime.toEpochMillis(thread.settledAt) === DateTime.toEpochMillis(root.settledAt)
+            );
           // Limit recovery's own wake at the reset stands: neither a tree
           // snooze nor a tree wake moves it. Waking such a thread directly
           // still works.
-          default:
+          case "thread.snooze":
             return !thread.settled && !thread.limitParked;
+          case "thread.unsnooze":
+            return (
+              !thread.settled &&
+              !thread.limitParked &&
+              (thread.snoozedUntil !== null || thread.snoozeWhenIdle !== null)
+            );
         }
       });
-      if (command.type === "thread.snooze" || command.type === "thread.settle") {
-        // The root keeps its own thread's rule, so an agent may snooze itself
-        // mid-turn; only work under it makes the tree wait.
-        const working = descendants.filter((thread) => thread.busy);
-        const rootWorking = tree.some((thread) => thread.id === command.threadId && thread.busy);
-        if (
-          command.type === "thread.snooze" &&
-          command.whenIdle === true &&
-          (working.length > 0 || rootWorking)
-        )
-          // Recorded on the root alone; the whole tree snoozes when it is idle.
+      if (command.type === "thread.settle") {
+        const blocked = yield* settleBlockedThreads(
+          projectionStore,
+          root === undefined ? descendants : [root, ...descendants],
+        ).pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+        if (blocked.length > 0) {
+          // SnoozeWhenIdleReactor saw the tree idle, but work started since:
+          // the wait stands and the next idle tries again.
+          if (command.whenIdleRequestedAt !== undefined)
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: `Work started again in thread ${command.threadId}'s tree; it settles once idle.`,
+            });
+          // Settling is retiring once the work ends: recorded on the root alone,
+          // the whole tree settles when it is idle.
           return yield* dispatchWithReceipt({ ...command, scope: "tree" });
-        if (working.length > 0) {
-          const threads = working.length === 1 ? "A thread" : `${working.length} threads`;
-          const are = working.length === 1 ? "is" : "are";
+        }
+        // Every thread this settle retires shares the root's settledAt, which
+        // is how a tree unsettle tells them from threads settled on their own.
+        const { whenIdleRequestedAt, ...settle } = command;
+        const cascade = {
+          ...settle,
+          settledAt:
+            root?.settled === true && root.settledAt !== null
+              ? root.settledAt
+              : (command.settledAt ?? (yield* DateTime.now)),
+        };
+        if (whenIdleRequestedAt === undefined) {
+          const result = yield* dispatchWithReceipt({ ...cascade, scope: "thread" });
+          yield* dispatchDescendants(cascade, descendants);
+          return result;
+        }
+        if (root?.settleWhenIdle?.requestedAt !== whenIdleRequestedAt)
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause:
-              command.type === "thread.snooze"
-                ? `${threads} under this one ${are} still working. Choose Snooze when idle to snooze the tree once ${working.length === 1 ? "it finishes" : "they finish"}.`
-                : `${threads} under this one ${are} still working. Stop ${working.length === 1 ? "it" : "them"} or wait for ${working.length === 1 ? "it" : "them"} to finish before settling the tree.`,
+            cause: `Thread ${command.threadId}'s tree settle waiting for idle was cancelled or replaced.`,
+          });
+        // Descendants before the root, so one that turned busy and refused
+        // leaves the root's wait in place for the reactor's next try; the
+        // root's own lock checks the wait is still current.
+        yield* dispatchDescendants(cascade, descendants);
+        return yield* dispatchWithReceipt({ ...cascade, whenIdleRequestedAt, scope: "thread" });
+      }
+      if (command.type === "thread.snooze") {
+        // The root keeps its own thread's rule, so an agent may snooze itself
+        // mid-turn; only work under it makes the tree wait.
+        const working = descendants.filter((thread) => thread.busy);
+        if (command.whenIdle === true && (working.length > 0 || root?.busy === true))
+          // Recorded on the root alone; the whole tree snoozes when it is idle.
+          return yield* dispatchWithReceipt({ ...command, scope: "tree" });
+        if (working.length > 0) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `${working.length === 1 ? "A thread" : `${working.length} threads`} under this one ${working.length === 1 ? "is" : "are"} still working. Choose Snooze when idle to snooze the tree once ${working.length === 1 ? "it finishes" : "they finish"}.`,
           });
         }
       }
       const result = yield* dispatchWithReceipt({ ...command, scope: "thread" });
-      for (const thread of descendants) {
-        const commandId = CommandId.make(`${command.commandId}:tree:${thread.id}`);
-        if (command.type === "thread.snooze")
-          yield* dispatchWithReceipt({
-            type: "thread.snooze",
-            commandId,
-            threadId: thread.id,
-            snoozedUntil: command.snoozedUntil,
-            scope: "thread",
-          });
-        else if (command.type === "thread.settle")
-          yield* dispatchWithReceipt({
-            type: "thread.settle",
-            commandId,
-            threadId: thread.id,
-            scope: "thread",
-          });
-        else if (
-          command.type === "thread.unsettle" ||
-          thread.snoozedUntil !== null ||
-          thread.snoozeWhenIdle !== null
-        )
-          yield* dispatchWithReceipt({
-            ...command,
-            commandId,
-            threadId: thread.id,
-            scope: "thread",
-          });
-      }
+      yield* dispatchDescendants(command, descendants);
       return result;
     },
     (effect) => treeCascades.withPermits(1)(effect),

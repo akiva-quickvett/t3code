@@ -406,7 +406,6 @@ export interface ThreadManagementServiceShape {
     readonly projectId: ProjectId;
     readonly threadId: ThreadId;
     readonly runId: RunId;
-    readonly scope?: ThreadSnoozeScope;
   }) => Effect.Effect<void, ThreadManagementFailure>;
   readonly settleThread: (input: {
     readonly threadId: ThreadId;
@@ -955,7 +954,6 @@ const make = Effect.gen(function* () {
       type: "thread.settle",
       commandId: CommandId.make(`server:settle-after-run:${input.runId}`),
       threadId: input.threadId,
-      ...(input.scope === undefined ? {} : { scope: input.scope }),
     });
   });
 
@@ -964,11 +962,21 @@ const make = Effect.gen(function* () {
   )(function* (input) {
     const shell = input.byOwnAgent ? yield* orchestrator.getThreadShell(input.threadId) : null;
     if (shell != null && shell.activeRunId !== null) {
+      // The agent's own turn keeps its tree busy, so a tree settle records a
+      // wait that applies once the tree is idle, and persists across restarts.
+      if (input.scope === "tree") {
+        yield* dispatch({
+          type: "thread.settle",
+          commandId: input.commandId,
+          threadId: input.threadId,
+          scope: "tree",
+        });
+        return { settlesWhenTurnEnds: true } as const;
+      }
       yield* settleAfterRun({
         projectId: shell.projectId,
         threadId: shell.id,
         runId: shell.activeRunId,
-        ...(input.scope === undefined ? {} : { scope: input.scope }),
       }).pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(layerScope));
       return { settlesWhenTurnEnds: true } as const;
     }

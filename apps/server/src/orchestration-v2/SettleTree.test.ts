@@ -10,12 +10,14 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -29,6 +31,7 @@ import * as PodParkingReactor from "./PodParkingReactor.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as SnoozeWhenIdleReactor from "./SnoozeWhenIdleReactor.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -95,15 +98,19 @@ const layerPods = Layer.mock(PodRuntimeService.PodRuntimeService)({
 });
 
 const layerDatabase = SqlitePersistence.layerMemory;
-const layerTest = PodParkingReactor.layer.pipe(
-  Layer.provide(
-    Layer.merge(
-      layerPods,
-      Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
-        releasePod: () => Effect.void,
-      }),
+const layerTest = Layer.merge(
+  PodParkingReactor.layer.pipe(
+    Layer.provide(
+      Layer.merge(
+        layerPods,
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          releasePod: () => Effect.void,
+        }),
+      ),
     ),
   ),
+  SnoozeWhenIdleReactor.layer,
+).pipe(
   Layer.provideMerge(ThreadManagementService.layer),
   Layer.provideMerge(
     Layer.mergeAll(
@@ -124,6 +131,10 @@ const layerTest = PodParkingReactor.layer.pipe(
 );
 
 const sweep = Effect.flatMap(PodParkingReactor.PodParkingReactor, (reactor) => reactor.sweep);
+const sweepWaits = Effect.flatMap(
+  SnoozeWhenIdleReactor.SnoozeWhenIdleReactor,
+  (reactor) => reactor.sweep,
+);
 
 const createThread = (threadId: ThreadId, worktreePath: string, supervisorThreadId?: ThreadId) =>
   Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
@@ -155,6 +166,8 @@ const createSubagent = (threadId: ThreadId, parent: ThreadId, worktreePath: stri
       id: threadId,
       title: threadId,
       worktreePath,
+      settledOverride: null,
+      settledAt: null,
       lineage: {
         parentThreadId: parent,
         relationshipToParent: "subagent",
@@ -174,30 +187,55 @@ const createSubagent = (threadId: ThreadId, parent: ThreadId, worktreePath: stri
   });
 
 const send = (threadId: ThreadId, text: string) =>
-  Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
-    orchestrator.dispatch({
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const messageId = MessageId.make(`message:${threadId}:${text}`);
+    yield* orchestrator.dispatch({
       type: "message.dispatch",
       commandId: CommandId.make(`send:${threadId}:${text}`),
       threadId,
-      messageId: MessageId.make(`message:${threadId}:${text}`),
+      messageId,
       text,
       attachments: [],
       dispatchMode: { type: "start_immediately" },
       createdBy: "user",
       creationSource: "web",
-    }),
-  );
+    });
+    const projection = yield* orchestrator.getThreadProjection(threadId);
+    return projection.runs.find((run) => run.userMessageId === messageId)!.id;
+  });
 
-const settledOverrideOf = (threadId: ThreadId) =>
+const endRun = (threadId: ThreadId, runId: RunId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+      (candidate) => candidate.id === runId,
+    )!;
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make(`event:${runId}:completed`),
+      type: "run.updated",
+      threadId,
+      runId,
+      occurredAt: now,
+      payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+    });
+  });
+
+const threadOf = (threadId: ThreadId) =>
   Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
     orchestrator.getThreadProjection(threadId),
-  ).pipe(Effect.map((projection) => projection.thread.settledOverride));
+  ).pipe(Effect.map((projection) => projection.thread));
+const settledOverrideOf = (threadId: ThreadId) =>
+  Effect.map(threadOf(threadId), (thread) => thread.settledOverride);
 
 const ids = {
   meta: ThreadId.make("thread:meta"),
   slice: ThreadId.make("thread:slice"),
   cell: ThreadId.make("thread:cell"),
   doneCell: ThreadId.make("thread:done-cell"),
+  freshCell: ThreadId.make("thread:fresh-cell"),
   lone: ThreadId.make("thread:lone"),
 };
 
@@ -218,6 +256,7 @@ it.layer(layerTest)("settle trees", (it) => {
           threadId: ids.doneCell,
         });
         const doneCellSequence = yield* orchestrator.getThreadEventSequence(ids.doneCell);
+        yield* TestClock.adjust("1 minute");
 
         // A worktree with a thread still active keeps its pod.
         yield* sweep;
@@ -242,6 +281,8 @@ it.layer(layerTest)("settle trees", (it) => {
         ]);
         calls.length = 0;
 
+        // Delegated after the settle, so still active when the tree is unsettled.
+        yield* createSubagent(ids.freshCell, ids.slice, worktrees.cell);
         yield* orchestrator.dispatch({
           type: "thread.unsettle",
           commandId: CommandId.make("unsettle:tree"),
@@ -249,8 +290,13 @@ it.layer(layerTest)("settle trees", (it) => {
           reason: "user",
           scope: "tree",
         });
-        for (const threadId of [ids.meta, ids.slice, ids.cell, ids.doneCell])
+        // It reopens what the tree settle retired, each pinned active as
+        // unsettling it alone would; a cell settled on its own stays settled,
+        // and one still active is left to auto-settle.
+        for (const threadId of [ids.meta, ids.slice, ids.cell])
           assert.equal(yield* settledOverrideOf(threadId), "active", threadId);
+        assert.equal(yield* settledOverrideOf(ids.doneCell), "settled");
+        assert.isNull(yield* settledOverrideOf(ids.freshCell));
 
         yield* sweep;
         assert.sameMembers(calls, [
@@ -262,24 +308,154 @@ it.layer(layerTest)("settle trees", (it) => {
       }),
   );
 
-  it.effect("refuses a tree settle while a thread under it works, changing nothing", () =>
-    Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      yield* send(ids.cell, "keep building");
-      const refused = yield* orchestrator
-        .dispatch({
+  it.effect(
+    "a tree settle waits for the work in the tree, then settles it and parks its pods",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const tree = [ids.meta, ids.slice, ids.cell, ids.doneCell, ids.freshCell];
+        const run = yield* send(ids.cell, "keep building");
+        yield* orchestrator.dispatch({
           type: "thread.settle",
           commandId: CommandId.make("settle:busy-tree"),
           threadId: ids.meta,
           scope: "tree",
-        })
-        .pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(refused));
-      assert.include(String(refused), "before settling the tree");
+        });
+        assert.deepInclude((yield* threadOf(ids.meta)).settleWhenIdle, { scope: "tree" });
+        for (const threadId of tree.filter((threadId) => threadId !== ids.doneCell))
+          assert.notEqual(yield* settledOverrideOf(threadId), "settled", threadId);
+
+        // Still working: the wait stands and nothing parks.
+        yield* sweepWaits;
+        yield* sweep;
+        assert.notEqual(yield* settledOverrideOf(ids.meta), "settled");
+        assert.deepEqual(calls, []);
+
+        yield* endRun(ids.cell, run);
+        yield* sweepWaits;
+        for (const threadId of tree)
+          assert.equal(yield* settledOverrideOf(threadId), "settled", threadId);
+        assert.isNull((yield* threadOf(ids.meta)).settleWhenIdle ?? null);
+        yield* sweep;
+        assert.sameMembers(calls, [
+          `park ${worktrees.meta}`,
+          `park ${worktrees.slice}`,
+          `park ${worktrees.cell}`,
+        ]);
+        calls.length = 0;
+      }),
+  );
+
+  it.effect("an unsettle of the root or a new message to it calls the wait off", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* orchestrator.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("unsettle:tree-again"),
+        threadId: ids.meta,
+        reason: "user",
+        scope: "tree",
+      });
+      yield* sweep;
+      calls.length = 0;
+
+      const cellRun = yield* send(ids.cell, "one more pass");
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("settle:tree-then-unsettle"),
+        threadId: ids.meta,
+        scope: "tree",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("unsettle:meta-cancels"),
+        threadId: ids.meta,
+        reason: "user",
+      });
+      assert.isNull((yield* threadOf(ids.meta)).settleWhenIdle ?? null);
+
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("settle:tree-then-message"),
+        threadId: ids.meta,
+        scope: "tree",
+      });
+      assert.isNotNull((yield* threadOf(ids.meta)).settleWhenIdle ?? null);
+      const metaRun = yield* send(ids.meta, "actually, one more thing");
+      assert.isNull((yield* threadOf(ids.meta)).settleWhenIdle ?? null);
+
+      yield* endRun(ids.cell, cellRun);
+      yield* endRun(ids.meta, metaRun);
+      yield* sweepWaits;
       for (const threadId of [ids.meta, ids.slice, ids.cell])
         assert.notEqual(yield* settledOverrideOf(threadId), "settled", threadId);
       yield* sweep;
       assert.deepEqual(calls, []);
+    }),
+  );
+
+  it.effect("a descendant that refuses leaves the rest of the tree settled, and names it", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      // A refusal recorded under the id the cascade derives for the slice.
+      yield* orchestrator
+        .dispatch({
+          type: "thread.unarchive",
+          commandId: CommandId.make(`settle:partial:tree:${ids.slice}`),
+          threadId: ids.slice,
+        })
+        .pipe(Effect.exit);
+      const partial = yield* orchestrator
+        .dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make("settle:partial"),
+          threadId: ids.meta,
+          scope: "tree",
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(partial));
+      assert.include(String(partial), ids.slice);
+      for (const threadId of [ids.meta, ids.cell, ids.freshCell])
+        assert.equal(yield* settledOverrideOf(threadId), "settled", threadId);
+      assert.notEqual(yield* settledOverrideOf(ids.slice), "settled");
+
+      yield* orchestrator.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("unsettle:after-partial"),
+        threadId: ids.meta,
+        reason: "user",
+        scope: "tree",
+      });
+      yield* sweep;
+      calls.length = 0;
+    }),
+  );
+
+  it.effect("an agent settling its own tree mid-turn settles it once all the work in it ends", () =>
+    Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const run = yield* send(ids.meta, "settle the tree when done");
+      const cellRun = yield* send(ids.cell, "still building");
+      assert.isNotNull((yield* threads.getThreadShell(ids.meta))?.activeRunId ?? null);
+      const result = yield* threads.settleThread({
+        threadId: ids.meta,
+        commandId: CommandId.make("settle:own-tree"),
+        byOwnAgent: true,
+        scope: "tree",
+      });
+      assert.deepEqual(result, { settlesWhenTurnEnds: true });
+      assert.deepInclude((yield* threadOf(ids.meta)).settleWhenIdle, { scope: "tree" });
+      assert.notEqual(yield* settledOverrideOf(ids.meta), "settled");
+
+      yield* endRun(ids.meta, run);
+      yield* sweepWaits;
+      assert.notEqual(yield* settledOverrideOf(ids.meta), "settled");
+      yield* endRun(ids.cell, cellRun);
+      yield* sweepWaits;
+      for (const threadId of [ids.meta, ids.slice, ids.cell])
+        assert.equal(yield* settledOverrideOf(threadId), "settled", threadId);
+      yield* sweep;
+      calls.length = 0;
     }),
   );
 

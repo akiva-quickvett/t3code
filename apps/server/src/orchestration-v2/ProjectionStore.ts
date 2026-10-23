@@ -181,9 +181,11 @@ export interface ProjectionThreadParking {
   readonly worktreePath: string | null;
   readonly archived: boolean;
   readonly settled: boolean;
+  readonly settledAt: DateTime.Utc | null;
   readonly snoozedUntil: DateTime.Utc | null;
   readonly snoozedAt: DateTime.Utc | null;
   readonly snoozeWhenIdle: NonNullable<OrchestrationV2AppThread["snoozeWhenIdle"]> | null;
+  readonly settleWhenIdle: NonNullable<OrchestrationV2AppThread["settleWhenIdle"]> | null;
   readonly status: OrchestrationV2ShellThreadStatus;
   readonly latestRunCompletedAt: DateTime.Utc | null;
   /** Bumped when the thread settles, so it says when a settled thread parked. */
@@ -200,12 +202,13 @@ export interface ProjectionThreadParking {
 
 /**
  * `treeOf` is the thread and every thread under it in the agent tree; the
- * others are the threads on a worktree, or those waiting to snooze when idle.
+ * others are the threads on a worktree, or those waiting to snooze or settle
+ * when idle.
  */
 export type ProjectionParkingScope =
   | { readonly treeOf: ThreadId }
   | { readonly worktreePath: string }
-  | { readonly snoozeWhenIdle: true };
+  | { readonly whenIdle: true };
 
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
@@ -1626,6 +1629,9 @@ export function threadShellFromProjection(
     ...(projection.thread.snoozeWhenIdle == null
       ? {}
       : { snoozeWhenIdle: projection.thread.snoozeWhenIdle }),
+    ...(projection.thread.settleWhenIdle == null
+      ? {}
+      : { settleWhenIdle: projection.thread.settleWhenIdle }),
     pinnedAt: projection.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
@@ -1874,6 +1880,9 @@ function shellFromState(input: {
     ...(input.state.thread.snoozeWhenIdle == null
       ? {}
       : { snoozeWhenIdle: input.state.thread.snoozeWhenIdle }),
+    ...(input.state.thread.settleWhenIdle == null
+      ? {}
+      : { settleWhenIdle: input.state.thread.settleWhenIdle }),
     pinnedAt: input.state.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
@@ -5863,7 +5872,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ? sql`t.thread_id IN (SELECT id FROM tree)`
               : "worktreePath" in scope
                 ? sql`json_extract(t.payload_json, '$.worktreePath') = ${scope.worktreePath}`
-                : sql`json_extract(t.payload_json, '$.snoozeWhenIdle') IS NOT NULL`
+                : sql`(json_extract(t.payload_json, '$.snoozeWhenIdle') IS NOT NULL
+                    OR json_extract(t.payload_json, '$.settleWhenIdle') IS NOT NULL)`
           }
         `;
         if (rows.length === 0) return [];
@@ -5897,9 +5907,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             worktreePath: thread.worktreePath,
             archived: thread.archivedAt !== null,
             settled: thread.settledOverride === "settled",
+            settledAt: thread.settledAt,
             snoozedUntil: thread.snoozedUntil ?? null,
             snoozedAt: thread.snoozedAt ?? null,
             snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
+            settleWhenIdle: thread.settleWhenIdle ?? null,
             status,
             latestRunCompletedAt:
               row.latest_run_completed_at === null
@@ -6485,8 +6497,8 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             const inScope = (thread: OrchestrationV2AppThread) =>
               "worktreePath" in scope
                 ? thread.worktreePath === scope.worktreePath
-                : "snoozeWhenIdle" in scope
-                  ? thread.snoozeWhenIdle != null
+                : "whenIdle" in scope
+                  ? thread.snoozeWhenIdle != null || thread.settleWhenIdle != null
                   : true;
             const tree =
               "treeOf" in scope
@@ -6530,9 +6542,11 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   worktreePath: thread.worktreePath,
                   archived: thread.archivedAt !== null,
                   settled: thread.settledOverride === "settled",
+                  settledAt: thread.settledAt,
                   snoozedUntil: thread.snoozedUntil ?? null,
                   snoozedAt: thread.snoozedAt ?? null,
                   snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
+                  settleWhenIdle: thread.settleWhenIdle ?? null,
                   status: shellStatusFromStoredRunStatus(latest?.status ?? null),
                   latestRunCompletedAt: latest?.completedAt ?? null,
                   updatedAt: thread.updatedAt,
