@@ -135,6 +135,8 @@ export interface EnvironmentThreadShell {
   readonly activeOrderKey: string | null;
   /** The thread's role; its label is a snapshot so a removed preset still names it. */
   readonly rolePreset?: import("@t3tools/contracts").ThreadRolePreset | null;
+  /** When the thread became a meta; null or absent for every other thread. */
+  readonly metaAt?: string | null;
   readonly pullRequests: ReadonlyArray<import("@t3tools/contracts").ThreadPullRequestLink>;
   readonly linkedPullRequest?: ThreadLinkedPullRequest | null;
   readonly branchPullRequest?: ThreadLinkedPullRequest | null;
@@ -280,6 +282,7 @@ export function presentThreadShell(
     pinOrderKey: thread.pinOrderKey ?? null,
     activeOrderKey: thread.activeOrderKey ?? null,
     ...(thread.rolePreset == null ? {} : { rolePreset: thread.rolePreset }),
+    ...(thread.metaAt === undefined ? {} : { metaAt: nullableIso(thread.metaAt) }),
     ...(thread.lastVisitedAt === undefined
       ? {}
       : { lastVisitedAt: nullableIso(thread.lastVisitedAt) }),

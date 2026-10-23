@@ -1,6 +1,7 @@
 import { assert, describe, it } from "vite-plus/test";
 import {
   compileResolvedKeybindingsConfig,
+  DEFAULT_KEYBINDINGS,
   DEFAULT_RESOLVED_KEYBINDINGS,
   mergeWithDefaultKeybindings,
 } from "@t3tools/shared/keybindings";
@@ -280,6 +281,8 @@ describe("agent tree shortcuts", () => {
       "sidebar.showAgentTree",
     ],
     [{ key: "B", ctrlKey: true, altKey: true, shiftKey: true }, "Linux", "sidebar.showAgentTree"],
+    [{ key: "N", metaKey: true, altKey: true, shiftKey: true }, "MacIntel", "sidebar.nextNeedsYou"],
+    [{ key: "N", ctrlKey: true, altKey: true, shiftKey: true }, "Linux", "sidebar.nextNeedsYou"],
   ] as const)(
     "resolves %o on %s to %s, unshadowed by later defaults",
     (keys, platform, command) => {
@@ -293,10 +296,24 @@ describe("agent tree shortcuts", () => {
     },
   );
 
-  it("leaves both shortcuts to a focused terminal", () => {
+  it("keeps the view toggle's default and gives next-needs-you a key of its own", () => {
+    const keysFor = (command: KeybindingCommand) =>
+      DEFAULT_KEYBINDINGS.filter((rule) => rule.command === command).map((rule) => rule.key);
+    assert.deepEqual(keysFor("sidebar.showAgentTree"), ["mod+alt+shift+b"]);
+    assert.deepEqual(keysFor("sidebar.nextNeedsYou"), ["mod+alt+shift+n"]);
+    assert.deepEqual(
+      DEFAULT_KEYBINDINGS.filter((rule) => rule.key === "mod+alt+shift+n").map(
+        (rule) => rule.command,
+      ),
+      ["sidebar.nextNeedsYou"],
+    );
+  });
+
+  it("leaves the agent tree shortcuts to a focused terminal", () => {
     for (const keys of [
       { key: "ArrowUp", ctrlKey: true, altKey: true },
       { key: "B", ctrlKey: true, altKey: true, shiftKey: true },
+      { key: "N", ctrlKey: true, altKey: true, shiftKey: true },
     ]) {
       assert.isNull(
         resolveShortcutCommand(event(keys), DEFAULT_RESOLVED_KEYBINDINGS, {
