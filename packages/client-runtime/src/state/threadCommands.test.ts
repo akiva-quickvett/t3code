@@ -182,6 +182,37 @@ describe("remote thread lifecycle commands", () => {
       }),
   );
 
+  it.effect("leaves a tree settle to the server and clears a pending one on un-settle", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const pending = {
+        ...SNAPSHOT,
+        threads: [
+          {
+            ...SNAPSHOT.threads[0]!,
+            settleWhenIdle: { requestedAt: "2026-09-12T10:00:00.000Z", scope: "tree" as const },
+          },
+        ],
+      };
+      h.registry.set(h.snapshotAtom(ENVIRONMENT_ID), pending);
+      const settled = h.commands.settle.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID, scope: "tree" },
+      });
+      // The server may only record a wait for the tree's work.
+      expect(h.registry.get(h.visibleAtom)?.threads[0]).toEqual(pending.threads[0]);
+      yield* Deferred.succeed((yield* Queue.take(h.requests)).reply, { sequence: 2 });
+      expect((yield* Effect.promise(() => settled))._tag).toBe("Success");
+      const unsettled = h.commands.unsettle.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID, reason: "user" },
+      });
+      expect(h.registry.get(h.visibleAtom)?.threads[0]).toMatchObject({ settleWhenIdle: null });
+      yield* Deferred.succeed((yield* Queue.take(h.requests)).reply, { sequence: 3 });
+      expect((yield* Effect.promise(() => unsettled))._tag).toBe("Success");
+    }),
+  );
+
   it.effect("restamps snoozedAt when re-snoozing to the same wake time", () =>
     Effect.gen(function* () {
       const h = yield* makeHarness();

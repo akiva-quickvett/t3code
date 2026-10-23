@@ -7,7 +7,12 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  canSnooze,
+  effectiveSnoozed,
+  isSettlePending,
+  threadSettleTreeState,
+} from "@t3tools/client-runtime/state/thread-settled";
 import {
   AuthOrchestrationOperateScope,
   type ScopedThreadRef,
@@ -34,6 +39,7 @@ import {
   readEnvironmentSupportsPinning,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
+  readEnvironmentSupportsSettleTree,
   readEnvironmentSupportsSnoozeTree,
   readEnvironmentSupportsTitleRegeneration,
   readThreadShell,
@@ -148,6 +154,10 @@ export function useThreadActionMenu(input: {
       const snoozeTree = readEnvironmentSupportsSnoozeTree(threadRef.environmentId)
         ? threadSnoozeTreeMenuState(thread, readThreadShells(), now.toISOString())
         : undefined;
+      const settleTree =
+        supports.settlement && readEnvironmentSupportsSettleTree(threadRef.environmentId)
+          ? threadSettleTreeState(thread, readThreadShells())
+          : undefined;
       const podServices = podServiceMenu.read(threadRef, thread.worktreePath);
       const items = buildThreadActionMenuItems({
         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
@@ -155,6 +165,7 @@ export function useThreadActionMenu(input: {
         projectFilter: null,
         isPinned: thread.pinnedAt != null,
         isSettled: supports.settlement && thread.settledOverride === "settled",
+        isSettlePending: supports.settlement && isSettlePending(thread),
         autoSettleEnabled: thread.autoSettleDisabledAt == null,
         isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
         canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
@@ -163,6 +174,7 @@ export function useThreadActionMenu(input: {
         supports,
         snoozePresets,
         ...(snoozeTree === undefined ? {} : { snoozeTree }),
+        ...(settleTree === undefined ? {} : { settleTree }),
         ...(podServices === undefined ? {} : { podServices: podServices.state }),
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
@@ -246,6 +258,16 @@ export function useThreadActionMenu(input: {
           return;
         case "unsettle":
           await reportFailure("Failed to un-settle thread", () => unsettleThread(threadRef));
+          return;
+        case "settle-tree":
+          await reportFailure("Failed to settle thread", () =>
+            settleThread(threadRef, { scope: "tree" }),
+          );
+          return;
+        case "unsettle-tree":
+          await reportFailure("Failed to un-settle thread", () =>
+            unsettleThread(threadRef, { scope: "tree" }),
+          );
           return;
         case "unsnooze":
           await reportFailure("Failed to wake thread", () => unsnoozeThread(threadRef));

@@ -38,6 +38,12 @@ function ids(state: ThreadActionMenuState): string[] {
   return buildThreadActionMenuItems(state).map((item) => item.id);
 }
 
+function settleItems(state: ThreadActionMenuState): string[][] {
+  return buildThreadActionMenuItems(state)
+    .filter((item) => item.id.includes("settle") && item.id !== "auto-settle")
+    .map((item) => [item.id, item.label]);
+}
+
 function allIds(state: ThreadActionMenuState): string[] {
   const flatten = (items: ReturnType<typeof buildThreadActionMenuItems>): string[] =>
     items.flatMap((item) => [item.id, ...(item.children ? flatten(item.children) : [])]);
@@ -264,6 +270,74 @@ describe("buildThreadActionMenuItems", () => {
       expect(snoozeMenuChoice("snooze:hour", undefined)).toMatchObject({ whenIdle: false });
       expect(snoozeMenuChoice("unsnooze", busy)).toBeNull();
     });
+  });
+
+  it("offers subtree settle and unsettle beside settle only where they can change something", () => {
+    const tree = { hasUnsettledDescendants: false, hasDescendants: false };
+    expect(ids({ ...baseState, settleTree: tree })).toEqual(ids(baseState));
+    expect(ids({ ...baseState, isSettled: true, settleTree: tree })).toEqual(
+      ids({ ...baseState, isSettled: true }),
+    );
+    const both = { hasUnsettledDescendants: true, hasDescendants: true };
+    expect(settleItems({ ...baseState, settleTree: both })).toEqual([
+      ["settle", "Settle thread"],
+      ["settle-tree", "Settle with subtree"],
+    ]);
+    // Agents woken since the root settled can be settled again with it.
+    expect(settleItems({ ...baseState, isSettled: true, settleTree: both })).toEqual([
+      ["unsettle", "Un-settle thread"],
+      ["unsettle-tree", "Unsettle with subtree"],
+      ["settle-tree", "Settle with subtree"],
+    ]);
+    // Every agent already settled: only the server knows which the root's settle closed.
+    expect(
+      settleItems({
+        ...baseState,
+        isSettled: true,
+        settleTree: { hasUnsettledDescendants: false, hasDescendants: true },
+      }),
+    ).toEqual([
+      ["unsettle", "Un-settle thread"],
+      ["unsettle-tree", "Unsettle with subtree"],
+    ]);
+    expect(
+      ids({
+        ...baseState,
+        supports: { ...baseState.supports, settlement: false },
+        settleTree: both,
+      }),
+    ).not.toContain("settle-tree");
+    const readOnly = buildThreadActionMenuItems({
+      ...baseState,
+      canOperate: false,
+      settleTree: both,
+    });
+    expect(readOnly.find((item) => item.id === "settle-tree")?.disabled).toBe(true);
+  });
+
+  it("offers only the way out while a subtree settle waits for work to end", () => {
+    expect(
+      settleItems({
+        ...baseState,
+        isSettlePending: true,
+        settleTree: { hasUnsettledDescendants: true, hasDescendants: true },
+      }),
+    ).toEqual([["unsettle", "Cancel settle when idle"]]);
+    expect(settleItems({ ...baseState, isSettlePending: true })).toEqual([
+      ["unsettle", "Cancel settle when idle"],
+    ]);
+    // A settled root waiting on a re-settle keeps both ways back.
+    expect(
+      settleItems({
+        ...baseState,
+        isSettled: true,
+        isSettlePending: true,
+        settleTree: { hasUnsettledDescendants: true, hasDescendants: true },
+      }),
+    ).toEqual([
+      ["unsettle", "Un-settle thread"],
+      ["unsettle-tree", "Unsettle with subtree"],
+    ]);
   });
 
   it("disables title regeneration while one is in flight", () => {

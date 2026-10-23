@@ -293,7 +293,11 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
       if (input.action === "settle") {
         return yield* threads
-          .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
+          .settleThread({
+            ...common,
+            byOwnAgent: caller?.id === projection.thread.id,
+            ...(input.scope === undefined ? {} : { scope: input.scope }),
+          })
           .pipe(Effect.mapError(dispatchFailure));
       }
       let command: OrchestrationV2Command;
@@ -323,7 +327,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           };
           break;
         case "unsettle":
-          command = { ...common, type: "thread.unsettle", reason: "user" };
+          command = {
+            ...common,
+            type: "thread.unsettle",
+            reason: "user",
+            ...(input.scope === undefined ? {} : { scope: input.scope }),
+          };
           break;
         case "mark_unread":
           command = { ...common, type: "thread.mark-unread" };

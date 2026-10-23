@@ -107,6 +107,9 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
           archivedAt: null,
           settledOverride: null,
           settledAt: null,
+          // The source's tree settle, or its wait, stays the source's.
+          settledByTree: null,
+          settleWhenIdle: null,
           snoozedUntil: null,
           snoozedAt: null,
           lastVisitedAt: null,

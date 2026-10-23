@@ -2370,6 +2370,7 @@ const make = Effect.gen(function* () {
             usageLimits: true,
             usageThreadTree: true,
             snoozeTree: true,
+            settleTree: true,
           },
         };
       }),

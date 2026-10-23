@@ -409,10 +409,12 @@ export function createThreadEnvironmentAtoms<R, E>(
   return {
     ...commands,
     snapshotAtom: optimistic.snapshotAtom,
-    settle: optimistic.wrap(commands.settle, (thread, _input, now, accepted) =>
-      !accepted &&
-      (thread.pendingRuntimeRequest !== null ||
-        ["preparing", "queued", "starting", "running", "waiting"].includes(thread.status))
+    settle: optimistic.wrap(commands.settle, (thread, input, now, accepted) =>
+      // A tree settle may only record a wait for the tree's work; the server decides which.
+      input.scope === "tree" ||
+      (!accepted &&
+        (thread.pendingRuntimeRequest !== null ||
+          ["preparing", "queued", "starting", "running", "waiting"].includes(thread.status)))
         ? thread
         : {
             ...thread,
@@ -432,6 +434,7 @@ export function createThreadEnvironmentAtoms<R, E>(
       settledOverride: input.reason === "user" ? "active" : null,
       settledAt: null,
       unsettledAt: thread.settledOverride === "active" ? (thread.unsettledAt ?? null) : now,
+      settleWhenIdle: null,
     })),
     snooze: optimistic.wrap(commands.snooze, (thread, input, now, accepted) =>
       // A snooze when idle may only record a deferral; the server decides which.

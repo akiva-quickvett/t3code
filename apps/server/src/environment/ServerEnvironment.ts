@@ -271,6 +271,7 @@ export const make = Effect.gen(function* () {
       chatChannels: true,
       podRuntime: true,
       threadSnoozeTree: true,
+      threadSettleTree: true,
     },
   };
 

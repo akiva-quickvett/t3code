@@ -2,7 +2,14 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { agentTreeDescendants } from "./threadRelationships.ts";
-import { threadHasActiveWork, threadTreeHasActiveWork } from "./threadSettled.ts";
+import {
+  isSettlePending,
+  threadHasActiveWork,
+  threadHasSettleBlocker,
+  threadTreeHasSettleBlocker,
+  threadSettleTreeState,
+  threadTreeHasActiveWork,
+} from "./threadSettled.ts";
 
 const NOW = "2026-10-21T12:00:00.000Z";
 const environmentId = EnvironmentId.make("env-1");
@@ -12,7 +19,7 @@ const thread = (
   options: {
     readonly parent?: string;
     readonly supervisor?: string;
-    readonly status?: "idle" | "running" | "queued";
+    readonly status?: "idle" | "running" | "queued" | "waiting";
     readonly approval?: boolean;
     readonly settled?: boolean;
     readonly environment?: string;
@@ -113,5 +120,83 @@ describe("active work", () => {
       },
     ];
     expect(threadTreeHasActiveWork(tree[0]!, tree, { now: NOW })).toBe(false);
+  });
+});
+
+describe("settle tree state", () => {
+  it("finds live and unsettled descendants, ignoring archived ones and other trees", () => {
+    const threads = [
+      thread("meta"),
+      thread("broker", { parent: "meta" }),
+      thread("cell", { parent: "broker", settled: true }),
+      thread("other"),
+    ];
+    expect(threadSettleTreeState(threads[0]!, threads)).toEqual({
+      hasUnsettledDescendants: true,
+      hasDescendants: true,
+    });
+    expect(threadSettleTreeState(threads[2]!, threads)).toEqual({
+      hasUnsettledDescendants: false,
+      hasDescendants: false,
+    });
+    const archived = threads.map((entry) =>
+      entry.id === "broker" ? { ...entry, archivedAt: NOW as string | null } : entry,
+    );
+    expect(threadSettleTreeState(archived[0]!, archived)).toEqual({
+      hasUnsettledDescendants: false,
+      hasDescendants: true,
+    });
+  });
+
+  it("calls a settle pending only while the server holds a wait for it", () => {
+    expect(isSettlePending({})).toBe(false);
+    expect(isSettlePending({ settleWhenIdle: null })).toBe(false);
+    expect(isSettlePending({ settleWhenIdle: { requestedAt: NOW } })).toBe(true);
+  });
+});
+
+describe("settle blocker", () => {
+  it("counts approvals and runs in flight, not user input or background work", () => {
+    expect(threadHasSettleBlocker(thread("a"), { now: NOW })).toBe(false);
+    expect(threadHasSettleBlocker(thread("a", { approval: true }), { now: NOW })).toBe(true);
+    expect(threadHasSettleBlocker(thread("a", { status: "running" }), { now: NOW })).toBe(true);
+    const askingByMessage = { ...thread("a"), hasPendingUserInput: true };
+    expect(threadHasSettleBlocker(askingByMessage, { now: NOW })).toBe(false);
+    const subagentWork = {
+      ...thread("a"),
+      pendingBackgroundTasks: [{ kind: "subagent", taskId: "task-1" } as never],
+    };
+    expect(threadHasSettleBlocker(subagentWork, { now: NOW })).toBe(false);
+  });
+
+  it("counts a turn a person queued, not a queued delivery", () => {
+    const queued = (latestUserAuthoredMessageAt: string | null) => ({
+      ...thread("a", { status: "queued" }),
+      latestUserMessageAt: NOW as string | null,
+      latestUserAuthoredMessageAt,
+    });
+    expect(threadHasSettleBlocker(queued(NOW), { now: NOW })).toBe(true);
+    expect(threadHasSettleBlocker(queued("2026-10-21T11:00:00.000Z"), { now: NOW })).toBe(false);
+    expect(threadHasSettleBlocker(queued(null), { now: NOW })).toBe(false);
+  });
+
+  it("checks the root whatever its state and live, unsettled threads under it", () => {
+    const tree = (rootSettled: boolean, child: Parameters<typeof thread>[1]) => [
+      thread("root", { settled: rootSettled }),
+      thread("child", { parent: "root", ...child }),
+    ];
+    const blocks = (threads: ReturnType<typeof tree>) =>
+      threadTreeHasSettleBlocker(threads[0]!, threads, { now: NOW });
+    expect(blocks(tree(false, {}))).toBe(false);
+    expect(blocks(tree(false, { status: "waiting" }))).toBe(true);
+    expect(blocks(tree(false, { status: "running", settled: true }))).toBe(false);
+    const settledRootRunning = [thread("root", { settled: true, status: "running" })];
+    expect(
+      threadTreeHasSettleBlocker(settledRootRunning[0]!, settledRootRunning, { now: NOW }),
+    ).toBe(true);
+    const archived = tree(false, { status: "running" }).map((entry) =>
+      entry.id === "child" ? { ...entry, archivedAt: NOW as string | null } : entry,
+    );
+    expect(threadTreeHasSettleBlocker(archived[0]!, archived, { now: NOW })).toBe(false);
   });
 });
