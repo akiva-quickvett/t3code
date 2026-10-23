@@ -40,7 +40,8 @@ import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import { useProjects } from "../state/entities";
 import { useUiStateStore } from "../uiStateStore";
-import { showThreadInAgentTree } from "../state/agentTree";
+import { usePrimaryEnvironmentId } from "../state/environments";
+import { readEnvironmentSupportsOrchestrationMetas } from "../state/orchestrationTree";
 import {
   clampThreadSidebarWidth,
   resolveInitialThreadSidebarWidth,
@@ -256,27 +257,38 @@ function ProjectProjectionRetention() {
   return null;
 }
 
-// "Show agent tree" also comes from the command palette, which renders outside
-// the sidebar provider, so the reveal request opens the sidebar from in here.
-// A focused desktop preview forwards the shortcut as a menu action.
+// The view toggle and "Show in agent tree" also come from the command palette
+// and the keybinding, which act outside the sidebar provider, so a view switch or
+// a reveal request opens the sidebar from in here. A focused desktop preview
+// forwards the toggle shortcut as a menu action.
 function AgentTreeSidebarControl() {
   const request = useUiStateStore((state) => state.agentTreeReveal?.request ?? null);
+  const sidebarView = useUiStateStore((state) => state.sidebarView);
   const { isMobile, setOpen, setOpenMobile } = useSidebar();
   const legacySidebarEnabled = useLegacySidebarEnabled();
   const routeThreadRef = useThreadRouteRef();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const environmentId = routeThreadRef?.environmentId ?? primaryEnvironmentId;
   useEffect(() => {
-    if (legacySidebarEnabled) return;
+    if (legacySidebarEnabled || environmentId === null) return;
     return window.desktopBridge?.onMenuAction((action) => {
-      if (action === "sidebar.showAgentTree") showThreadInAgentTree(routeThreadRef);
+      if (
+        action === "sidebar.showAgentTree" &&
+        readEnvironmentSupportsOrchestrationMetas(environmentId)
+      ) {
+        useUiStateStore.getState().toggleSidebarView();
+      }
     });
-  }, [legacySidebarEnabled, routeThreadRef]);
-  const handledRequestRef = useRef(request);
+  }, [environmentId, legacySidebarEnabled]);
+  const handledRef = useRef({ request, sidebarView });
   useEffect(() => {
-    if (request === null || handledRequestRef.current === request) return;
-    handledRequestRef.current = request;
+    const handled = handledRef.current;
+    handledRef.current = { request, sidebarView };
+    const revealed = request !== null && request !== handled.request;
+    if (!revealed && sidebarView === handled.sidebarView) return;
     if (isMobile) setOpenMobile(true);
     else void setOpen(true);
-  }, [isMobile, request, setOpen, setOpenMobile]);
+  }, [isMobile, request, setOpen, setOpenMobile, sidebarView]);
   return null;
 }
 

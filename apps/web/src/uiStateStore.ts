@@ -27,7 +27,10 @@ export interface PersistedUiState {
   projectOrderCwds?: string[];
   defaultAdvertisedEndpointKey?: string | null;
   sidebarProjectScopeKey?: string | null;
+  sidebarView?: string;
+  /** Legacy input; still written so an older build keeps the view. */
   sidebarAgentTreeEnabled?: boolean;
+  selectedMetaThreadKey?: string | null;
   threadChangedFilesExpansionVersion?: number;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   pullRequestMergeMethod?: string;
@@ -39,8 +42,17 @@ export interface UiProjectState {
   sidebarProjectScopeKey: string | null;
 }
 
+export type SidebarView = "chat" | "orchestration";
+
 export interface UiAgentTreeState {
+  sidebarView: SidebarView;
+  /**
+   * `sidebarView === "orchestration"`, kept in step by every writer for readers
+   * of the old agent-tree flag until they move to `sidebarView`.
+   */
   sidebarAgentTreeEnabled: boolean;
+  /** A meta's scoped thread key, `"no-meta"`, or null for the first tab. */
+  selectedMetaThreadKey: string | null;
   /**
    * Thread keys whose children show. Kept for the session only: children start
    * collapsed, and a persisted set would only grow.
@@ -77,7 +89,9 @@ const initialState: UiState = {
   projectExpandedById: {},
   projectOrder: [],
   sidebarProjectScopeKey: null,
+  sidebarView: "chat",
   sidebarAgentTreeEnabled: false,
+  selectedMetaThreadKey: null,
   agentTreeExpandedKeys: {},
   agentTreeReveal: null,
   threadLastVisitedAtById: {},
@@ -135,6 +149,13 @@ function sanitizeTimestampRecord(value: unknown): Record<string, string> {
   );
 }
 
+function parseSidebarView(parsed: PersistedUiState): SidebarView {
+  if (parsed.sidebarView === "chat" || parsed.sidebarView === "orchestration") {
+    return parsed.sidebarView;
+  }
+  return parsed.sidebarAgentTreeEnabled === true ? "orchestration" : "chat";
+}
+
 function isPullRequestMergeMethod(value: unknown): value is PullRequestMergeMethod {
   return value === "merge" || value === "squash" || value === "rebase";
 }
@@ -163,6 +184,8 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
       ? sanitizeStringArray(parsed.projectOrderCwds).map(legacyProjectCwdPreferenceKey)
       : sanitizeStringArray(parsed.projectOrder);
 
+  const sidebarView = parseSidebarView(parsed);
+
   return {
     projectExpandedById,
     projectOrder,
@@ -173,7 +196,9 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
         : {},
     defaultAdvertisedEndpointKey: sanitizeOptionalKey(parsed.defaultAdvertisedEndpointKey),
     sidebarProjectScopeKey: sanitizeOptionalKey(parsed.sidebarProjectScopeKey),
-    sidebarAgentTreeEnabled: parsed.sidebarAgentTreeEnabled === true,
+    sidebarView,
+    sidebarAgentTreeEnabled: sidebarView === "orchestration",
+    selectedMetaThreadKey: sanitizeOptionalKey(parsed.selectedMetaThreadKey),
     agentTreeExpandedKeys: initialState.agentTreeExpandedKeys,
     agentTreeReveal: null,
     pullRequestMergeMethod: isPullRequestMergeMethod(parsed.pullRequestMergeMethod)
@@ -250,7 +275,9 @@ export function persistState(state: UiState): void {
         threadLastVisitedAtById: state.threadLastVisitedAtById,
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         sidebarProjectScopeKey: state.sidebarProjectScopeKey,
-        sidebarAgentTreeEnabled: state.sidebarAgentTreeEnabled,
+        sidebarView: state.sidebarView,
+        sidebarAgentTreeEnabled: state.sidebarView === "orchestration",
+        selectedMetaThreadKey: state.selectedMetaThreadKey,
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
         pullRequestMergeMethod: state.pullRequestMergeMethod,
@@ -360,10 +387,25 @@ export function setSidebarProjectScopeKey(state: UiState, projectKey: string | n
   };
 }
 
-export function setSidebarAgentTreeEnabled(state: UiState, enabled: boolean): UiState {
-  return state.sidebarAgentTreeEnabled === enabled
+export function setSidebarView(state: UiState, view: SidebarView): UiState {
+  return state.sidebarView === view
     ? state
-    : { ...state, sidebarAgentTreeEnabled: enabled };
+    : { ...state, sidebarView: view, sidebarAgentTreeEnabled: view === "orchestration" };
+}
+
+export function toggleSidebarView(state: UiState): UiState {
+  return setSidebarView(state, state.sidebarView === "orchestration" ? "chat" : "orchestration");
+}
+
+export function setSidebarAgentTreeEnabled(state: UiState, enabled: boolean): UiState {
+  return setSidebarView(state, enabled ? "orchestration" : "chat");
+}
+
+export function setSelectedMetaThreadKey(state: UiState, key: string | null): UiState {
+  const nextKey = sanitizeOptionalKey(key);
+  return state.selectedMetaThreadKey === nextKey
+    ? state
+    : { ...state, selectedMetaThreadKey: nextKey };
 }
 
 export function setAgentTreeExpanded(
@@ -378,7 +420,7 @@ export function setAgentTreeExpanded(
   return { ...state, agentTreeExpandedKeys };
 }
 
-/** Turns tree mode on and expands `ancestorKeys` so `threadKey`'s row shows. */
+/** Switches to the orchestration view and expands `ancestorKeys` so `threadKey`'s row shows. */
 export function showAgentTree(
   state: UiState,
   threadKey: string | null,
@@ -387,8 +429,7 @@ export function showAgentTree(
   const agentTreeExpandedKeys = { ...state.agentTreeExpandedKeys };
   for (const key of ancestorKeys) agentTreeExpandedKeys[key] = true;
   return {
-    ...state,
-    sidebarAgentTreeEnabled: true,
+    ...setSidebarView(state, "orchestration"),
     agentTreeExpandedKeys,
     agentTreeReveal:
       threadKey === null
@@ -492,7 +533,10 @@ interface UiStateStore extends UiState {
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setSidebarProjectScopeKey: (projectKey: string | null) => void;
+  setSidebarView: (view: SidebarView) => void;
+  toggleSidebarView: () => void;
   setSidebarAgentTreeEnabled: (enabled: boolean) => void;
+  setSelectedMetaThreadKey: (key: string | null) => void;
   setAgentTreeExpanded: (threadKey: string, expanded: boolean) => void;
   showAgentTree: (threadKey: string | null, ancestorKeys: readonly string[]) => void;
   markAgentTreeRevealScrolled: () => void;
@@ -517,8 +561,11 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setSidebarProjectScopeKey: (projectKey) =>
     set((state) => setSidebarProjectScopeKey(state, projectKey)),
+  setSidebarView: (view) => set((state) => setSidebarView(state, view)),
+  toggleSidebarView: () => set((state) => toggleSidebarView(state)),
   setSidebarAgentTreeEnabled: (enabled) =>
     set((state) => setSidebarAgentTreeEnabled(state, enabled)),
+  setSelectedMetaThreadKey: (key) => set((state) => setSelectedMetaThreadKey(state, key)),
   setAgentTreeExpanded: (threadKey, expanded) =>
     set((state) => setAgentTreeExpanded(state, threadKey, expanded)),
   showAgentTree: (threadKey, ancestorKeys) =>

@@ -15,10 +15,13 @@ import {
   setDefaultAdvertisedEndpointKey,
   setProjectExpanded,
   setAgentTreeExpanded,
+  setSelectedMetaThreadKey,
   setSidebarAgentTreeEnabled,
   setSidebarProjectScopeKey,
+  setSidebarView,
   setThreadChangedFilesExpanded,
   showAgentTree,
+  toggleSidebarView,
   type UiState,
 } from "./uiStateStore";
 
@@ -27,7 +30,9 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectExpandedById: {},
     projectOrder: [],
     sidebarProjectScopeKey: null,
+    sidebarView: "chat",
     sidebarAgentTreeEnabled: false,
+    selectedMetaThreadKey: null,
     agentTreeExpandedKeys: {},
     agentTreeReveal: null,
     threadLastVisitedAtById: {},
@@ -204,9 +209,58 @@ describe("agent tree state", () => {
       setAgentTreeExpanded(expanded, "environment:slice", false).agentTreeExpandedKeys,
     ).toEqual({});
 
-    const flat = setSidebarAgentTreeEnabled({ ...expanded, sidebarAgentTreeEnabled: true }, false);
+    const flat = setSidebarAgentTreeEnabled(setSidebarView(expanded, "orchestration"), false);
+    expect(flat.sidebarView).toBe("chat");
     expect(flat.sidebarAgentTreeEnabled).toBe(false);
     expect(flat.agentTreeExpandedKeys).toEqual({ "environment:slice": true });
+  });
+});
+
+describe("sidebar view", () => {
+  it("reads a legacy agent-tree flag as the orchestration view", () => {
+    expect(parsePersistedState({ sidebarAgentTreeEnabled: true }).sidebarView).toBe(
+      "orchestration",
+    );
+    expect(parsePersistedState({ sidebarAgentTreeEnabled: false }).sidebarView).toBe("chat");
+    expect(parsePersistedState({}).sidebarView).toBe("chat");
+  });
+
+  it("prefers a stored view over the legacy flag and ignores unknown views", () => {
+    const parsed = parsePersistedState({ sidebarView: "chat", sidebarAgentTreeEnabled: true });
+    expect(parsed.sidebarView).toBe("chat");
+    expect(parsed.sidebarAgentTreeEnabled).toBe(false);
+    expect(
+      parsePersistedState({ sidebarView: "grid", sidebarAgentTreeEnabled: true }).sidebarView,
+    ).toBe("orchestration");
+  });
+
+  it("toggles between the views and keeps the legacy alias in step", () => {
+    const orchestration = toggleSidebarView(makeUiState());
+    expect(orchestration.sidebarView).toBe("orchestration");
+    expect(orchestration.sidebarAgentTreeEnabled).toBe(true);
+    const chat = toggleSidebarView(orchestration);
+    expect(chat.sidebarView).toBe("chat");
+    expect(chat.sidebarAgentTreeEnabled).toBe(false);
+    expect(setSidebarView(chat, "chat")).toBe(chat);
+  });
+
+  it("maps the legacy setter onto the view", () => {
+    const state = setSidebarAgentTreeEnabled(makeUiState(), true);
+    expect(state.sidebarView).toBe("orchestration");
+    expect(setSidebarAgentTreeEnabled(state, true)).toBe(state);
+  });
+
+  it("keeps the view when a thread is opened", () => {
+    const state = makeUiState({ sidebarView: "orchestration", sidebarAgentTreeEnabled: true });
+    const visited = markThreadVisited(state, "environment:thread", "2026-02-25T12:30:00.000Z");
+    expect(visited.sidebarView).toBe("orchestration");
+  });
+
+  it("stores the selected meta tab and drops empty keys", () => {
+    const state = setSelectedMetaThreadKey(makeUiState(), "no-meta");
+    expect(state.selectedMetaThreadKey).toBe("no-meta");
+    expect(setSelectedMetaThreadKey(state, "no-meta")).toBe(state);
+    expect(setSelectedMetaThreadKey(state, "").selectedMetaThreadKey).toBeNull();
   });
 });
 
@@ -254,7 +308,9 @@ describe("parsePersistedState", () => {
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKey: null,
+      sidebarView: "chat",
       sidebarAgentTreeEnabled: false,
+      selectedMetaThreadKey: null,
       agentTreeExpandedKeys: {},
       agentTreeReveal: null,
       pullRequestMergeMethod: "merge",
@@ -379,7 +435,9 @@ describe("uiStateStore persistence", () => {
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKey: null,
+      sidebarView: "chat",
       sidebarAgentTreeEnabled: false,
+      selectedMetaThreadKey: null,
       threadChangedFilesExpansionVersion: 2,
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
@@ -404,6 +462,21 @@ describe("uiStateStore persistence", () => {
     expect(parsePersistedState(persisted).sidebarProjectScopeKey).toBe(
       "github.com/pingdotgg/t3code",
     );
+  });
+
+  it("restores the view and the selected meta tab across reloads", () => {
+    persistState(
+      setSelectedMetaThreadKey(setSidebarView(makeUiState(), "orchestration"), "no-meta"),
+    );
+
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    // An older build reads only the legacy flag.
+    expect(persisted.sidebarAgentTreeEnabled).toBe(true);
+    const restored = parsePersistedState(persisted);
+    expect(restored.sidebarView).toBe("orchestration");
+    expect(restored.selectedMetaThreadKey).toBe("no-meta");
   });
 
   it("keeps tree mode across reloads but starts every tree collapsed", () => {

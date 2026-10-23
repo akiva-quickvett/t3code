@@ -257,7 +257,7 @@ import { ComposerHandleContext, useComposerHandleContext } from "../composerHand
 import type { ChatComposerHandle } from "./chat/ChatComposer";
 import { getProjectOrderKey } from "../logicalProject";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
-import { readNavigationParentRef, showThreadInAgentTree } from "../state/agentTree";
+import { readNavigationParentRef } from "../state/agentTree";
 import {
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
@@ -733,7 +733,7 @@ function OpenCommandPaletteDialog(props: {
   }
   const clientSettings = useClientSettings(selectCommandPaletteClientSettings);
   const legacySidebarEnabled = useLegacySidebarEnabled();
-  const sidebarAgentTreeEnabled = useUiStateStore((store) => store.sidebarAgentTreeEnabled);
+  const sidebarView = useUiStateStore((store) => store.sidebarView);
   const createProject = useAtomCommand(projectEnvironment.create, {
     reportFailure: false,
   });
@@ -780,9 +780,14 @@ function OpenCommandPaletteDialog(props: {
         ? scopeThreadRef(activeThread.environmentId, activeThread.id)
         : null;
   const openPanelPullRequestUrl = useOpenPanelPullRequestUrl(referenceThreadRef);
-  const activeThreadServerConfig = useServerConfigs().get(
+  const serverConfigs = useServerConfigs();
+  const activeThreadServerConfig = serverConfigs.get(
     activeThread?.environmentId ?? ("" as EnvironmentId),
   );
+  const orchestrationViewAvailable =
+    !legacySidebarEnabled &&
+    serverConfigs.get(activeThread?.environmentId ?? primaryEnvironmentId ?? ("" as EnvironmentId))
+      ?.environment.capabilities.orchestrationMetas === true;
   const activeThreadReferenceCopyTarget =
     referenceThreadRef === null || (pathname === "/pull-requests" && !openPanelPullRequestUrl)
       ? null
@@ -1770,34 +1775,19 @@ function OpenCommandPaletteDialog(props: {
     });
   }
 
-  if (!legacySidebarEnabled) {
+  if (orchestrationViewAvailable) {
     actionItems.push({
       kind: "action",
-      value: "action:show-agent-tree",
-      searchTerms: ["agent", "tree", "subagents", "hierarchy", "sidebar", "reveal"],
-      title: "Show agent tree",
+      value: "action:toggle-sidebar-view",
+      searchTerms: ["orchestration", "chat", "view", "sidebar", "agent", "tree", "metas"],
+      title:
+        sidebarView === "orchestration" ? "Switch to Chat view" : "Switch to Orchestration view",
       icon: <ListTreeIcon className={ITEM_ICON_CLASS} />,
       shortcutCommand: "sidebar.showAgentTree",
       run: async () => {
-        showThreadInAgentTree(
-          activeThread === null
-            ? null
-            : scopeThreadRef(activeThread.environmentId, activeThread.id),
-        );
+        useUiStateStore.getState().toggleSidebarView();
       },
     });
-    if (sidebarAgentTreeEnabled) {
-      actionItems.push({
-        kind: "action",
-        value: "action:hide-agent-tree",
-        searchTerms: ["agent", "tree", "flat", "sidebar"],
-        title: "Hide agent tree",
-        icon: <ListTreeIcon className={ITEM_ICON_CLASS} />,
-        run: async () => {
-          useUiStateStore.getState().setSidebarAgentTreeEnabled(false);
-        },
-      });
-    }
   }
 
   if (activeThreadReferenceCopyTarget !== null) {
