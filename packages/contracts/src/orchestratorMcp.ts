@@ -617,6 +617,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     usageThreadTree: Schema.optional(Schema.Boolean),
     /** t3_thread_organize snoozes and wakes agent trees (scope, whenIdle). Missing on older servers. */
     snoozeTree: Schema.optional(Schema.Boolean),
+    /** t3_thread_organize settles and unsettles agent trees (scope). Missing on older servers. */
+    settleTree: Schema.optional(Schema.Boolean),
   }),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;

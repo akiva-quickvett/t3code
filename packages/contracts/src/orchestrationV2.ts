@@ -2639,16 +2639,8 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     settledAt: Schema.optional(Schema.DateTimeUtc),
-    /**
-     * Absent means `thread`; `tree` also settles every thread under it in the
-     * agent tree, and waits for work in the tree to end instead of refusing.
-     */
+    /** Absent means `thread`; `tree` also settles every thread under it in the agent tree. */
     scope: Schema.optional(ThreadSnoozeScope),
-    /**
-     * Set by the server when it applies a tree settle that waited for idle:
-     * the root takes it only while that request is still the pending one.
-     */
-    whenIdleRequestedAt: Schema.optional(IsoDateTime),
   }),
   /**
    * Rejected when the thread changed after `snapshotAt` or carries any explicit

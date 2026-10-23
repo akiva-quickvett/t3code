@@ -1213,6 +1213,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.isTrue(capabilities.features.usageLimits);
         assert.isTrue(capabilities.features.usageThreadTree);
         assert.isTrue(capabilities.features.snoozeTree);
+        assert.isTrue(capabilities.features.settleTree);
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
     }),
   );
