@@ -85,7 +85,7 @@ import type * as Statement from "effect/sql/Statement";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
-import { PROJECTION_THREAD_TREE_PARENT } from "../persistence/Migrations/066_ProjectionThreadTreeParentIndex.ts";
+import { PROJECTION_THREAD_TREE_PARENT } from "../persistence/Migrations/Fork002_ProjectionThreadTreeParentIndex.ts";
 import { workTreeOf, type WorkTreeNode } from "./pullRequestAgentState.ts";
 import {
   isThreadHistoryUserTurn,
