@@ -343,6 +343,10 @@
       "types": "./src/orchestrationTree.ts",
       "import": "./src/orchestrationTree.ts"
     },
+    "./testing/orchestrationSeedTree": {
+      "types": "./src/testing/orchestrationSeedTree.ts",
+      "import": "./src/testing/orchestrationSeedTree.ts"
+    },
     "./httpReadiness": {
       "types": "./src/httpReadiness.ts",
       "import": "./src/httpReadiness.ts"
