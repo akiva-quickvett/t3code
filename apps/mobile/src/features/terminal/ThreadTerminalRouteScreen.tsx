@@ -1065,6 +1065,23 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     setTerminalFontSize(stepTerminalFontSize(fontSize, 1));
   }, [fontSize, setTerminalFontSize]);
 
+  // Opening a session that failed to start starts it again; the live attach sees it run.
+  const handleRetryTerminal = useCallback(() => {
+    if (terminalAttachInput === null || selectedThread === null) return;
+    void openTerminal({
+      environmentId: selectedThread.environmentId,
+      input: {
+        threadId: selectedThread.id,
+        terminalId,
+        cwd: terminalAttachInput.cwd,
+        worktreePath: terminalAttachInput.worktreePath,
+        cols: terminalAttachInput.cols,
+        rows: terminalAttachInput.rows,
+        ...(terminalAttachInput.env ? { env: terminalAttachInput.env } : {}),
+      },
+    });
+  }, [openTerminal, selectedThread, terminalAttachInput, terminalId]);
+
   const handleClearTerminal = useCallback(() => {
     if (
       !selectedThread ||
@@ -1252,8 +1269,14 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
               title="No terminal sessions"
               detail="Existing terminals will appear here when another client opens one."
             />
-          ) : !canOperateTerminal && terminal.error !== null ? (
-            <EmptyState title="Terminal unavailable" detail={terminal.error} />
+          ) : terminal.error !== null ? (
+            <EmptyState
+              title="Terminal unavailable"
+              detail={terminal.error}
+              {...(canOperateTerminal && terminalAttachInput !== null
+                ? { actionLabel: "Retry", onAction: handleRetryTerminal }
+                : {})}
+            />
           ) : (
             <>
               <View
