@@ -20,6 +20,7 @@ const BUILT_INS: ReadonlyArray<readonly [string, ReadonlyArray<readonly [string,
   ],
   ["scouts", [["scout", 3]]],
   ["research", [["research", 2]]],
+  ["design", [["designer", 2]]],
 ];
 
 describe("DEFAULT_ORGAN_PRESETS", () => {

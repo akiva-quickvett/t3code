@@ -33,4 +33,10 @@ export const DEFAULT_ORGAN_PRESETS: ReadonlyArray<OrganPreset> = [
     goalTemplate: "Research: {goal}",
     cells: [{ role: "research", count: 2 }],
   },
+  {
+    id: "design",
+    label: "Design",
+    goalTemplate: "Design: {goal}",
+    cells: [{ role: "designer", count: 2 }],
+  },
 ];

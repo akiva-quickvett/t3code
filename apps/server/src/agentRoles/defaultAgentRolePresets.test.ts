@@ -21,6 +21,7 @@ describe("DEFAULT_AGENT_ROLE_PRESETS", () => {
       "tester",
       "scout",
       "research",
+      "designer",
       "review-t1",
       "review-t2",
       "review-t3",
@@ -51,6 +52,7 @@ describe("DEFAULT_AGENT_ROLE_PRESETS", () => {
   it.each([
     ["implementor", "claude-opus-5-5", "high"],
     ["research", "claude-sonnet-5-5", "high"],
+    ["designer", "claude-opus-5-5", "high"],
     ["review-t1", "claude-sonnet-5-5", "high"],
     ["review-t3", "claude-opus-5-5", "high"],
     ["review-t3-grok", "claude-opus-5-5", "high"],
@@ -79,6 +81,21 @@ describe("DEFAULT_AGENT_ROLE_PRESETS", () => {
     expect(preset).toMatchObject({ isolation: "shared", runsIn: "host" });
     expect(preset?.label).not.toContain("Grok");
     expect(preset?.instructions).not.toContain("beside the Opus one");
+  });
+
+  it("lets a slice start the tier 3 council and design, and a broker start design", () => {
+    expect(byId.get("slice")?.allowedChildRoles).toEqual(
+      expect.arrayContaining(["review-t3", "review-t3-grok", "scout", "designer"]),
+    );
+    expect(byId.get("broker")?.allowedChildRoles).toContain("designer");
+  });
+
+  it("has the designer log rejected options", () => {
+    expect(byId.get("designer")).toMatchObject({
+      skills: ["t3-orchestration"],
+      isolation: "shared",
+    });
+    expect(byId.get("designer")?.instructions).toContain("log the options you rejected and why");
   });
 
   it("points reviewers away from editing and the ticket agent at a duplicate check", () => {
