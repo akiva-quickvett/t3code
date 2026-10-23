@@ -2,7 +2,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   DEFAULT_TERMINAL_ID,
+  EnvironmentId,
+  PodRuntimeError,
   PodRuntimeId,
+  type PodRuntimeSnapshot,
+  type PodRuntimeState,
+  ProjectId,
+  type TerminalAttachInput,
   type TerminalAttachStreamEvent,
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
@@ -43,6 +49,11 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ContainerDriver from "../pod/ContainerDriver.ts";
+import { podContainerNames } from "../pod/PodContainerPlan.ts";
+import { applyPodEvent, type PodRuntimeRecord } from "../pod/PodRuntimeLifecycle.ts";
+import * as PodRuntimeStore from "../pod/PodRuntimeStore.ts";
 import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
@@ -3225,23 +3236,69 @@ it.layer(
   Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
   { excludeTestServices: true },
 )("TerminalManager on a pod's worktree", (it) => {
-  const podTarget = (worktreePath: string, state: "running" | "stopped") => ({
-    type: "pod" as const,
-    podId: PodRuntimeId.make("pod-terminal"),
-    state,
-    worktreePath,
-    dockerHost: "",
-  });
+  const podId = PodRuntimeId.make("pod-terminal");
+  const environmentId = EnvironmentId.make("environment-terminal");
+  const agentContainer = podContainerNames(podId, environmentId).agent;
+  type EnsureRunning = (id: PodRuntimeId) => Effect.Effect<PodRuntimeSnapshot, PodRuntimeError>;
+  interface PodControls {
+    readonly setState: (next: PodRuntimeState) => PodRuntimeSnapshot;
+  }
 
-  /** The real `make`, so the pod launch it wires in is the one under test. */
-  const makePodManager = (state: "running" | "stopped") =>
+  /**
+   * The real `make` and execution target over a fake pod store, so the docker
+   * command under test is the one the server would spawn.
+   */
+  const makePodManager = (
+    state: PodRuntimeState,
+    options: {
+      /** Called for each start, in order. */
+      readonly ensureRunning?: (pod: PodControls, call: number) => ReturnType<EnsureRunning>;
+      /** Runs before each store lookup, which sees the pod as it was when it began. */
+      readonly beforeLookup?: (call: number) => Effect.Effect<void>;
+      /** Leaves the starter slot unfilled, as when the layers are miswired. */
+      readonly withoutStarter?: true;
+    } = {},
+  ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const worktreePath = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-pod-wt-" });
       const ptyAdapter = new FakePtyAdapter();
-      const launches: Array<
-        Parameters<WorkspaceExecutionTarget.WorkspaceExecutionTarget["Service"]["launch"]>[1]
-      > = [];
+      const created = applyPodEvent(undefined, {
+        type: "pod.created",
+        podId,
+        occurredAt: "2026-10-22T00:00:00.000Z",
+        projectId: ProjectId.make("project-1"),
+        worktreePath,
+        image: "image",
+        dockerHost: "",
+        services: [],
+      });
+      if (created === undefined) return yield* Effect.die("pod.created made no record");
+      let record: PodRuntimeRecord = { ...created, snapshot: { ...created.snapshot, state } };
+      const pod: PodControls = {
+        setState: (next) => {
+          record = { ...record, snapshot: { ...record.snapshot, state: next } };
+          return record.snapshot;
+        },
+      };
+      const starts: Array<PodRuntimeId> = [];
+      let lookups = 0;
+      const execs = yield* Queue.unbounded<{
+        readonly container: string;
+        readonly command: ReadonlyArray<string>;
+      }>();
+      const docker = yield* ContainerDriver.ContainerDriver.pipe(
+        Effect.provide(ContainerDriver.layerDocker),
+      );
+      const starter = yield* Deferred.make<EnsureRunning>();
+      if (options.withoutStarter !== true)
+        yield* Deferred.succeed(starter, (id) => {
+          starts.push(id);
+          return (
+            options.ensureRunning?.(pod, starts.length - 1) ??
+            Effect.die("this pod must not be started")
+          );
+        });
       const manager = yield* TerminalManager.make().pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -3255,59 +3312,272 @@ it.layer(
             Layer.mock(NativeTelemetryClient.NativeTelemetryClient)({
               processTable: Effect.succeed([]),
             }),
-            Layer.succeed(WorkspaceExecutionTarget.WorkspaceExecutionTarget, {
-              resolve: (path) =>
-                Effect.succeed(
-                  path === worktreePath ? podTarget(worktreePath, state) : { type: "host" },
+            Layer.succeed(TerminalManager.TerminalPodStarter, starter),
+            WorkspaceExecutionTarget.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  // The real docker command lines; one-shot execs are recorded, not run.
+                  Layer.succeed(ContainerDriver.ContainerDriver, {
+                    forHost: (dockerHost) => ({
+                      ...docker.forHost(dockerHost),
+                      exec: (container, spec) =>
+                        Queue.offer(execs, { container, command: spec.command }).pipe(
+                          Effect.as({ exitCode: 0, timedOut: false, outputTail: "" }),
+                        ),
+                    }),
+                  }),
+                  Layer.mock(PodRuntimeStore.PodRuntimeStore)({
+                    findByPath: (path) =>
+                      Effect.suspend(() => {
+                        const current = path === worktreePath ? record : undefined;
+                        const call = lookups++;
+                        return (options.beforeLookup?.(call) ?? Effect.void).pipe(
+                          Effect.as(current),
+                        );
+                      }),
+                  }),
+                  Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+                    getEnvironmentId: Effect.succeed(environmentId),
+                  }),
                 ),
-              launch: (_target, spec) => {
-                launches.push(spec);
-                return {
-                  command: "docker",
-                  args: ["exec", "-i", "-t", "t3-agent", ...spec.command],
-                  env: { FROM_LAUNCH: "1" },
-                };
-              },
-              exec: () => Effect.die("unused"),
-            }),
+              ),
+            ),
           ),
         ),
       );
-      return { manager, ptyAdapter, launches, worktreePath };
+      return { manager, ptyAdapter, starts, execs, worktreePath, pod };
     });
 
-  it.effect("opens the shell in the pod's agent container, with the image's shell", () =>
-    Effect.gen(function* () {
-      const { manager, ptyAdapter, launches, worktreePath } = yield* makePodManager("running");
-      yield* manager.open(openInput({ cwd: worktreePath }));
+  const podShellScript = (spawn: PtyAdapter.PtySpawnInput | undefined) =>
+    (spawn?.args ?? []).at(-1);
 
-      expect(launches).toEqual([
-        expect.objectContaining({
-          command: ["sh", "-c", expect.stringContaining("exec bash || exec sh")],
-          cwd: worktreePath,
-          tty: true,
-          env: expect.objectContaining({ TERM: "xterm-256color", LANG: "C.UTF-8" }),
-        }),
-      ]);
+  const expectPodShell = (spawn: PtyAdapter.PtySpawnInput | undefined, worktreePath: string) => {
+    expect(spawn?.shell).toBe("docker");
+    const args = spawn?.args ?? [];
+    expect(args.slice(0, 3)).toEqual(["exec", "-i", "-t"]);
+    expect(args[args.indexOf("--workdir") + 1]).toBe(worktreePath);
+    // The agent container runs the image's shell, bash when it has one.
+    expect(args.slice(-4, -1)).toEqual([agentContainer, "sh", "-c"]);
+    expect(podShellScript(spawn)).toContain("exec bash || exec sh");
+  };
+
+  const attachInput = (cwd: string, overrides: Partial<TerminalAttachInput> = {}) => ({
+    threadId: "thread-1",
+    terminalId: DEFAULT_TERMINAL_ID,
+    cwd,
+    cols: 100,
+    rows: 24,
+    ...overrides,
+  });
+
+  it.effect("opens the shell in the running pod's agent container at the worktree", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, starts, worktreePath } = yield* makePodManager("running");
+      const snapshot = yield* manager.open(openInput({ cwd: worktreePath }));
+
+      expect(snapshot.status).toBe("running");
+      expect(starts).toEqual([]);
       expect(ptyAdapter.spawnInputs).toHaveLength(1);
-      expect(ptyAdapter.spawnInputs[0]).toMatchObject({
-        shell: "docker",
-        args: ["exec", "-i", "-t", "t3-agent", "sh", "-c", expect.any(String)],
-      });
-      expect(ptyAdapter.spawnInputs[0]?.env).toMatchObject({ FROM_LAUNCH: "1" });
+      expectPodShell(ptyAdapter.spawnInputs[0], worktreePath);
     }),
   );
 
-  it.effect("says to start a stopped pod instead of running docker exec", () =>
+  it.effect("hangs up the shell it launched, inside the pod, when the terminal closes", () =>
     Effect.gen(function* () {
-      const { manager, ptyAdapter, launches, worktreePath } = yield* makePodManager("stopped");
+      const { manager, ptyAdapter, execs, worktreePath } = yield* makePodManager("running");
       yield* manager.open(openInput({ cwd: worktreePath }));
+      const pidFile = podShellScript(ptyAdapter.spawnInputs[0])?.match(/\/tmp\/\S+\.pid/)?.[0];
+      expect(pidFile).toBeDefined();
+      if (pidFile === undefined) return;
 
-      expect(launches).toEqual([]);
-      expect(ptyAdapter.spawnInputs[0]).toMatchObject({
-        shell: "/bin/sh",
-        args: expect.arrayContaining([expect.stringContaining("pod is not running")]),
+      yield* manager.close({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID });
+
+      const hangUp = yield* Queue.take(execs);
+      expect(hangUp.container).toBe(agentContainer);
+      expect(hangUp.command.join(" ")).toContain(pidFile);
+      expect(hangUp.command.join(" ")).toContain("kill -HUP");
+    }),
+  );
+
+  it.effect("keeps a terminal outside any pod's worktree on the host shell", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const hostDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-host-" });
+      const { manager, ptyAdapter, starts } = yield* makePodManager("stopped");
+      yield* manager.open(openInput({ cwd: hostDir }));
+
+      expect(starts).toEqual([]);
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      expect(ptyAdapter.spawnInputs[0]?.shell).not.toBe("docker");
+      expect(ptyAdapter.spawnInputs[0]?.cwd).toBe(hostDir);
+    }),
+  );
+
+  it.effect("starts a stopped pod once, then opens the shell inside it", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, starts, worktreePath } = yield* makePodManager("stopped", {
+        ensureRunning: (pod) => Effect.sync(() => pod.setState("running")),
       });
-    }).pipe(Effect.provide(layerWithHostPlatform("linux"))),
+      const snapshot = yield* manager.open(openInput({ cwd: worktreePath }));
+
+      expect(snapshot.status).toBe("running");
+      expect(starts).toEqual([podId]);
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      expectPodShell(ptyAdapter.spawnInputs[0], worktreePath);
+    }),
+  );
+
+  it.effect("fails the terminal with the pod's reason when it cannot start, spawning nothing", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, starts, worktreePath } = yield* makePodManager("stopped", {
+        ensureRunning: () =>
+          Effect.fail(
+            new PodRuntimeError({
+              reason: "invalid-state",
+              podId,
+              state: "start_failed",
+              lastError: { operation: "start", message: "image not found", at: "x" },
+            }),
+          ),
+      });
+      const events: Array<TerminalAttachStreamEvent> = [];
+      const unsubscribe = yield* manager.attachStream(attachInput(worktreePath), (event) =>
+        Effect.sync(() => void events.push(event)),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+
+      expect(starts).toEqual([podId]);
+      expect(ptyAdapter.spawnInputs).toEqual([]);
+      // The first attach must carry the message, not just the snapshot's status.
+      expect(events).toMatchObject([
+        { type: "snapshot", snapshot: { status: "error" } },
+        {
+          type: "error",
+          message:
+            "This worktree's pod could not start, so its terminal cannot open: image not found",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("does not replay an earlier open's error after a reopen that runs", () =>
+    Effect.gen(function* () {
+      const failedOpenHoldsLock = yield* Deferred.make<void>();
+      const releaseFailedOpen = yield* Deferred.make<void>();
+      const { manager, worktreePath } = yield* makePodManager("stopped", {
+        // The first open's start fails; the reattach's start succeeds and lets
+        // the first open, still holding the thread lock, finish failing.
+        ensureRunning: (pod, call) =>
+          call === 0
+            ? Effect.fail(new PodRuntimeError({ reason: "invalid-state", podId }))
+            : Effect.sync(() => pod.setState("running")).pipe(
+                Effect.tap(() => Deferred.succeed(releaseFailedOpen, undefined)),
+              ),
+        // Lookup 1 is the first open's launch, under the lock; it still sees a stopped pod.
+        beforeLookup: (call) =>
+          call === 1
+            ? Deferred.succeed(failedOpenHoldsLock, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseFailedOpen)),
+              )
+            : Effect.void,
+      });
+      const failedOpen = yield* manager
+        .open(openInput({ cwd: worktreePath }))
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(failedOpenHoldsLock);
+
+      const events: Array<TerminalAttachStreamEvent> = [];
+      const unsubscribe = yield* manager.attachStream(
+        attachInput(worktreePath, { restartIfNotRunning: true }),
+        (event) => Effect.sync(() => void events.push(event)),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+
+      expect((yield* Fiber.join(failedOpen)).status).toBe("error");
+      expect(events[0]).toMatchObject({ type: "snapshot", snapshot: { status: "running" } });
+      expect(events.filter((event) => event.type === "error")).toEqual([]);
+    }),
+  );
+
+  it.effect("starts the pod outside the thread lock, so the thread's other terminals proceed", () =>
+    Effect.gen(function* () {
+      const startBegan = yield* Deferred.make<void>();
+      const finishStart = yield* Deferred.make<void>();
+      const fileSystem = yield* FileSystem.FileSystem;
+      const hostDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-host-" });
+      const { manager, ptyAdapter, worktreePath } = yield* makePodManager("stopped", {
+        ensureRunning: (pod) =>
+          Deferred.succeed(startBegan, undefined).pipe(
+            Effect.andThen(Deferred.await(finishStart)),
+            Effect.andThen(Effect.sync(() => pod.setState("running"))),
+          ),
+      });
+      const podOpen = yield* manager.open(openInput({ cwd: worktreePath })).pipe(Effect.forkScoped);
+      yield* Deferred.await(startBegan);
+
+      const other = yield* manager.open(openInput({ cwd: hostDir, terminalId: "other" }));
+      expect(other.status).toBe("running");
+
+      yield* Deferred.succeed(finishStart, undefined);
+      expect((yield* Fiber.join(podOpen)).status).toBe("running");
+      expect(ptyAdapter.spawnInputs.map((input) => input.shell === "docker")).toEqual([
+        false,
+        true,
+      ]);
+    }),
+  );
+  const collectAttach = (
+    manager: TerminalManager.TerminalManager["Service"],
+    input: TerminalAttachInput,
+  ) =>
+    Effect.gen(function* () {
+      const events: Array<TerminalAttachStreamEvent> = [];
+      const unsubscribe = yield* manager.attachStream(input, (event) =>
+        Effect.sync(() => void events.push(event)),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      return events;
+    });
+
+  it.effect("a reconnect does not start a stopped pod, even with no session left", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, starts, worktreePath } = yield* makePodManager("stopped");
+      const events = yield* collectAttach(manager, attachInput(worktreePath, { resume: true }));
+
+      expect(starts).toEqual([]);
+      expect(ptyAdapter.spawnInputs).toEqual([]);
+      expect(events).toMatchObject([
+        { type: "snapshot", snapshot: { status: "error" } },
+        { type: "error", message: expect.stringContaining("it is stopped.") },
+      ]);
+    }),
+  );
+
+  it.effect("a plain attach to a live pod terminal starts nothing", () =>
+    Effect.gen(function* () {
+      const { manager, starts, worktreePath, pod } = yield* makePodManager("running");
+      yield* manager.open(openInput({ cwd: worktreePath }));
+      // Stopped meanwhile; the attach only looks at the live session.
+      pod.setState("stopped");
+      const events = yield* collectAttach(manager, attachInput(worktreePath));
+
+      expect(starts).toEqual([]);
+      expect(events[0]).toMatchObject({ type: "snapshot", snapshot: { status: "running" } });
+    }),
+  );
+
+  it.effect("fails the terminal when no pod starter was handed over, spawning nothing", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, worktreePath } = yield* makePodManager("stopped", {
+        withoutStarter: true,
+      });
+      const events = yield* collectAttach(manager, attachInput(worktreePath));
+
+      expect(ptyAdapter.spawnInputs).toEqual([]);
+      expect(events).toMatchObject([
+        { type: "snapshot", snapshot: { status: "error" } },
+        { type: "error", message: expect.stringContaining("cannot start pods for terminals") },
+      ]);
+    }),
   );
 });
