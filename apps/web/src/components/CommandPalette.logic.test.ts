@@ -969,9 +969,23 @@ describe("buildPodServiceItems", () => {
     updatedAt: "t",
   };
 
+  const build = (
+    overrides: Partial<Parameters<typeof buildPodServiceItems>[0]> = {},
+  ): ReturnType<typeof buildPodServiceItems> =>
+    buildPodServiceItems({
+      pod: running,
+      icon: null,
+      copyIcon: null,
+      allowed: true,
+      clientOnHost: true,
+      open: vi.fn(async () => undefined),
+      copy: vi.fn(async () => undefined),
+      ...overrides,
+    });
+
   it("offers only services with a URL, and opens the one picked", async () => {
     const open = vi.fn(async () => undefined);
-    const items = buildPodServiceItems({ pod: running, icon: null, allowed: true, open });
+    const items = build({ open });
     const titles = filterCommandPaletteGroups({
       activeGroups: [{ value: "actions", label: "Actions", items }],
       query: "open pod service",
@@ -984,14 +998,37 @@ describe("buildPodServiceItems", () => {
     expect(open).toHaveBeenCalledWith({ name: "web", url: "http://127.0.0.1:20000" });
   });
 
-  it("offers nothing once the pod stops, and disables items without permission", () => {
+  it("copies the URL that reaches the service from this client", async () => {
+    const copy = vi.fn(async () => undefined);
+    const tailnet = {
+      ...running,
+      services: [
+        {
+          name: "web",
+          port: 3000,
+          url: "http://127.0.0.1:20000",
+          tailnetUrl: "http://100.64.0.1:20000",
+        },
+      ],
+    };
+    const items = build({ pod: tailnet, clientOnHost: false, copy });
+    expect(items.map((item) => item.title)).toEqual([
+      "Open pod service: web",
+      "Copy pod service URL: web (tailnet)",
+    ]);
+    await items[1]?.run();
+    expect(copy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "web" }),
+      "http://100.64.0.1:20000",
+    );
+    expect(build({ clientOnHost: false })[1]?.title).toBe("Copy pod service URL: web (host only)");
+  });
+
+  it("offers nothing once the pod stops, and disables opening without permission", () => {
     const stopped = { ...running, state: "stopped" as const, services: [] };
-    expect(
-      buildPodServiceItems({ pod: stopped, icon: null, allowed: true, open: vi.fn() }),
-    ).toEqual([]);
-    expect(
-      buildPodServiceItems({ pod: running, icon: null, allowed: false, open: vi.fn() })[0]
-        ?.disabled,
-    ).toBe(true);
+    expect(build({ pod: stopped })).toEqual([]);
+    const [open, copy] = build({ allowed: false });
+    expect(open?.disabled).toBe(true);
+    expect(copy?.disabled).toBeUndefined();
   });
 });

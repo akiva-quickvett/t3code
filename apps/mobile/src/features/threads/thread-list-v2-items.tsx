@@ -22,7 +22,7 @@ import { AuthOrchestrationOperateScope, type EnvironmentMachineKind } from "@t3t
 import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
 import type { MenuAction } from "@react-native-menu/menu";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
-import { Pressable, useWindowDimensions, View } from "react-native";
+import { Linking, Pressable, useWindowDimensions, View } from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 
 import type { ThreadListProvider } from "../../state/thread-list-environments";
@@ -45,6 +45,12 @@ import { useThreadPr } from "../../state/use-thread-pr";
 import { useSwipeRowDormant } from "../home/swipe-row-activation";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
+import {
+  buildThreadPodServicesMenuItems,
+  threadPodServiceMenuChoice,
+  threadPodServices,
+} from "./thread-pod-services-menu";
+import { useWorktreePod } from "../../state/podRuntime";
 import {
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
   resolveThreadListV2SnoozeGateExpiryMs,
@@ -549,6 +555,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const snoozedRow = props.snoozed === true;
   const pinnedRow = props.pinned === true;
   const dormant = useSwipeRowDormant(props.activationKey);
+  const pod = useWorktreePod(thread.environmentId, thread.worktreePath);
+  const podServices = useMemo(() => threadPodServices(pod), [pod]);
 
   const { providerDrivers, providerIconUrl } = useMemo(() => {
     const provider = props.providers?.find(
@@ -811,6 +819,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "copy-thread-id") {
         copyTextWithHaptic(thread.id, { target: "thread-id" });
       }
+      const podChoice = threadPodServiceMenuChoice(nativeEvent.event, podServices);
+      if (podChoice?.kind === "copy")
+        copyTextWithHaptic(podChoice.service.url, { target: "pod service URL" });
+      if (podChoice?.kind === "open")
+        void Linking.openURL(podChoice.service.url).catch(() =>
+          Dialog.alert(`Could not open ${podChoice.service.name}`, podChoice.service.url),
+        );
       if (nativeEvent.event === "delete") handleDelete();
       if (nativeEvent.event === "snooze:custom") {
         setCustomSnoozeOpen(true);
@@ -833,6 +848,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     [
       onNewThreadOnBranch,
       thread,
+      podServices,
       handleArchive,
       handleDelete,
       handleRegenerateTitle,
@@ -1286,6 +1302,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                   ]
                 : []),
               { id: "copy-thread-id", title: "Copy thread ID", image: "doc.on.doc" },
+              ...buildThreadPodServicesMenuItems(podServices),
               ...(snoozedRow
                 ? snoozedMenuActions
                 : !props.settlementSupported

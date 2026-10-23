@@ -59,6 +59,7 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BoxIcon,
+  CopyIcon,
   GlobeIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
@@ -131,6 +132,7 @@ import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
+import { clientReachesEnvironmentLoopback } from "~/browser/browserTargetResolver";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
@@ -808,6 +810,20 @@ function OpenCommandPaletteDialog(props: {
         stackedThreadToast({
           type: "error",
           title: target.failureTitle,
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    }
+  };
+  const copyPodServiceUrl = async (name: string, url: string) => {
+    try {
+      if (!(await writeTextToClipboard(url, "pod service URL"))) return;
+      toastManager.add({ type: "success", title: `${name} URL copied`, description: url });
+    } catch (error) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Failed to copy pod service URL",
           description: error instanceof Error ? error.message : "An error occurred.",
         }),
       );
@@ -1891,8 +1907,11 @@ function OpenCommandPaletteDialog(props: {
       ...buildPodServiceItems({
         pod: activePod,
         icon: <GlobeIcon className={ITEM_ICON_CLASS} />,
+        copyIcon: <CopyIcon className={ITEM_ICON_CLASS} />,
         allowed: podServices.allowed,
+        clientOnHost: clientReachesEnvironmentLoopback(activeThread.environmentId),
         open: (link) => podServices.open(activePod, link, threadId),
+        copy: (link, url) => copyPodServiceUrl(link.name, url),
       }),
     );
   }

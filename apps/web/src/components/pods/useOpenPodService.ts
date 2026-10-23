@@ -66,11 +66,23 @@ export function useOpenPodService(environmentId: EnvironmentId | null) {
   );
   const navigate = useNavigate();
 
-  const open = async (pod: PodRuntimeSnapshot, link: PodServiceLink, threadId: ThreadId | null) => {
-    if (environmentId === null) return;
+  const openIn = async (
+    environmentId: EnvironmentId,
+    pod: PodRuntimeSnapshot,
+    link: PodServiceLink,
+    threadId: ThreadId | null,
+    /** Show the thread first, so a tab opened from another thread's menu is seen. */
+    options?: { readonly navigate?: boolean },
+  ) => {
     let threadRef: ScopedThreadRef;
-    if (threadId !== null) threadRef = scopeThreadRef(environmentId, threadId);
-    else {
+    if (threadId !== null) {
+      threadRef = scopeThreadRef(environmentId, threadId);
+      if (options?.navigate === true)
+        await navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(threadRef),
+        });
+    } else {
       const thread = podBrowsingThread(readThreadShells(), environmentId, pod);
       if (thread === undefined) {
         toastManager.add({
@@ -96,5 +108,11 @@ export function useOpenPodService(environmentId: EnvironmentId | null) {
     });
   };
 
-  return { open, allowed };
+  const open = async (pod: PodRuntimeSnapshot, link: PodServiceLink, threadId: ThreadId | null) => {
+    if (environmentId === null) return;
+    await openIn(environmentId, pod, link, threadId);
+  };
+
+  /** For callers spanning environments, such as the sidebar's thread menu. */
+  return { open, openIn, allowed };
 }
