@@ -212,7 +212,8 @@ it.effect("snoozes and wakes the agent tree unless the agent asks for this threa
     // Settle and unsettle cover only the thread unless the agent asks for the tree.
     yield* call({ action: "unsettle" });
     yield* call({ action: "unsettle", scope: "tree" });
-    yield* call({ action: "settle", scope: "tree" });
+    const waiting = yield* call({ action: "settle", scope: "tree" });
+    expect(waiting.structuredContent).toEqual({ sequence: 6, settlesWhenIdle: true });
     expect(organized).toMatchObject([
       // The agent snoozes its own thread mid-turn, so the snooze waits for the turn to end.
       { type: "thread.snooze", threadId, snoozedUntil, scope: "tree", whenIdle: true },
@@ -245,7 +246,7 @@ it.effect("snoozes and wakes the agent tree unless the agent asks for this threa
             settleThread: (input) =>
               Effect.sync(() => {
                 organized.push({ type: "thread.settle", ...input });
-                return { sequence: organized.length };
+                return { sequence: organized.length, settlesWhenIdle: true as const };
               }),
           }),
         ),

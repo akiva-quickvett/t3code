@@ -181,7 +181,8 @@ export interface ProjectionThreadParking {
   readonly worktreePath: string | null;
   readonly archived: boolean;
   readonly settled: boolean;
-  readonly settledAt: DateTime.Utc | null;
+  /** The root whose tree settle settled this thread, which its tree unsettle reopens. */
+  readonly settledByTree: ThreadId | null;
   readonly snoozedUntil: DateTime.Utc | null;
   readonly snoozedAt: DateTime.Utc | null;
   readonly snoozeWhenIdle: NonNullable<OrchestrationV2AppThread["snoozeWhenIdle"]> | null;
@@ -5907,7 +5908,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             worktreePath: thread.worktreePath,
             archived: thread.archivedAt !== null,
             settled: thread.settledOverride === "settled",
-            settledAt: thread.settledAt,
+            settledByTree: thread.settledByTree ?? null,
             snoozedUntil: thread.snoozedUntil ?? null,
             snoozedAt: thread.snoozedAt ?? null,
             snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
@@ -6542,7 +6543,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   worktreePath: thread.worktreePath,
                   archived: thread.archivedAt !== null,
                   settled: thread.settledOverride === "settled",
-                  settledAt: thread.settledAt,
+                  settledByTree: thread.settledByTree ?? null,
                   snoozedUntil: thread.snoozedUntil ?? null,
                   snoozedAt: thread.snoozedAt ?? null,
                   snoozeWhenIdle: thread.snoozeWhenIdle ?? null,

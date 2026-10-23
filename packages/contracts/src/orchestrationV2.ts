@@ -426,6 +426,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozeWhenIdle: Schema.optional(Schema.NullOr(OrchestrationV2SnoozeWhenIdle)),
   settleWhenIdle: Schema.optional(Schema.NullOr(OrchestrationV2SettleWhenIdle)),
+  /** The root whose tree settle settled this thread; a tree unsettle of that root reopens it. */
+  settledByTree: Schema.optional(Schema.NullOr(ThreadId)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2649,6 +2651,8 @@ export const OrchestrationV2Command = Schema.Union([
      * the root takes it only while that request is still the pending one.
      */
     whenIdleRequestedAt: Schema.optional(IsoDateTime),
+    /** Set by the server on each thread a tree settle settles under its root. */
+    settledByTree: Schema.optional(ThreadId),
   }),
   /**
    * Rejected when the thread changed after `snapshotAt` or carries any explicit

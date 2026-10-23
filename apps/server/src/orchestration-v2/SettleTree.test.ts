@@ -459,6 +459,76 @@ it.layer(layerTest)("settle trees", (it) => {
     }),
   );
 
+  it.effect("a wait applied after a refusal and a retry still unsettles as one tree", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      yield* orchestrator.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("unsettle:before-retry"),
+        threadId: ids.meta,
+        reason: "user",
+        scope: "tree",
+      });
+      yield* sweep;
+      calls.length = 0;
+
+      const cellRun = yield* send(ids.cell, "last pass");
+      const waiting = yield* threads.settleThread({
+        threadId: ids.meta,
+        commandId: CommandId.make("settle:retry-wait"),
+        byOwnAgent: false,
+        scope: "tree",
+      });
+      assert.deepInclude(waiting, { settlesWhenIdle: true });
+      yield* endRun(ids.cell, cellRun);
+      const requestedAt = (yield* threadOf(ids.meta)).settleWhenIdle!.requestedAt;
+
+      // The reactor's apply, with the slice refusing under the id it derives.
+      yield* orchestrator
+        .dispatch({
+          type: "thread.unarchive",
+          commandId: CommandId.make(`server:apply:tree:${ids.slice}`),
+          threadId: ids.slice,
+        })
+        .pipe(Effect.exit);
+      const applied = yield* orchestrator
+        .dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make("server:apply"),
+          threadId: ids.meta,
+          scope: "tree",
+          whenIdleRequestedAt: requestedAt,
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(applied));
+      for (const threadId of [ids.cell, ids.freshCell])
+        assert.equal(yield* settledOverrideOf(threadId), "settled", threadId);
+      assert.notEqual(yield* settledOverrideOf(ids.slice), "settled");
+      assert.notEqual(yield* settledOverrideOf(ids.meta), "settled");
+      assert.isNotNull((yield* threadOf(ids.meta)).settleWhenIdle ?? null);
+
+      // Later, the reactor retries with a fresh id and finishes the tree.
+      yield* TestClock.adjust("1 minute");
+      yield* sweepWaits;
+      for (const threadId of [ids.meta, ids.slice])
+        assert.equal(yield* settledOverrideOf(threadId), "settled", threadId);
+
+      yield* orchestrator.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("unsettle:after-retry"),
+        threadId: ids.meta,
+        reason: "user",
+        scope: "tree",
+      });
+      for (const threadId of [ids.meta, ids.slice, ids.cell, ids.freshCell])
+        assert.equal(yield* settledOverrideOf(threadId), "active", threadId);
+      assert.equal(yield* settledOverrideOf(ids.doneCell), "settled");
+      yield* sweep;
+      calls.length = 0;
+    }),
+  );
+
   it.effect("a send to a settled pod thread unsettles it, which starts its pod", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

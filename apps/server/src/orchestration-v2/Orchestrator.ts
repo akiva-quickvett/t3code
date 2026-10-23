@@ -304,6 +304,8 @@ export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 export interface OrchestratorV2DispatchResult {
   readonly sequence: number;
   readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
+  /** A busy tree's settle or snooze was recorded on the root, to apply once the tree is idle. */
+  readonly waitsForIdle?: true;
 }
 
 export interface OrchestratorV2Shape {
@@ -2986,6 +2988,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             activeOrderKey: null,
             // Settling the root alone, as auto-settle does, leaves the tree's wait standing.
             ...(command.whenIdleRequestedAt === undefined ? {} : { settleWhenIdle: null }),
+            ...(command.settledByTree === undefined
+              ? {}
+              : { settledByTree: command.settledByTree }),
             updatedAt: alreadySettled ? thread.updatedAt : now,
           };
         }
@@ -2995,6 +3000,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...thread,
             settledOverride: "active",
             settleWhenIdle: null,
+            settledByTree: null,
             settledAt: null,
             unsettledAt: alreadyPinnedActive ? (thread.unsettledAt ?? null) : now,
             updatedAt:
@@ -4831,6 +4837,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const thread: OrchestrationV2AppThread = {
           ...projection.thread,
           settledOverride: null,
+          settledByTree: null,
           settledAt: null,
           unsettledAt:
             projection.thread.settledOverride === "active"
@@ -11837,16 +11844,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         switch (command.type) {
           case "thread.settle":
             return !thread.settled;
-          // Only what the root's own settle retired is reopened: a thread
+          // Only what this root's tree settle retired is reopened: a thread
           // settled on its own stays settled, and unsettling one already
           // active would pin it against auto-settle.
           case "thread.unsettle":
-            return (
-              thread.settled &&
-              thread.settledAt !== null &&
-              root?.settledAt != null &&
-              DateTime.toEpochMillis(thread.settledAt) === DateTime.toEpochMillis(root.settledAt)
-            );
+            return thread.settled && thread.settledByTree === command.threadId;
           // Limit recovery's own wake at the reset stands: neither a tree
           // snooze nor a tree wake moves it. Waking such a thread directly
           // still works.
@@ -11880,20 +11882,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             });
           // Settling is retiring once the work ends: recorded on the root alone,
           // the whole tree settles when it is idle.
-          return yield* dispatchWithReceipt({ ...command, scope: "tree" });
+          return {
+            ...(yield* dispatchWithReceipt({ ...command, scope: "tree" })),
+            waitsForIdle: true,
+          } as const;
         }
-        // Every thread this settle retires shares the root's settledAt, which
-        // is how a tree unsettle tells them from threads settled on their own.
-        const { whenIdleRequestedAt, ...settle } = command;
-        const cascade = {
-          ...settle,
-          settledAt:
-            root?.settled === true && root.settledAt !== null
-              ? root.settledAt
-              : (command.settledAt ?? (yield* DateTime.now)),
-        };
+        // Each descendant is marked with the root, which is how the root's tree
+        // unsettle tells them from threads settled on their own; the root keeps
+        // its own mark, if an outer tree settled it.
+        const { whenIdleRequestedAt, settledByTree: _settledByTree, ...settle } = command;
+        const cascade = { ...settle, settledByTree: command.threadId };
         if (whenIdleRequestedAt === undefined) {
-          const result = yield* dispatchWithReceipt({ ...cascade, scope: "thread" });
+          const result = yield* dispatchWithReceipt({ ...settle, scope: "thread" });
           yield* dispatchDescendants(cascade, descendants);
           return result;
         }
@@ -11907,7 +11907,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // leaves the root's wait in place for the reactor's next try; the
         // root's own lock checks the wait is still current.
         yield* dispatchDescendants(cascade, descendants);
-        return yield* dispatchWithReceipt({ ...cascade, whenIdleRequestedAt, scope: "thread" });
+        return yield* dispatchWithReceipt({ ...settle, whenIdleRequestedAt, scope: "thread" });
       }
       if (command.type === "thread.snooze") {
         // The root keeps its own thread's rule, so an agent may snooze itself
@@ -11915,7 +11915,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const working = descendants.filter((thread) => thread.busy);
         if (command.whenIdle === true && (working.length > 0 || root?.busy === true))
           // Recorded on the root alone; the whole tree snoozes when it is idle.
-          return yield* dispatchWithReceipt({ ...command, scope: "tree" });
+          return {
+            ...(yield* dispatchWithReceipt({ ...command, scope: "tree" })),
+            waitsForIdle: true,
+          } as const;
         if (working.length > 0) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,

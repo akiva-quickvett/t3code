@@ -413,7 +413,8 @@ export interface ThreadManagementServiceShape {
     readonly byOwnAgent: boolean;
     readonly scope?: ThreadSnoozeScope;
   }) => Effect.Effect<
-    { readonly sequence: number } | { readonly settlesWhenTurnEnds: true },
+    | { readonly sequence: number; readonly settlesWhenIdle?: true }
+    | { readonly settlesWhenTurnEnds: true },
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
   >;
   readonly interruptThread: (
@@ -986,7 +987,10 @@ const make = Effect.gen(function* () {
       threadId: input.threadId,
       ...(input.scope === undefined ? {} : { scope: input.scope }),
     });
-    return { sequence: result.sequence };
+    return {
+      sequence: result.sequence,
+      ...(result.waitsForIdle === true ? { settlesWhenIdle: true as const } : {}),
+    };
   });
 
   const interruptThread: ThreadManagementServiceShape["interruptThread"] = (input) =>
