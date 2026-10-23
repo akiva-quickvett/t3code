@@ -333,7 +333,11 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
         ]);
         expect(snapshot.models[0]?.aliases).toContain(ANTIGRAVITY_DEFAULT_MODEL);
         expect(snapshot.models.every((model) => model.isLegacy !== true)).toBe(true);
-        expect(snapshot.slashCommands.map((command) => command.name)).toEqual(["plan", "logout"]);
+        expect(snapshot.slashCommands.map((command) => command.name)).toEqual([
+          "compact",
+          "plan",
+          "logout",
+        ]);
         expect(snapshot.supportsTextGeneration).toBe(true);
         h.controls.selected = h.second;
         yield* h.refresh();
