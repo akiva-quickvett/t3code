@@ -156,9 +156,18 @@ terminals so native undo keeps working there.
 `navigation.back` (`mod+[` by default) and `navigation.forward` (`mod+]`) move
 through the pages you have visited, like a browser's back and forward buttons.
 
-`sidebar.showAgentTree` (`mod+alt+shift+b`) turns on the sidebar's
-[agent tree](./thread-sidebar.md#show-the-agent-tree) and reveals the current
-thread in it. `thread.goToParent` (`mod+alt+arrowup`) opens the thread the
+`sidebar.showAgentTree` (`mod+alt+shift+b`) switches the
+[sidebar](./thread-sidebar.md) between the Chat and Orchestration views, and
+opens the sidebar if it is hidden. Each device remembers its own view. The
+command palette offers the same switch as **Switch to Orchestration view** or
+**Switch to Chat view**. Both need a server with orchestration support.
+
+`sidebar.nextNeedsYou` (`mod+alt+shift+n`) opens the next thread waiting on an
+approval, an answer, or a plan, in Orchestration view order, and wraps back to
+the first after the last. It works from either view and leaves the view as it
+is, selecting the meta tab that holds the thread.
+
+`thread.goToParent` (`mod+alt+arrowup`) opens the thread the
 current one was delegated or forked from, or the thread supervising it.
 
 `chat.new` may ask you to choose a project when there is more than one.

@@ -1,4 +1,5 @@
 import type {
+  OrchestrationDot,
   OrchestrationV2TurnItemStatus,
   OrchestrationV2ThreadShell,
   OrchestrationProjectShell,
@@ -36,6 +37,24 @@ export function summarizeSubagentStatuses(
     .filter((key) => counts[key] > 0)
     .map((key) => `${counts[key]} ${key}`)
     .join(" · ");
+}
+
+/** A cell that needs the user counts only as "needs you", whatever its run status says. */
+export function summarizeOrganCells(
+  cells: ReadonlyArray<{
+    readonly status: OrchestrationV2TurnItemStatus;
+    readonly dot: OrchestrationDot;
+  }>,
+): string {
+  let needsYou = 0;
+  const statuses: OrchestrationV2TurnItemStatus[] = [];
+  for (const cell of cells) {
+    if (cell.dot === "needs-you") needsYou += 1;
+    else statuses.push(cell.status);
+  }
+  const rest = summarizeSubagentStatuses(statuses);
+  if (needsYou === 0) return rest;
+  return rest === "" ? `${needsYou} needs you` : `${needsYou} needs you · ${rest}`;
 }
 
 export function formatSubagentDisplayTitle(title: string): string {

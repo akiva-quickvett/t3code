@@ -1,3 +1,9 @@
+import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
+import {
+  mergeOrchestrationOrders,
+  nextNeedsYouTarget,
+} from "@t3tools/client-runtime/state/orchestration-tree";
 import { AuthPreviewOperateScope } from "@t3tools/contracts";
 import { Outlet, createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
@@ -30,8 +36,23 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
-import { readNavigationParentRef, showThreadInAgentTree } from "../state/agentTree";
+import { readNavigationParentRef } from "../state/agentTree";
+import {
+  orchestrationTree,
+  readEnvironmentSupportsOrchestrationMetas,
+} from "../state/orchestrationTree";
+import { environmentCatalog } from "../connection/catalog";
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import { buildThreadRouteParams } from "../threadRoutes";
+import { useUiStateStore } from "../uiStateStore";
+
+function readOrchestrationOrder() {
+  return mergeOrchestrationOrders(
+    Array.from(enabledEnvironmentIds(appAtomRegistry.get(environmentCatalog.catalogValueAtom)))
+      .filter(readEnvironmentSupportsOrchestrationMetas)
+      .map((environmentId) => appAtomRegistry.get(orchestrationTree.orderAtom(environmentId))),
+  );
+}
 
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
@@ -108,10 +129,35 @@ function ChatRouteGlobalShortcuts() {
       }
 
       if (command === "sidebar.showAgentTree") {
-        if (legacySidebarEnabled) return;
+        const environmentId = routeThreadRef?.environmentId ?? primaryEnvironmentId;
+        if (
+          legacySidebarEnabled ||
+          environmentId === null ||
+          !readEnvironmentSupportsOrchestrationMetas(environmentId)
+        ) {
+          return;
+        }
         event.preventDefault();
         event.stopPropagation();
-        showThreadInAgentTree(routeThreadRef);
+        useUiStateStore.getState().toggleSidebarView();
+        return;
+      }
+
+      // Navigation, like a deep link: it picks the target's tab but keeps the view.
+      if (command === "sidebar.nextNeedsYou") {
+        if (legacySidebarEnabled) return;
+        const currentKey = routeThreadRef === null ? null : scopedThreadKey(routeThreadRef);
+        const target = nextNeedsYouTarget(readOrchestrationOrder(), currentKey);
+        const targetRef = target === null ? null : parseScopedThreadKey(target.threadKey);
+        if (target === null || targetRef === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        useUiStateStore.getState().setSelectedMetaThreadKey(target.tabKey);
+        if (target.threadKey === currentKey) return;
+        void navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(targetRef),
+        });
         return;
       }
 
