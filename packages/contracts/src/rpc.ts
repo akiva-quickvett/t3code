@@ -353,6 +353,14 @@ import {
   AgentRolePresetSaveInput,
 } from "./agentRole.ts";
 import {
+  OrganPresetError,
+  OrganPresetList,
+  OrganPresetListInput,
+  OrganPresetRemoveInput,
+  OrganPresetResetInput,
+  OrganPresetSaveInput,
+} from "./organPreset.ts";
+import {
   ChatChannelError,
   ChatChannelMutation,
   ChatChannelMutationResult,
@@ -542,6 +550,10 @@ export const WS_METHODS = {
   agentRolesSave: "agentRoles.save",
   agentRolesRemove: "agentRoles.remove",
   agentRolesReset: "agentRoles.reset",
+  organPresetsSubscribe: "organPresets.subscribe",
+  organPresetsSave: "organPresets.save",
+  organPresetsRemove: "organPresets.remove",
+  organPresetsReset: "organPresets.reset",
 
   chatChannelsSubscribe: "chatChannels.subscribe",
   chatChannelsMutate: "chatChannels.mutate",
@@ -1841,6 +1853,33 @@ const WsAgentRolesResetRpc = Rpc.make(WS_METHODS.agentRolesReset, {
   error: Schema.Union([AgentRolePresetError, EnvironmentAuthorizationError]),
 });
 
+const OrganPresetRpcError = Schema.Union([OrganPresetError, EnvironmentAuthorizationError]);
+
+const WsOrganPresetsSubscribeRpc = Rpc.make(WS_METHODS.organPresetsSubscribe, {
+  payload: OrganPresetListInput,
+  success: OrganPresetList,
+  error: OrganPresetRpcError,
+  stream: true,
+});
+
+const WsOrganPresetsSaveRpc = Rpc.make(WS_METHODS.organPresetsSave, {
+  payload: OrganPresetSaveInput,
+  success: OrganPresetList,
+  error: OrganPresetRpcError,
+});
+
+const WsOrganPresetsRemoveRpc = Rpc.make(WS_METHODS.organPresetsRemove, {
+  payload: OrganPresetRemoveInput,
+  success: OrganPresetList,
+  error: OrganPresetRpcError,
+});
+
+const WsOrganPresetsResetRpc = Rpc.make(WS_METHODS.organPresetsReset, {
+  payload: OrganPresetResetInput,
+  success: OrganPresetList,
+  error: OrganPresetRpcError,
+});
+
 const ChatChannelRpcError = Schema.Union([ChatChannelError, EnvironmentAuthorizationError]);
 
 const WsChatChannelsSubscribeRpc = Rpc.make(WS_METHODS.chatChannelsSubscribe, {
@@ -2026,6 +2065,14 @@ export const UsageRpcGroup = RpcGroup.make(
 );
 
 /** Part of WsRpcGroup, with its own server handler layer, as ChatChannelRpcGroup. */
+export const OrganPresetRpcGroup = RpcGroup.make(
+  WsOrganPresetsSubscribeRpc,
+  WsOrganPresetsSaveRpc,
+  WsOrganPresetsRemoveRpc,
+  WsOrganPresetsResetRpc,
+);
+
+/** Part of WsRpcGroup, with its own server handler layer, as ChatChannelRpcGroup. */
 export const PodRuntimeRpcGroup = RpcGroup.make(
   WsPodRuntimeSubscribeRpc,
   WsPodRuntimeStatusRpc,
@@ -2094,6 +2141,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentRolesSaveRpc,
   WsAgentRolesRemoveRpc,
   WsAgentRolesResetRpc,
+  WsOrganPresetsSubscribeRpc,
+  WsOrganPresetsSaveRpc,
+  WsOrganPresetsRemoveRpc,
+  WsOrganPresetsResetRpc,
   WsChatChannelsSubscribeRpc,
   WsChatChannelsMutateRpc,
   WsChatChannelsGetTemplateStatusRpc,

@@ -53,6 +53,7 @@ describe("DEFAULT_AGENT_ROLE_PRESETS", () => {
     ["research", "claude-sonnet-5-5", "high"],
     ["review-t1", "claude-sonnet-5-5", "high"],
     ["review-t3", "claude-opus-5-5", "high"],
+    ["review-t3-grok", "claude-opus-5-5", "high"],
     ["review-t4", "claude-opus-5-5", "xhigh"],
     ["review-t5", "claude-opus-5-5", "xhigh"],
     ["governor", "claude-fable-5-1", "high"],
@@ -73,15 +74,11 @@ describe("DEFAULT_AGENT_ROLE_PRESETS", () => {
     ).toBe(true);
   });
 
-  it("runs the second tier 3 reviewer on Grok through Cursor, on the host", () => {
-    expect(byId.get("review-t3-grok")).toMatchObject({
-      target: {
-        driverKind: "cursor",
-        model: "grok-4.7",
-        options: [{ id: "effort", value: "high" }],
-      },
-      runsIn: "host",
-    });
+  it("keeps the second tier 3 reviewer's id but no longer names Grok", () => {
+    const preset = byId.get("review-t3-grok");
+    expect(preset).toMatchObject({ isolation: "shared", runsIn: "host" });
+    expect(preset?.label).not.toContain("Grok");
+    expect(preset?.instructions).not.toContain("beside the Opus one");
   });
 
   it("points reviewers away from editing and the ticket agent at a duplicate check", () => {

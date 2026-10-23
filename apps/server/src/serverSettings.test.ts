@@ -216,6 +216,54 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
+  it.effect("loads a settings file without organ presets and keeps organ layers from clients", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* fs.writeFileString(
+        config.settingsPath,
+        `{
+          "agentRolePresets": {
+            "environment": { "removed": ["governor"] }
+          }
+        }`,
+      );
+
+      const loaded = yield* service.getSettings;
+      assert.deepEqual(loaded.organPresets, {
+        environment: { overrides: {}, removed: [] },
+        projects: {},
+      });
+      assert.deepEqual(loaded.agentRolePresets.environment.removed, ["governor"]);
+
+      const saved = yield* service.updateOrganPresets((current) => ({
+        ...current,
+        environment: {
+          overrides: {
+            scouts: {
+              id: "scouts",
+              label: "Private scouts",
+              goalTemplate: "Scout: {goal}",
+              cells: [{ role: "scout", count: 5 }],
+            },
+          },
+          removed: ["research"],
+        },
+      }));
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.deepEqual(persisted.organPresets, saved.organPresets);
+      assert.deepEqual(persisted.agentRolePresets.environment.removed, ["governor"]);
+
+      const client = ServerSettingsModule.redactServerSettingsForClient(saved);
+      assert.deepEqual(client.organPresets, DEFAULT_SERVER_SETTINGS.organPresets);
+      assert.deepEqual(client.agentRolePresets, DEFAULT_SERVER_SETTINGS.agentRolePresets);
+      assert.notInclude(JSON.stringify(client), "Private scouts");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("saves through a symlinked settings file without replacing the link", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

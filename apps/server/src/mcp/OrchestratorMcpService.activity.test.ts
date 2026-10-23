@@ -32,9 +32,11 @@ import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import { layerWithoutPods } from "../pod/testkit/layerWithoutPods.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as OrganPresetService from "../organs/OrganPresetService.ts";
 import { liveThreadShell } from "./McpToolAccess.testkit.ts";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(OrganPresetService.layer),
   Layer.provide(layerWithoutPods),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
@@ -711,6 +713,7 @@ it("listThreads tells which pod each thread's worktree runs in, and whether it i
     parked: true,
   };
   const layer = OrchestratorMcpService.layer.pipe(
+    Layer.provide(OrganPresetService.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(PodRuntimeService.PodRuntimeService)({

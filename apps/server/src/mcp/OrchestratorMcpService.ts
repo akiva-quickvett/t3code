@@ -103,6 +103,7 @@ import { podRefusalReason } from "../provider/PodProviderSessions.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
+import * as OrganPresetService from "../organs/OrganPresetService.ts";
 import {
   buildAgentRolePresetList,
   findAgentRolePresetIn,
@@ -1065,6 +1066,7 @@ const make = Effect.gen(function* () {
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const pods = yield* PodRuntimeService.PodRuntimeService;
+  const organPresets = yield* OrganPresetService.OrganPresetService;
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -2296,6 +2298,11 @@ const make = Effect.gen(function* () {
         const modelPreferences = settings.providerModelPreferences ?? {};
         const now = yield* Clock.currentTimeMillis;
         const rolePresets = yield* loadRolePresets(parent?.thread.projectId);
+        const organPresetList = yield* organPresets
+          .list({ projectId: parent?.thread.projectId })
+          .pipe(
+            Effect.mapError(() => failure("orchestration_error", "Unable to read organ presets.")),
+          );
         return {
           parentThreadId: parent?.thread.id ?? null,
           inheritedProviderInstanceId: parent?.thread.modelSelection.instanceId ?? null,
@@ -2356,6 +2363,28 @@ const make = Effect.gen(function* () {
             ...(preset.unavailable === null
               ? {}
               : { unavailableReason: preset.unavailable.reason }),
+          })),
+          organPresets: organPresetList.presets.map((preset) => ({
+            id: preset.id,
+            label: preset.label,
+            goalTemplate: preset.goalTemplate,
+            cells: preset.cells.map((cell) => ({
+              role: cell.role,
+              count: cell.count,
+              ...(cell.target === undefined
+                ? {}
+                : {
+                    target: {
+                      ...(cell.target.providerInstanceId === undefined
+                        ? {}
+                        : { providerInstanceId: cell.target.providerInstanceId }),
+                      ...(cell.target.driverKind === undefined
+                        ? {}
+                        : { driverKind: cell.target.driverKind }),
+                      model: cell.target.model,
+                    },
+                  }),
+            })),
           })),
           features: {
             appOwnedSubagents: true,
@@ -3194,4 +3223,5 @@ export const layer: Layer.Layer<
   | SecretRequests.SecretRequests
   | ServerSettings.ServerSettingsService
   | PodRuntimeService.PodRuntimeService
+  | OrganPresetService.OrganPresetService
 > = Layer.effect(OrchestratorMcpService, make);

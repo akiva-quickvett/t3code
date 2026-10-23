@@ -44,9 +44,12 @@ import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import { layerWithoutPods } from "../pod/testkit/layerWithoutPods.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as OrganPresetService from "../organs/OrganPresetService.ts";
+import { DEFAULT_ORGAN_PRESETS } from "../organs/defaultOrganPresets.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(OrganPresetService.layer),
   Layer.provide(layerWithoutPods),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
@@ -2765,13 +2768,65 @@ describe("OrchestratorMcpService provider resolution", () => {
         const grok = capabilities.rolePresets?.find((preset) => preset.id === "review-t3-grok");
         assert.deepEqual(grok, {
           id: "review-t3-grok",
-          label: "Reviewer (tier 3, Grok)",
-          target: { driverKind: ProviderDriverKind.make("cursor"), model: "grok-4.7" },
+          label: "Reviewer (tier 3, second)",
+          target: { driverKind: ProviderDriverKind.make("claudeAgent"), model: "claude-opus-5-5" },
           runsIn: "host",
-          unavailableReason: "No cursor provider is configured.",
         });
         assert.isFalse(
           capabilities.rolePresets?.some((preset) => "instructions" in preset) ?? true,
+        );
+      }),
+    );
+
+    it.effect("lists the organ presets in effect for the caller's project", () =>
+      Effect.gen(function* () {
+        const wideScouts = {
+          id: "scouts",
+          label: "Wide scouts",
+          goalTemplate: "Scout widely: {goal}",
+          cells: [
+            {
+              role: "scout",
+              count: 4,
+              target: {
+                driverKind: ProviderDriverKind.make("claudeAgent"),
+                model: "claude-opus-5-5",
+                options: [{ id: "effort", value: "high" }],
+              },
+            },
+          ],
+        };
+        const { service } = yield* presetHarness({
+          providers: [codex, claude],
+          settings: {
+            organPresets: {
+              projects: {
+                [projectId]: { overrides: { scouts: wideScouts }, removed: ["research"] },
+                [ProjectId.make("project:elsewhere")]: { removed: ["scouts"] },
+              },
+            },
+          },
+        });
+        const capabilities = yield* service.capabilities(scope);
+        assert.deepEqual(
+          capabilities.organPresets,
+          DEFAULT_ORGAN_PRESETS.filter((preset) => preset.id !== "research").map((preset) =>
+            preset.id === "scouts"
+              ? {
+                  ...wideScouts,
+                  cells: [
+                    {
+                      role: "scout",
+                      count: 4,
+                      target: {
+                        driverKind: ProviderDriverKind.make("claudeAgent"),
+                        model: "claude-opus-5-5",
+                      },
+                    },
+                  ],
+                }
+              : preset,
+          ),
         );
       }),
     );

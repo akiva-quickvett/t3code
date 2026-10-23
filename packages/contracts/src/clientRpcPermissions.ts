@@ -44,6 +44,9 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.agentRolesSave]: AuthSettingsWriteScope,
   [WS_METHODS.agentRolesRemove]: AuthSettingsWriteScope,
   [WS_METHODS.agentRolesReset]: AuthSettingsWriteScope,
+  [WS_METHODS.organPresetsSave]: AuthSettingsWriteScope,
+  [WS_METHODS.organPresetsRemove]: AuthSettingsWriteScope,
+  [WS_METHODS.organPresetsReset]: AuthSettingsWriteScope,
 
   [WS_METHODS.chatChannelsMutate]: AuthSettingsWriteScope,
   // Reads the template through the channel's credentials, so only settings writers may ask.

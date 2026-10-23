@@ -24,6 +24,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as RpcTest from "effect/rpc/RpcTest";
+import * as Stream from "effect/Stream";
 
 import {
   RPC_REQUIRED_SCOPES,
@@ -52,6 +53,19 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.agentRolesSave,
       WS_METHODS.agentRolesRemove,
       WS_METHODS.agentRolesReset,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthSettingsWriteScope);
+    }
+  });
+
+  it("lets readers watch organ presets and only settings writers change them", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.organPresetsSubscribe)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    for (const method of [
+      WS_METHODS.organPresetsSave,
+      WS_METHODS.organPresetsRemove,
+      WS_METHODS.organPresetsReset,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthSettingsWriteScope);
     }
@@ -329,6 +343,58 @@ describe("RPC scope middleware", () => {
       yield* client[WS_METHODS.serverProbe]({});
       yield* client[WS_METHODS.serverRetryResourceTelemetry]({}).pipe(Effect.flip);
       expect(observed).toEqual([WS_METHODS.serverProbe]);
+    }).pipe(Effect.scoped),
+  );
+});
+
+describe("organ preset authorization", () => {
+  const tested = [WS_METHODS.organPresetsSubscribe, WS_METHODS.organPresetsSave] as const;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof tested)[number]> =>
+        !(tested as ReadonlyArray<string>).includes(tag),
+    ),
+  );
+  const list = { presets: [], removed: [] };
+
+  it.effect("lets a reader watch organ presets but not save one", () =>
+    Effect.gen(function* () {
+      const saved: Array<string> = [];
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.organPresetsSubscribe, () => Stream.make(list)),
+            group.toLayerHandler(WS_METHODS.organPresetsSave, (input) =>
+              Effect.sync(() => saved.push(input.preset.id)).pipe(Effect.as(list)),
+            ),
+            RpcAuthorization.layer([AuthOrchestrationReadScope]),
+          ),
+        ),
+      );
+
+      expect(
+        Array.from(
+          yield* client[WS_METHODS.organPresetsSubscribe]({}).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+          ),
+        ),
+      ).toEqual([list]);
+      expect(
+        yield* client[WS_METHODS.organPresetsSave]({
+          scope: { type: "environment" },
+          preset: {
+            id: "scouts",
+            label: "Scouts",
+            goalTemplate: "Scout: {goal}",
+            cells: [{ role: "scout", count: 1 }],
+          },
+        }).pipe(Effect.flip),
+      ).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+        requiredPermission: AuthSettingsWriteScope,
+      });
+      expect(saved).toEqual([]);
     }).pipe(Effect.scoped),
   );
 });

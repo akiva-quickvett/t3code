@@ -3,7 +3,8 @@
 A role gives a thread a job: a model, its permission and plan modes, and standing instructions.
 Every thread with the same role starts the same way, whether you start it or an agent delegates to
 it. T3 Code ships roles for orchestration work, such as implementor, scout, research, the review
-tiers, and ticket.
+tiers, and ticket. Tier 3 has a second reviewer that reviews the same work independently of the
+first.
 
 ## Use a role
 
