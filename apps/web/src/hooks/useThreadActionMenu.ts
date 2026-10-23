@@ -21,8 +21,10 @@ import {
 import { useRouter } from "@tanstack/react-router";
 
 import { resolveSnoozePresets } from "../components/Sidebar.snooze";
+import { useThreadPodServiceMenu } from "../components/pods/useThreadPodServiceMenu";
 import {
   buildThreadActionMenuItems,
+  podServiceMenuChoice,
   snoozeMenuChoice,
   threadActionRequiresOperate,
   threadSnoozeTreeMenuState,
@@ -47,6 +49,7 @@ import {
 import { readEnvironmentSupportsRolePresets } from "../state/agentRoles";
 import { useStartTicketThread } from "./useStartTicketThread";
 import { usePrimaryEnvironmentId } from "../state/environments";
+import { useMountPodRuntime } from "../state/podRuntime";
 import { readLocalApi } from "../localApi";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -101,6 +104,10 @@ export function useThreadActionMenu(input: {
     reportFailure: false,
   });
   const handleNewThread = useNewThreadHandler();
+  const podServiceMenu = useThreadPodServiceMenu();
+  // ThreadPodChip usually holds the stream open already; this covers the
+  // header while it renames, when the chip is not shown.
+  useMountPodRuntime(threadRef?.environmentId ?? null);
   const startTicketThread = useStartTicketThread();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
@@ -151,6 +158,7 @@ export function useThreadActionMenu(input: {
         supports.settlement && readEnvironmentSupportsSettleTree(threadRef.environmentId)
           ? threadSettleTreeState(thread, readThreadShells())
           : undefined;
+      const podServices = podServiceMenu.read(threadRef, thread.worktreePath);
       const items = buildThreadActionMenuItems({
         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
         branch: thread.branch ?? null,
@@ -167,6 +175,7 @@ export function useThreadActionMenu(input: {
         snoozePresets,
         ...(snoozeTree === undefined ? {} : { snoozeTree }),
         ...(settleTree === undefined ? {} : { settleTree }),
+        ...(podServices === undefined ? {} : { podServices: podServices.state }),
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
       if (clicked._tag === "Failure" || clicked.value === null) return;
@@ -179,6 +188,11 @@ export function useThreadActionMenu(input: {
           "Thread action unavailable",
           new Error("This connection cannot change threads."),
         );
+        return;
+      }
+      const podServiceChoice = podServiceMenuChoice(action);
+      if (podServiceChoice !== null) {
+        podServiceMenu.run(podServices, podServiceChoice, threadRef);
         return;
       }
       const snoozeChoice = snoozeMenuChoice(action, snoozeTree);

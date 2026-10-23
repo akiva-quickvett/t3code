@@ -9,13 +9,14 @@ import type {
   PodRuntimeWarning,
   ProjectId,
 } from "@t3tools/contracts";
-import { useAtomValue } from "@effect/atom-react";
+import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useServerConfigs } from "./entities";
 import { useEnvironmentQuery } from "./query";
-import { serverEnvironment } from "./server";
+import { environmentServerConfigsAtom, serverEnvironment } from "./server";
 
 /** Stock servers have no pod runtime, so their clients hide every pod control. */
 export function useEnvironmentSupportsPodRuntime(environmentId: EnvironmentId | null): boolean {
@@ -61,6 +62,12 @@ export function usePodRuntimeState(environmentId: EnvironmentId | null): PodRunt
   return useAtomValue(supported && environmentId !== null ? podsAtom(environmentId) : NO_PODS_ATOM);
 }
 
+/** Keeps the environment's pod stream open without re-rendering on its changes. */
+export function useMountPodRuntime(environmentId: EnvironmentId | null): void {
+  const supported = useEnvironmentSupportsPodRuntime(environmentId);
+  useAtomMount(supported && environmentId !== null ? podsAtom(environmentId) : NO_PODS_ATOM);
+}
+
 /** The pod a worktree runs in, live. Rows without a worktree open no subscription. */
 export function useWorktreePod(
   environmentId: EnvironmentId | null,
@@ -72,6 +79,20 @@ export function useWorktreePod(
       ? worktreePodAtom(`${environmentId}\u0000${worktreePath}`)
       : NO_POD_ATOM,
   );
+}
+
+/**
+ * The pod a worktree runs in, as last streamed. Imperative, for menus opened
+ * from rows whose pod chips keep the environment's stream mounted.
+ */
+export function readWorktreePod(
+  environmentId: EnvironmentId,
+  worktreePath: string | null | undefined,
+): PodRuntimeSnapshot | undefined {
+  if (worktreePath == null) return undefined;
+  const config = appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId);
+  if (config?.environment.capabilities.podRuntime !== true) return undefined;
+  return appAtomRegistry.get(worktreePodAtom(`${environmentId}\u0000${worktreePath}`));
 }
 
 /** Whether the composer may offer a container: the runtime is on and t3.json has a pod block. */

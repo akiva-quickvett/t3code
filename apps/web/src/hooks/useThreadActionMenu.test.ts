@@ -118,6 +118,10 @@ vi.mock("./useHandleNewThread", () => ({
   useNewThreadHandler: () => async () => recordEffect("draft"),
 }));
 vi.mock("../state/agentRoles", () => ({ readEnvironmentSupportsRolePresets: () => false }));
+vi.mock("../components/pods/useThreadPodServiceMenu", () => ({
+  useThreadPodServiceMenu: () => ({ read: () => undefined, run: vi.fn() }),
+}));
+vi.mock("../state/podRuntime", () => ({ useMountPodRuntime: () => undefined }));
 vi.mock("./useStartTicketThread", () => ({
   useStartTicketThread: () => async () => recordEffect("ticket"),
 }));

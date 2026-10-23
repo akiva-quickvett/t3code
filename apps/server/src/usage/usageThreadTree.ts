@@ -9,7 +9,7 @@ import { totalTokens, type UsageRecord } from "@t3tools/provider-core/server/usa
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { PROJECTION_THREAD_TREE_PARENT } from "../persistence/Migrations/066_ProjectionThreadTreeParentIndex.ts";
+import { PROJECTION_THREAD_TREE_PARENT } from "../persistence/Migrations/Fork002_ProjectionThreadTreeParentIndex.ts";
 import { roundUsd, type AttributedUsageBucket } from "./usageAggregation.ts";
 
 interface TreeThreadRow {

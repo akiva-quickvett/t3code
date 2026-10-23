@@ -16,6 +16,7 @@ import {
   podForWorktree,
   podMcpListenerProblem,
   podServiceLinks,
+  podServiceShareTarget,
   podRuntimeActions,
   podRuntimeTitle,
   reducePodRuntimeEvent,
@@ -185,6 +186,75 @@ describe("pod service links", () => {
     ];
     expect(podBrowsingThread(threads, environmentId, pod("running"))?.id).toBe("latest");
     expect(podBrowsingThread([], environmentId, pod("running"))).toBeUndefined();
+  });
+});
+
+describe("pod service share target", () => {
+  const share = (services: PodRuntimeSnapshot["services"], clientOnHost: boolean) =>
+    podServiceLinks({ ...pod("running"), services }).map((link) => ({
+      name: link.name,
+      ...podServiceShareTarget(link, clientOnHost),
+    }));
+
+  it("hands out a hostname URL as-is, from any client", () => {
+    const services = [
+      {
+        name: "web",
+        port: 3000,
+        url: "https://web.feature.pods.example.ts.net",
+        tailnetUrl: "http://100.64.0.1:20000",
+      },
+    ];
+    expect(share(services, false)).toEqual([
+      {
+        name: "web",
+        url: "https://web.feature.pods.example.ts.net",
+        reachLabel: null,
+        reachable: true,
+      },
+    ]);
+  });
+
+  it("prefers the tailnet address of a loopback port", () => {
+    const services = [
+      {
+        name: "web",
+        port: 3000,
+        url: "http://127.0.0.1:20000",
+        tailnetUrl: "http://100.64.0.1:20000",
+      },
+    ];
+    expect(share(services, false)).toEqual([
+      { name: "web", url: "http://100.64.0.1:20000", reachLabel: "tailnet", reachable: true },
+    ]);
+    expect(share(services, true)[0]?.url).toBe("http://100.64.0.1:20000");
+  });
+
+  it("keeps a bare loopback port, flagged host only for a remote client", () => {
+    const services = [{ name: "web", port: 3000, url: "http://127.0.0.1:20000" }];
+    expect(share(services, true)).toEqual([
+      { name: "web", url: "http://127.0.0.1:20000", reachLabel: null, reachable: true },
+    ]);
+    expect(share(services, false)).toEqual([
+      { name: "web", url: "http://127.0.0.1:20000", reachLabel: "host only", reachable: false },
+    ]);
+  });
+
+  it("decides each service on its own and skips unpublished ones", () => {
+    const services = [
+      { name: "web", port: 3000, url: "https://web.feature.pods.example.ts.net" },
+      { name: "api", port: 8000, url: "http://127.0.0.1:20001" },
+      { name: "db", port: 5432, url: null },
+    ];
+    expect(share(services, false).map(({ name, reachLabel }) => [name, reachLabel])).toEqual([
+      ["web", null],
+      ["api", "host only"],
+    ]);
+  });
+
+  it("has nothing to share while the pod is not running", () => {
+    expect(share([{ name: "web", port: 3000, url: null }], true)).toEqual([]);
+    expect(share([], true)).toEqual([]);
   });
 });
 

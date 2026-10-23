@@ -36,6 +36,9 @@ export type ThreadActionMenuId =
   | "copy-path"
   | "copy-branch"
   | "copy-thread-id"
+  | "pod-services"
+  | `pod-open:${string}`
+  | `pod-copy:${string}`
   | "archive"
   | "delete";
 
@@ -109,6 +112,52 @@ export interface ThreadActionMenuState {
   readonly snoozeTree?: ThreadSnoozeTreeMenuState;
   /** Present when the server settles agent trees; absent keeps the single-thread menu. */
   readonly settleTree?: ThreadSettleTreeState;
+  /** The published services of the pod the thread runs in; absent or empty hides them. */
+  readonly podServices?: ThreadPodServicesMenuState;
+}
+
+export interface ThreadPodServicesMenuState {
+  readonly services: ReadonlyArray<{
+    readonly name: string;
+    readonly reachLabel: string | null;
+  }>;
+  /** This connection may open browser tabs in the environment. */
+  readonly canOpen: boolean;
+}
+
+function podServiceMenuItems(
+  podServices: ThreadPodServicesMenuState | undefined,
+): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
+  if (podServices === undefined || podServices.services.length === 0) return [];
+  return [
+    {
+      id: "pod-services",
+      label: "Pod services",
+      icon: "globe",
+      children: podServices.services.flatMap(({ name, reachLabel }, index) => [
+        {
+          id: `pod-open:${name}` as const,
+          label: `Open ${name}`,
+          disabled: !podServices.canOpen,
+          ...(index > 0 ? { separatorBefore: true } : {}),
+        },
+        {
+          id: `pod-copy:${name}` as const,
+          label: reachLabel === null ? `Copy ${name} URL` : `Copy ${name} URL (${reachLabel})`,
+          icon: "copy",
+        },
+      ]),
+    },
+  ];
+}
+
+/** Which pod service a clicked entry opens or copies, or null for any other entry. */
+export function podServiceMenuChoice(
+  action: ThreadActionMenuId,
+): { readonly kind: "open" | "copy"; readonly name: string } | null {
+  if (action.startsWith("pod-open:")) return { kind: "open", name: action.slice(9) };
+  if (action.startsWith("pod-copy:")) return { kind: "copy", name: action.slice(9) };
+  return null;
 }
 
 export interface ThreadSnoozeTreeMenuState {
@@ -229,8 +278,12 @@ function settleTreeMenuItems(
   ];
 }
 
-/** Local navigation, read markers, and copying remain available to read-only clients. */
+/**
+ * Local navigation, read markers, and copying remain available to read-only
+ * clients; opening a pod service has its own browser permission.
+ */
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
+  if (action === "pod-services" || podServiceMenuChoice(action) !== null) return false;
   return ![
     "new-thread-on-branch",
     "new-ticket",
@@ -325,6 +378,7 @@ export function buildThreadActionMenuItems(
     ...(state.supports.threadUsage
       ? [{ id: "usage-cost" as const, label: "Cost of this work", icon: "coins" }]
       : []),
+    ...podServiceMenuItems(state.podServices),
     {
       id: "copy",
       label: "Copy",

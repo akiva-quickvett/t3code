@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildDraftActionMenuItems,
   buildThreadActionMenuItems,
+  podServiceMenuChoice,
   snoozeMenuChoice,
   type ThreadActionMenuState,
   type ThreadSnoozeTreeMenuState,
@@ -382,6 +383,50 @@ describe("buildThreadActionMenuItems", () => {
       (item) => item.id === "archive",
     );
     expect(archiveItem?.disabled).toBe(true);
+  });
+});
+
+describe("thread menu pod services", () => {
+  const podServices = (
+    services: Array<{ name: string; reachLabel: string | null }>,
+    canOpen = true,
+  ): ThreadActionMenuState => ({ ...baseState, podServices: { services, canOpen } });
+  const podItem = (state: ThreadActionMenuState) =>
+    buildThreadActionMenuItems(state).find((item) => item.id === "pod-services");
+
+  it("offers Open and Copy for each published service of the thread's pod", () => {
+    const item = podItem(
+      podServices([
+        { name: "web", reachLabel: null },
+        { name: "api", reachLabel: "host only" },
+      ]),
+    );
+    expect(item?.children?.map((child) => [child.id, child.label])).toEqual([
+      ["pod-open:web", "Open web"],
+      ["pod-copy:web", "Copy web URL"],
+      ["pod-open:api", "Open api"],
+      ["pod-copy:api", "Copy api URL (host only)"],
+    ]);
+    expect(podServiceMenuChoice("pod-copy:api")).toEqual({ kind: "copy", name: "api" });
+    expect(podServiceMenuChoice("pod-open:web")).toEqual({ kind: "open", name: "web" });
+    expect(podServiceMenuChoice("copy-path")).toBeNull();
+  });
+
+  it("hides the section for a host thread and for a pod with nothing published", () => {
+    expect(podItem(baseState)).toBeUndefined();
+    expect(podItem(podServices([]))).toBeUndefined();
+  });
+
+  it("keeps Copy for read-only clients and disables Open without browser permission", () => {
+    const item = podItem({
+      ...podServices([{ name: "web", reachLabel: null }], false),
+      canOperate: false,
+    });
+    expect(item?.disabled).toBeUndefined();
+    expect(item?.children?.map((child) => [child.id, child.disabled])).toEqual([
+      ["pod-open:web", true],
+      ["pod-copy:web", undefined],
+    ]);
   });
 });
 

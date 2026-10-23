@@ -426,6 +426,7 @@ const layerTerminal = TerminalManager.layer.pipe(
   Layer.provide(layerPortScanner),
   Layer.provide(layerNativeTelemetry),
   Layer.provide(layerWorkspaceExecutionTarget),
+  Layer.provide(TerminalManager.layerPodStarter),
 );
 
 const layerPodRuntime = PodRuntimeService.layer.pipe(
@@ -439,6 +440,16 @@ const layerPodRuntime = PodRuntimeService.layer.pipe(
   Layer.provide(RuntimeLayer.layerProjectService),
   Layer.provide(GitVcsDriver.layer),
 );
+
+// Terminals on a stopped pod's worktree start it through PodRuntimeService, which opens terminals itself.
+const layerTerminalPodStarter = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const pods = yield* PodRuntimeService.PodRuntimeService;
+    yield* Deferred.succeed(yield* TerminalManager.TerminalPodStarter, (podId) =>
+      pods.ensureRunning(podId),
+    );
+  }),
+).pipe(Layer.provide(layerPodRuntime), Layer.provide(TerminalManager.layerPodStarter));
 
 // One listener: the placement is the only consumer of the pod-facing MCP listener.
 const layerPodProviderPlacement = PodProviderSessionsLive.layerPlacement.pipe(
@@ -677,7 +688,15 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(layerSourceControlProviderRegistry),
   Layer.provideMerge(layerGit),
   Layer.provideMerge(layerVcs),
-  Layer.provideMerge(Layer.mergeAll(layerTerminal, layerPodRuntime, layerPreview, layerDevice)),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      layerTerminal,
+      layerPodRuntime,
+      layerTerminalPodStarter,
+      layerPreview,
+      layerDevice,
+    ),
+  ),
   Layer.provideMerge(layerPersistence),
   Layer.provideMerge(
     Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),

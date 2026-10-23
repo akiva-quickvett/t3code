@@ -1,7 +1,9 @@
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as WorkspaceExecutionTarget from "../pod/WorkspaceExecutionTarget.ts";
 import {
-  type PodRuntimeState,
+  type PodRuntimeError,
+  type PodRuntimeId,
+  type PodRuntimeSnapshot,
   DEFAULT_TERMINAL_ID,
   TerminalCwdError,
   TerminalCwdNotDirectoryError,
@@ -90,11 +92,6 @@ export {
   TerminalWriteError,
 };
 
-const podNotRunningMessage = (state: PodRuntimeState) =>
-  state === "starting" || state === "creating"
-    ? "This worktree's pod is still starting. Restart this terminal once it runs."
-    : "This worktree's pod is not running. Start it from the pod chip or the command palette, then restart this terminal.";
-
 // Images differ; bash when the pod has it. Not a login shell, which would reset PATH.
 const POD_SHELL_COMMAND = "command -v bash >/dev/null 2>&1 && exec bash || exec sh";
 
@@ -126,6 +123,30 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const MAX_TERMINAL_LABEL_LENGTH = 128;
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
+
+export class TerminalPodStartError extends Schema.TaggedError<TerminalPodStartError>()(
+  "TerminalPodStartError",
+  {
+    podId: Schema.String,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `This worktree's pod could not start, so its terminal cannot open: ${this.detail}`;
+  }
+}
+
+/**
+ * Starts a pod and waits until it runs. PodRuntimeService opens terminals, so
+ * it cannot be a dependency of this manager; the server hands its
+ * `ensureRunning` over through this slot once both are built.
+ */
+export class TerminalPodStarter extends Context.Service<
+  TerminalPodStarter,
+  Deferred.Deferred<(podId: PodRuntimeId) => Effect.Effect<PodRuntimeSnapshot, PodRuntimeError>>
+>()("t3/terminal/Manager/TerminalPodStarter") {}
+
+export const layerPodStarter = Layer.effect(TerminalPodStarter, Deferred.make());
 
 class TerminalSubprocessCheckError extends Schema.TaggedError<TerminalSubprocessCheckError>()(
   "TerminalSubprocessCheckError",
@@ -278,6 +299,8 @@ interface TerminalSessionState {
   hasRunningSubprocess: boolean;
   childCommandLabel: string | null;
   runtimeEnv: Record<string, string> | null;
+  /** Ends a pod shell's process, which outlives the killed `docker exec` client. */
+  podHangUp: Effect.Effect<void> | null;
 }
 
 interface PersistHistoryRequest {
@@ -417,6 +440,13 @@ function isDuplicateAttachSnapshotEvent(
   event: TerminalEvent,
   initialSnapshot: TerminalSessionSnapshot,
 ) {
+  // A snapshot carries its own error's status but not the message, so that event still goes out.
+  if (
+    event.type === "error" &&
+    initialSnapshot.status === "error" &&
+    event.sequence === initialSnapshot.sequence
+  )
+    return false;
   return typeof event.sequence === "number" && typeof initialSnapshot.sequence === "number"
     ? event.sequence <= initialSnapshot.sequence
     : event.type === "started" &&
@@ -1370,15 +1400,25 @@ interface TerminalManagerOptions {
     Record<string, string>,
     TerminalProviderInstanceNotFoundError | TerminalProviderEnvironmentError
   >;
+  /**
+   * Starts the pod whose worktree holds `cwd` when it is not running. It runs
+   * outside the thread lock, since a cold start can take minutes; a failure is
+   * reported by the launch that follows, not here.
+   */
+  preparePodLaunch?: (cwd: string) => Effect.Effect<void>;
   /** The host command that opens the shell inside a pod when `cwd` is a pod's worktree. */
   resolvePodLaunch?: (input: {
     readonly cwd: string;
     readonly env: Record<string, string>;
-  }) => Effect.Effect<{
-    readonly command: string;
-    readonly args: ReadonlyArray<string>;
-    readonly env: Readonly<Record<string, string>>;
-  } | null>;
+  }) => Effect.Effect<
+    {
+      readonly command: string;
+      readonly args: ReadonlyArray<string>;
+      readonly env: Readonly<Record<string, string>>;
+      readonly hangUp: Effect.Effect<void>;
+    } | null,
+    TerminalPodStartError
+  >;
 }
 
 export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
@@ -1441,27 +1481,66 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
     }),
   );
   const executionTarget = yield* WorkspaceExecutionTarget.WorkspaceExecutionTarget;
-  const platform = yield* HostProcess.Platform;
+  const podStarter = yield* Effect.serviceOption(TerminalPodStarter);
+  let podShellCount = 0;
+  // Why each pod's last start from a terminal failed, for the launch that follows it.
+  const podStartFailures = new Map<PodRuntimeId, TerminalPodStartError>();
+  const preparePodLaunch = Effect.fn("terminal.preparePodLaunch")(function* (cwd: string) {
+    const target = yield* executionTarget.resolve(cwd);
+    if (target.type === "host") return;
+    if (target.state === "running") {
+      podStartFailures.delete(target.podId);
+      return;
+    }
+    const ensureRunning = Option.isNone(podStarter)
+      ? Option.none()
+      : yield* Deferred.poll(podStarter.value);
+    const failure = Option.isNone(ensureRunning)
+      ? new TerminalPodStartError({
+          podId: target.podId,
+          detail: "this server cannot start pods for terminals.",
+        })
+      : yield* (yield* ensureRunning.value)(target.podId).pipe(
+          Effect.as(undefined),
+          Effect.catch((cause) =>
+            Effect.succeed(
+              new TerminalPodStartError({ podId: target.podId, detail: cause.message }),
+            ),
+          ),
+        );
+    if (failure === undefined) podStartFailures.delete(target.podId);
+    else podStartFailures.set(target.podId, failure);
+  });
   const resolvePodLaunch = Effect.fn("terminal.resolvePodLaunch")(function* (input: {
     readonly cwd: string;
     readonly env: Record<string, string>;
   }) {
     const target = yield* executionTarget.resolve(input.cwd);
     if (target.type === "host") return null;
-    // docker exec would only say the container is not running; say what to do instead.
-    if (target.state !== "running" && platform !== "win32")
-      return {
-        command: "/bin/sh",
-        args: ["-c", 'printf "%s\\r\\n" "$1"; exit 1', "pod", podNotRunningMessage(target.state)],
-        env: {},
-      };
+    // Never fall back to the host: a pod's worktree only runs inside its pod.
+    if (target.state !== "running")
+      return yield* (
+        podStartFailures.get(target.podId) ??
+          new TerminalPodStartError({ podId: target.podId, detail: `it is ${target.state}.` })
+      );
+    // Killing the `docker exec` client leaves its process running in the
+    // container, so the shell records its pid for a hangup to end it and its jobs.
+    podShellCount += 1;
+    const pidFile = `/tmp/t3-terminal-${process.pid}-${podShellCount}.pid`;
     // The host's shell and its environment do not exist in the pod; the image's do.
-    return executionTarget.launch(target, {
-      command: ["sh", "-c", POD_SHELL_COMMAND],
+    const launch = executionTarget.launch(target, {
+      command: ["sh", "-c", `{ echo $$ > ${pidFile}; } 2>/dev/null; ${POD_SHELL_COMMAND}`],
       cwd: input.cwd,
       env: { TERM: "xterm-256color", LANG: "C.UTF-8", ...input.env },
       tty: true,
     });
+    const hangUp = executionTarget
+      .exec(target, {
+        command: ["sh", "-c", `kill -HUP "$(cat ${pidFile})" 2>/dev/null; rm -f ${pidFile}`],
+        timeoutMs: 10_000,
+      })
+      .pipe(Effect.ignoreCause({ log: false }));
+    return { ...launch, hangUp };
   });
   return yield* makeWithOptions({
     logsDir: terminalLogsDir,
@@ -1476,6 +1555,7 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
     resolveProviderInstanceEnvironment,
+    preparePodLaunch,
     resolvePodLaunch,
   });
 });
@@ -2181,6 +2261,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       terminalId: session.terminalId,
     });
     yield* startKillEscalation(process, session.threadId, session.terminalId);
+    if (session.podHangUp !== null) runFork(session.podHangUp);
+    session.podHangUp = null;
     yield* evictInactiveSessionsIfNeeded();
   });
 
@@ -2342,6 +2424,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                   );
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
+            session.podHangUp = podLaunch?.hangUp ?? null;
 
             const processPid = ptyProcess.pid;
             let eventsActivated = false;
@@ -2674,6 +2757,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         hasRunningSubprocess: false,
         childCommandLabel: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
+        podHangUp: null,
       };
 
       const createdSession = session;
@@ -2769,10 +2853,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       openWithWorkspaceLease(input),
     );
 
+  const preparePodLaunch = (cwd: string) => options.preparePodLaunch?.(cwd) ?? Effect.void;
+
   const open: TerminalManager["Service"]["open"] = (input) =>
-    withThreadLock(
-      input.threadId,
-      resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
+    preparePodLaunch(input.cwd).pipe(
+      Effect.andThen(
+        withThreadLock(
+          input.threadId,
+          resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
+        ),
+      ),
     );
 
   const openOrAttachForStream = (input: TerminalAttachInput) =>
@@ -2922,8 +3012,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
   };
 
+  // A user's attach opens, and may start the pod; a client's reconnect (`resume`)
+  // never does, so a pod that was stopped on purpose stays stopped.
+  const prepareAttachPodLaunch = (input: TerminalAttachInput) =>
+    Effect.gen(function* () {
+      if (!input.cwd || input.resume) return;
+      const existing = yield* getSession(input.threadId, input.terminalId);
+      const opens =
+        Option.isNone(existing) || (!existing.value.process && input.restartIfNotRunning === true);
+      if (opens) yield* preparePodLaunch(input.cwd);
+    });
+
   const attachStream: TerminalManager["Service"]["attachStream"] = (input, listener) =>
-    streamSession(input, openOrAttachForStream(input), listener);
+    prepareAttachPodLaunch(input).pipe(
+      Effect.andThen(streamSession(input, openOrAttachForStream(input), listener)),
+    );
 
   const observeStream: TerminalManager["Service"]["observeStream"] = (input, listener) =>
     streamSession(
@@ -3118,6 +3221,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           hasRunningSubprocess: false,
           childCommandLabel: null,
           runtimeEnv: normalizedRuntimeEnv(input.env),
+          podHangUp: null,
         };
         const createdSession = session;
         yield* modifyManagerState((state) => {
@@ -3161,6 +3265,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     });
 
   const restart: TerminalManager["Service"]["restart"] = (input) =>
+    preparePodLaunch(input.cwd).pipe(Effect.andThen(restartLocked(input)));
+
+  const restartLocked = (input: TerminalRestartInput) =>
     withThreadLock(
       input.threadId,
       resolveLaunchInputEnvironment(input).pipe(
