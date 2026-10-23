@@ -9,6 +9,7 @@ import {
   MessageId,
   type ModelSelection,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ThreadShellSnapshot,
   NodeId,
   ProjectId,
@@ -2968,6 +2969,109 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.deepEqual(projection.runs[0]?.delegatedCompletion, run.delegatedCompletion);
       assert.deepEqual(projection.subagents[0]?.completionDelivery, task.completionDelivery);
     }),
+  );
+
+  it.effect(
+    "keeps a task's organ label and completion delivery independently in SQL and memory",
+    () =>
+      Effect.gen(function* () {
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread:projection-organ-label");
+        const runId = RunId.make("run:projection-organ-label");
+        const rootNodeId = NodeId.make("node:projection-organ-label-root");
+        const taskId = NodeId.make("node:projection-organ-label-task");
+        const organ = {
+          id: "organ_projectionLabel01",
+          presetId: "implementation",
+          goal: "Ship it.",
+          round: 1,
+        };
+        const completionDelivery = { state: "disposed" as const, observedByRunId: null };
+        const created = {
+          id: EventId.make("event:projection-organ-label:thread"),
+          type: "thread.created" as const,
+          threadId,
+          occurredAt: now,
+          payload: {
+            createdBy: "user" as const,
+            creationSource: "web" as const,
+            id: threadId,
+            projectId: ProjectId.make("project:projection-organ-label"),
+            title: "Organ label projection",
+            providerInstanceId,
+            modelSelection,
+            runtimeMode: "full-access" as const,
+            interactionMode: "default" as const,
+            branch: null,
+            worktreePath: null,
+            activeProviderThreadId: null,
+            lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            lastVisitedAt: null,
+            deletedAt: null,
+          },
+        };
+        const task = {
+          id: taskId,
+          threadId,
+          runId,
+          parentNodeId: rootNodeId,
+          origin: "app_owned" as const,
+          createdBy: "agent" as const,
+          driver,
+          providerInstanceId,
+          providerThreadId: null,
+          childThreadId: null,
+          nativeTaskRef: null,
+          prompt: "Implement: Ship it.",
+          title: null,
+          model: null,
+          completionWake: "always" as const,
+          status: "running" as const,
+          result: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+        };
+        const update = (suffix: string, payload: OrchestrationV2Subagent) => ({
+          id: EventId.make(`event:projection-organ-label:${suffix}`),
+          type: "subagent.updated" as const,
+          threadId,
+          runId,
+          nodeId: taskId,
+          driver,
+          providerInstanceId,
+          occurredAt: now,
+          payload,
+        });
+        const events = [
+          update("created", { ...task, organ }),
+          // An update without either key keeps the organ and adds no delivery.
+          update("progress", task),
+          update("delivery", { ...task, completionDelivery }),
+          update("completed", { ...task, status: "completed", completedAt: now }),
+        ];
+
+        let memory = ProjectionStore.emptyProjection(created);
+        yield* projectionStore.apply(created);
+        for (const [index, event] of events.entries()) {
+          memory = ProjectionStore.applyToProjection(memory, event);
+          yield* projectionStore.apply(event);
+          const stored = (yield* projectionStore.getThreadProjection(threadId)).subagents[0];
+          const expectedDelivery = index >= 2 ? completionDelivery : undefined;
+          for (const subagent of [stored, memory.subagents[0]]) {
+            assert.deepEqual(subagent?.organ, organ);
+            assert.deepEqual(subagent?.completionDelivery, expectedDelivery);
+          }
+        }
+        assert.strictEqual(memory.subagents[0]?.status, "completed");
+      }),
   );
 
   it.effect("only exposes interruptible runs through the shell activeRunId", () =>

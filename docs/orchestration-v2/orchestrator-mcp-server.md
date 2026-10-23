@@ -210,11 +210,13 @@ Returns:
 - whether each provider can run a child task, and its `headroom`: `ok`, `low`,
   `unknown` (its last limit check failed), or `exhausted`;
 - the role presets in effect for the caller's project: id, label, model target,
-  `runsIn`, the roles it may delegate to (advisory), and why one cannot start
-  here. Instructions stay on the server; and
+  `runsIn`, the roles it may delegate to (enforced only for organs), and why
+  one cannot start here. Instructions stay on the server;
+- the organ presets in effect for the caller's project; and
 - feature flags for polling, cancellation, batch thread creation,
   `t3_usage_limits`, `t3_usage_thread_tree` (`usageThreadTree`), and supervised
-  wakes (`supervisedWakes`), the last two missing on older servers.
+  wakes (`supervisedWakes`), the last two missing on older servers, and
+  `organs` for `start_organ` and `delegate_task.organ`.
 
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
@@ -273,6 +275,7 @@ type DelegateTaskInput = {
   clientRequestId?: string;
   runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
   interactionMode?: "inherit" | "plan" | "default";
+  organ?: { id: string; round?: number }; // a later round of an organ
 };
 ```
 
@@ -370,6 +373,51 @@ type DelegateTaskResult = {
   waitTimedOut: boolean;
 };
 ```
+
+`organ` adds the child to an organ this thread started (see `start_organ`): the
+id must be on one of the caller's subagent records, or nothing is created. The
+child's label copies the organ's preset and goal, with `round` defaulting to the
+highest round so far plus one. `preset` is required and is checked like a
+`start_organ` cell. Without `organ`, allowed child roles stay advisory.
+
+### `start_organ`
+
+Starts an organ: one delegated child per cell of an organ preset, all labelled
+with the same `organ { id, presetId, goal, round: 1 }` on the parent's subagent
+record and on the child's lineage. Stock clients show the cells as ordinary
+delegated children.
+
+```ts
+type StartOrganInput = {
+  presetId: string;
+  goal: string; // each cell's prompt is the preset's goalTemplate with the full goal
+  cells?: Array<{ role: string; count?: number; target?: Target }>; // replaces the preset's cells
+  clientRequestId?: string;
+};
+type StartOrganResult = {
+  organId: string;
+  round: number;
+  tasks: DelegateTaskResult[];
+  failed?: Array<{ index: number; reason: string }>;
+};
+```
+
+Like `delegate_task`, it needs an active parent run owned by the caller's
+provider session (`parent_not_active` otherwise). Every cell role must exist,
+and when the caller's role resolves to a preset with `allowedChildRoles`, every
+cell role must be listed; the refusal names the caller's role, the layer that
+defines it and the missing role. A caller without a role, or whose role has no
+list, is unrestricted. A refused start creates nothing.
+
+The organ id is a hash of the provider session and the request key
+(`clientRequestId`, or a random key when absent), and cell _i_ uses the
+command id `start-organ` with that key and index _i_. A keyed retry therefore
+returns the same organ, replays the cells that started, and starts only the
+missing ones; key-less calls always start a new organ. Cells are dispatched in
+order through the `delegate_task` path with `completionWake: "always"`. When
+cell _k_ fails to start, the result lists cells before it in `tasks` and cell
+_k_ in `failed`; if the first cell fails, the call fails. The label's goal is
+cut to 500 characters ending in "…".
 
 ### `task_status`
 

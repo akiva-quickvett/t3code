@@ -726,14 +726,26 @@ function preserveRunRecordedFields(
   };
 }
 
-function preserveCompletionDelivery(
+/**
+ * Labels a later `subagent.updated` may omit without meaning to clear them. The
+ * SQL upsert preserves the same keys, so both projection layers agree.
+ */
+const PRESERVED_SUBAGENT_KEYS = ["completionDelivery", "organ"] as const;
+
+function preserveSubagentLabels(
   current: OrchestrationV2Subagent | undefined,
   next: OrchestrationV2Subagent,
 ): OrchestrationV2Subagent {
-  if (next.completionDelivery !== undefined || current?.completionDelivery === undefined) {
-    return next;
-  }
-  return { ...next, completionDelivery: current.completionDelivery };
+  if (current === undefined) return next;
+  const keepDelivery =
+    next.completionDelivery === undefined && current.completionDelivery !== undefined;
+  const keepOrgan = next.organ === undefined && current.organ !== undefined;
+  if (!keepDelivery && !keepOrgan) return next;
+  return {
+    ...next,
+    ...(keepDelivery ? { completionDelivery: current.completionDelivery } : {}),
+    ...(keepOrgan ? { organ: current.organ } : {}),
+  };
 }
 
 export function emptyProjection(
@@ -858,7 +870,7 @@ export function applyToProjection(
         ...base,
         subagents: upsertById(
           base.subagents,
-          preserveCompletionDelivery(
+          preserveSubagentLabels(
             base.subagents.find((task) => task.id === event.payload.id),
             event.payload,
           ),
@@ -1915,6 +1927,23 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       END
     `;
 
+    // For subagent upserts: the SQL twin of `preserveSubagentLabels`, one guard per key.
+    const preservedSubagentPayloadSql = PRESERVED_SUBAGENT_KEYS.reduce(
+      (payload, key) => sql`
+        CASE
+          WHEN json_type(excluded.payload_json, ${`$.${key}`}) IS NULL
+            AND json_type(orchestration_v2_projection_subagents.payload_json, ${`$.${key}`}) IS NOT NULL
+          THEN json_set(
+            ${payload},
+            ${`$.${key}`},
+            json_extract(orchestration_v2_projection_subagents.payload_json, ${`$.${key}`})
+          )
+          ELSE ${payload}
+        END
+      `,
+      sql`excluded.payload_json`,
+    );
+
     const apply: ProjectionStoreV2Shape["apply"] = (event) =>
       Effect.gen(function* () {
         switch (event.type) {
@@ -2212,19 +2241,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 started_at = excluded.started_at,
                 completed_at = excluded.completed_at,
                 updated_at = excluded.updated_at,
-                payload_json = CASE
-                  WHEN json_type(excluded.payload_json, '$.completionDelivery') IS NULL
-                    AND json_type(orchestration_v2_projection_subagents.payload_json, '$.completionDelivery') IS NOT NULL
-                  THEN json_set(
-                    excluded.payload_json,
-                    '$.completionDelivery',
-                    json_extract(
-                      orchestration_v2_projection_subagents.payload_json,
-                      '$.completionDelivery'
-                    )
-                  )
-                  ELSE excluded.payload_json
-                END
+                payload_json = ${preservedSubagentPayloadSql}
             `;
             break;
           }
