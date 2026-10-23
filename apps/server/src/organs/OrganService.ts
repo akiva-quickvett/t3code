@@ -162,16 +162,16 @@ export function reusedKeyMessage(requestKey: string, organId: string, presetId: 
 
 /**
  * Whether a replayed cell is the one this call plans at its index. The label
- * keeps only the clipped goal, so the record's full prompt and its title, which
- * leads with the cell's role and number, carry the rest.
+ * keeps only the clipped goal, so the record's title, which leads with the
+ * cell's role and number, and its prompt, which cell dispatch sends unchanged,
+ * carry the rest.
  */
 export function replayedCellMatches(
-  cell: Pick<OrganCellPlan, "index" | "role">,
-  goal: string,
+  cell: Pick<OrganCellPlan, "index" | "role" | "prompt">,
   record: { readonly title: string | null; readonly prompt: string },
 ): "match" | "cells" | "goal" {
   if (record.title?.startsWith(`${cell.role} ${cell.index + 1}: `) !== true) return "cells";
-  return record.prompt.includes(goal) ? "match" : "goal";
+  return record.prompt === cell.prompt ? "match" : "goal";
 }
 
 export function planOrganStart(

@@ -2698,6 +2698,7 @@ const make = Effect.gen(function* () {
         const providers = yield* loadProviders;
         const rolePresets = yield* loadRolePresets(parent.thread.projectId);
         const tasks: Array<OrchestratorMcpDelegateTaskResult> = [];
+        const differentCells = `clientRequestId \`${key}\` already started organ \`${plan.organ.id}\` with different cells; use a new clientRequestId.`;
         const partial = (index: number, reason: string) => ({
           organId: plan.organ.id,
           round: plan.organ.round,
@@ -2752,15 +2753,12 @@ const make = Effect.gen(function* () {
           const mismatch =
             record === undefined
               ? "match"
-              : OrganService.replayedCellMatches(cell, input.goal, {
+              : OrganService.replayedCellMatches(cell, {
                   title: record.title,
                   prompt: record.prompt,
                 });
           if (mismatch === "cells") {
-            return partial(
-              cell.index,
-              `clientRequestId \`${key}\` already started organ \`${plan.organ.id}\` with different cells; use a new clientRequestId.`,
-            );
+            return partial(cell.index, differentCells);
           }
           if (mismatch === "goal") {
             return partial(
@@ -2776,6 +2774,16 @@ const make = Effect.gen(function* () {
             );
           }
           tasks.push(finished.success);
+        }
+        // A retry with fewer cells would otherwise leave a started cell unlisted.
+        const extra = stableCommandId({
+          scope,
+          requestKey: key,
+          operation: "start-organ",
+          index: plan.cells.length,
+        });
+        if (yield* threadManagement.hasReceipt(extra)) {
+          return partial(plan.cells.length, differentCells);
         }
         return { organId: plan.organ.id, round: plan.organ.round, tasks };
       }),

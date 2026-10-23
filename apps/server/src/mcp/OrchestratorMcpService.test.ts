@@ -3341,6 +3341,36 @@ describe("OrchestratorMcpService organs", () => {
     }).pipe(Effect.provide(layerOrgans())),
   );
 
+  it.effect("reports a started cell that a retry with fewer cells leaves out", () =>
+    Effect.gen(function* () {
+      yield* createParent();
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const input = {
+        presetId: "scouts",
+        goal: "Look.",
+        cells: [{ role: "scout", count: 2, target }],
+        clientRequestId: "fewer",
+      };
+      const started = yield* service.startOrgan(scope, input);
+      const fewer = yield* service.startOrgan(scope, {
+        ...input,
+        cells: [{ role: "scout", target }],
+      });
+      assert.equal(fewer.organId, started.organId);
+      assert.deepEqual(
+        fewer.tasks.map((task) => task.taskId),
+        [started.tasks[0]?.taskId],
+      );
+      assert.deepEqual(fewer.failed, [
+        {
+          index: 1,
+          reason: `clientRequestId \`fewer\` already started organ \`${started.organId}\` with different cells; use a new clientRequestId.`,
+        },
+      ]);
+      assert.lengthOf(yield* parentSubagents, 2);
+    }).pipe(Effect.provide(layerOrgans())),
+  );
+
   it.effect("reports a resumed organ's refused first cell instead of failing the call", () =>
     Effect.gen(function* () {
       yield* createParent({ role: "broker" });

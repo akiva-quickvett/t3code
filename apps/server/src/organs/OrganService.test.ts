@@ -258,19 +258,18 @@ describe("planOrganStart on a retry", () => {
     );
   });
 
-  it("matches a replayed cell by its role, number and full goal", () => {
-    const cell = { index: 1, role: "scout" };
+  it("matches a replayed cell by its role, number and exact prompt", () => {
     const goal = "x".repeat(600);
+    const planned = (cellGoal: string) =>
+      plan(start(DEFAULT_SERVER_SETTINGS, { presetId: "scouts", goal: cellGoal })).cells[1]!;
     const record = { title: "scout 2: xxx...", prompt: `Scout: ${goal}` };
-    assert.strictEqual(OrganService.replayedCellMatches(cell, goal, record), "match");
+    assert.strictEqual(OrganService.replayedCellMatches(planned(goal), record), "match");
     assert.strictEqual(
-      OrganService.replayedCellMatches({ ...cell, role: "research" }, goal, record),
+      OrganService.replayedCellMatches({ ...planned(goal), role: "research" }, record),
       "cells",
     );
-    assert.strictEqual(
-      OrganService.replayedCellMatches(cell, `${"x".repeat(599)}y`, record),
-      "goal",
-    );
+    // A long prefix of the original goal shares the label and is inside its prompt.
+    assert.strictEqual(OrganService.replayedCellMatches(planned("x".repeat(550)), record), "goal");
   });
 
   it("refuses cells one by one once the organ started, instead of the whole call", () => {
