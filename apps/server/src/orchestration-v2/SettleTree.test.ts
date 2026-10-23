@@ -596,4 +596,39 @@ it.layer(layerTest)("settle trees", (it) => {
       assert.deepEqual(calls, [`park ${worktrees.lone}`, `start ${worktrees.lone}`]);
     }),
   );
+  it.effect("an unsettle that only calls off a wait leaves the root unpinned", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const root = ThreadId.make("thread:waiting-root");
+      const child = ThreadId.make("thread:waiting-child");
+      yield* createThread(root, "/work/pods/no-pod");
+      yield* createSubagent(child, root, "/work/pods/no-pod");
+
+      for (const scope of ["thread", "tree"] as const) {
+        const run = yield* send(child, `work before ${scope} unsettle`);
+        yield* orchestrator.dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make(`settle:waiting-root:${scope}`),
+          threadId: root,
+          scope: "tree",
+        });
+        assert.isNotNull((yield* threadOf(root)).settleWhenIdle ?? null);
+        yield* orchestrator.dispatch({
+          type: "thread.unsettle",
+          commandId: CommandId.make(`unsettle:waiting-root:${scope}`),
+          threadId: root,
+          reason: "user",
+          scope,
+        });
+        const after = yield* threadOf(root);
+        assert.isNull(after.settleWhenIdle ?? null, scope);
+        assert.isNull(after.settledOverride, scope);
+
+        yield* endRun(child, run);
+        yield* sweepWaits;
+        for (const threadId of [root, child])
+          assert.notEqual(yield* settledOverrideOf(threadId), "settled", `${scope} ${threadId}`);
+      }
+    }),
+  );
 });

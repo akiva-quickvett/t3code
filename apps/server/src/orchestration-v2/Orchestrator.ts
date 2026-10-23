@@ -2748,6 +2748,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // A tree settle reaches a single thread's lock only once dispatchTreeCascade
     // found the tree busy: the root records the wait and settles nothing yet.
     const recordsSettleWait = command.type === "thread.settle" && command.scope === "tree";
+    // Unsettling a thread that only waits to settle calls the wait off; it
+    // never settled, so it is not pinned active against auto-settle.
+    const unsettleCancelsWait =
+      command.type === "thread.unsettle" &&
+      thread.settledOverride !== "settled" &&
+      thread.settleWhenIdle != null;
     if (command.type === "thread.settle" && !recordsSettleWait) {
       const { blocker, automaticQueuedRuns, pendingRequests } = settleBlocker(
         yield* loadProjectionForCommand(command, SETTLE_BLOCKER_FIELDS, SETTLE_BLOCKER_FILTER),
@@ -2996,6 +3002,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           };
         }
         case "thread.unsettle": {
+          if (unsettleCancelsWait) return { ...thread, settleWhenIdle: null, updatedAt: now };
           const alreadyPinnedActive = thread.settledOverride === "active";
           return {
             ...thread,
@@ -3434,7 +3441,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ? ("thread.metadata-updated" as const)
             : ("thread.settled" as const);
         case "thread.unsettle":
-          return "thread.unsettled" as const;
+          return unsettleCancelsWait
+            ? ("thread.metadata-updated" as const)
+            : ("thread.unsettled" as const);
         case "thread.snooze":
           return snoozeWhenIdle === null
             ? ("thread.snoozed" as const)
