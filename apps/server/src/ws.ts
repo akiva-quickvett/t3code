@@ -129,6 +129,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as AgentRolePresetService from "./agentRoles/AgentRolePresetService.ts";
 import * as OrganPresetService from "./organs/OrganPresetService.ts";
+import * as OrchestrationStatsService from "./orchestrationStats/OrchestrationStatsService.ts";
 import * as ChatChannelService from "./chat/ChatChannelService.ts";
 import * as PodRuntimeService from "./pod/PodRuntimeService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
@@ -1366,6 +1367,7 @@ const layerWsRpc = (
       const hostResources = yield* HostResources.HostResources;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
+      const orchestrationStats = yield* OrchestrationStatsService.OrchestrationStatsService;
       const relayClient = yield* RelayClient.RelayClient;
       // A webhook URL starts agent runs, so only sessions that may operate
       // see it; read-only sessions still see the task itself.
@@ -3139,6 +3141,7 @@ const layerWsRpc = (
               Stream.concat(Stream.make(latest), changes),
             ),
           ),
+        [WS_METHODS.orchestrationSubscribeStats]: (_input) => orchestrationStats.subscribe,
       });
       return handlers;
     }),

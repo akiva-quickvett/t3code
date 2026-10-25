@@ -106,6 +106,7 @@ function layerExecutorFor(input: {
         open: () => Effect.die("unused open"),
         get: () => Effect.succeed(Option.none()),
         isLive: () => Effect.succeed(false),
+        sessionCounts: Effect.succeed({ live: 0, busy: 0 }),
         close: () => Effect.void,
         closeInstance: () => Effect.void,
         release: () => record("release"),

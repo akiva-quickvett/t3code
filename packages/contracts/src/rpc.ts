@@ -331,6 +331,7 @@ import {
   ResourceTelemetryRetryResult,
   ResourceTelemetrySnapshot,
 } from "./resourceTelemetry.ts";
+import { OrchestrationStatsSnapshot } from "./orchestrationStats.ts";
 import {
   UsageLimitSourceError,
   ProviderConsumeResetCreditInput,
@@ -635,6 +636,7 @@ export const WS_METHODS = {
   subscribeAuthAccess: "subscribeAuthAccess",
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
+  orchestrationSubscribeStats: "orchestration.subscribeStats",
 } as const;
 
 const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
@@ -2052,6 +2054,14 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
   stream: true,
 });
 
+/** The current snapshot first, then only changes that move a verdict, a count or a rounded burn. */
+const WsOrchestrationSubscribeStatsRpc = Rpc.make(WS_METHODS.orchestrationSubscribeStats, {
+  payload: Schema.Struct({}),
+  success: OrchestrationStatsSnapshot,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
 export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthorization>()(
   "t3/contracts/RpcScopeAuthorization",
   { error: EnvironmentAuthorizationError },
@@ -2284,6 +2294,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeAuthAccessRpc,
   WsSubscribeBackgroundPolicyRpc,
   WsSubscribeResourceTelemetryRpc,
+  WsOrchestrationSubscribeStatsRpc,
   WsOrchestrationV2DispatchCommandRpc,
   WsOrchestrationV2GetWorkflowScriptRpc,
   WsOrchestrationV2StopWorkflowRpc,

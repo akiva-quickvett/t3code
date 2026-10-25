@@ -267,6 +267,7 @@ export const make = Effect.gen(function* () {
       serverBrowser: true,
       agentRolePresets: true,
       organPresets: true,
+      orchestrationStats: true,
       pullRequestLabelRules: true,
       scheduledTaskScripts: true,
       chatChannels: true,

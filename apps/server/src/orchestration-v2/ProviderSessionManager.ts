@@ -170,6 +170,8 @@ export interface ProviderSessionManagerV2Shape {
     ProviderSessionManagerV2Error
   >;
   readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
+  /** Live sessions, and those of them with a turn in flight. */
+  readonly sessionCounts: Effect.Effect<{ readonly live: number; readonly busy: number }>;
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -2402,6 +2404,14 @@ export const layerWithOptions = (
           Ref.get(sessions).pipe(
             Effect.map((current) => current.has(sessionKey(providerSessionId))),
           ),
+        // Counted on read: busy turns change at many write sites, reads come once per sample.
+        sessionCounts: Ref.get(sessions).pipe(
+          Effect.map((current) => {
+            let busy = 0;
+            for (const entry of current.values()) if (entry.busyTurns.size > 0) busy += 1;
+            return { live: current.size, busy };
+          }),
+        ),
         get: (providerSessionId) =>
           Effect.gen(function* () {
             const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
