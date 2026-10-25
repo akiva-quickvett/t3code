@@ -1,4 +1,4 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { type EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
@@ -1322,5 +1322,58 @@ describe("rightPanelStore", () => {
     store.reconcileBrowserSurfaces(refA, ["tab-a", "tab-b"]);
     expect(surfaceIds()).toEqual(["browser:tab-a", "terminal:term-1", "diff", "browser:tab-b"]);
     expect(store.getUserActionRevision(refA)).toBe(revision);
+  });
+
+  describe("thread surface", () => {
+    const cellA = ThreadId.make("cell-A");
+    const cellB = ThreadId.make("cell-B");
+    const persisted = () => {
+      const { partialize } = useRightPanelStore.persist.getOptions();
+      return partialize!(useRightPanelStore.getState()) as {
+        byThreadKey: Record<string, ReturnType<typeof selectThreadRightPanelState>>;
+      };
+    };
+
+    it("keeps one live cell: opening another replaces it and makes it active", () => {
+      const store = useRightPanelStore.getState();
+      store.open(refA, "diff");
+      store.openThread(refA, cellA);
+      store.openThread(refA, cellB);
+
+      const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+      expect(state.surfaces.filter((surface) => surface.kind === "thread")).toEqual([
+        { id: "thread", kind: "thread", threadId: cellB },
+      ]);
+      expect(state.isOpen).toBe(true);
+      expect(state.activeSurfaceId).toBe("thread");
+    });
+
+    it("never persists the cell or an active id pointing at it", () => {
+      const store = useRightPanelStore.getState();
+      store.open(refA, "diff");
+      store.openThread(refA, cellA);
+      store.openThread(refB, cellB);
+
+      const { byThreadKey } = persisted();
+      expect(JSON.stringify(byThreadKey)).not.toContain('"thread"');
+      expect(byThreadKey).toEqual({
+        [scopedThreadKey(refA)]: {
+          isOpen: true,
+          activeSurfaceId: "diff",
+          surfaces: [{ id: "diff", kind: "diff" }],
+        },
+      });
+    });
+
+    it("is not offered by reopen closed view", () => {
+      const store = useRightPanelStore.getState();
+      store.openThread(refA, cellA);
+      store.closeSurface(refA, "thread");
+
+      expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual(
+        selectThreadRightPanelState({}, refA),
+      );
+      expect(useClosedViewStore.getState().entries).toEqual([]);
+    });
   });
 });

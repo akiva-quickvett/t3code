@@ -7,7 +7,7 @@ import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contract
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
-import { useClosedViewStore } from "./closedViewStore";
+import { isRestorableClosedSurface, useClosedViewStore } from "./closedViewStore";
 import { resolveStorage } from "./lib/storage";
 import type { ThreadPanelPresentation } from "./rightPanelLayout";
 import type { ChatFileAttachment } from "./types";
@@ -21,6 +21,7 @@ const RIGHT_PANEL_KINDS = [
   "terminal",
   "pull-request",
   "pull-requests",
+  "thread",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
@@ -77,7 +78,12 @@ export type RightPanelSurface =
       number: number;
       url?: string;
     }
-  | { id: "pull-requests"; kind: "pull-requests" };
+  | { id: "pull-requests"; kind: "pull-requests" }
+  /**
+   * One live cell beside its parent chat: the fixed id means opening another
+   * cell replaces it. Session-only, so `partialize` never writes it.
+   */
+  | { id: "thread"; kind: "thread"; threadId: ThreadId };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
 const RIGHT_PANEL_STORAGE_VERSION = 14;
@@ -122,8 +128,10 @@ interface RightPanelStoreState {
   ) => boolean;
   open: (
     ref: ScopedThreadRef,
-    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
+    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "thread">,
   ) => void;
+  /** Shows `threadId` in the panel of `ref`, replacing any cell already open there. */
+  openThread: (ref: ScopedThreadRef, threadId: ThreadId) => void;
   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
   renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
@@ -180,7 +188,7 @@ interface RightPanelStoreState {
   toggleVisibility: (ref: ScopedThreadRef) => void;
   toggle: (
     ref: ScopedThreadRef,
-    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
+    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request" | "thread">,
   ) => void;
   setThreadPanelOpen: (
     ref: ScopedThreadRef,
@@ -203,7 +211,7 @@ const DEFAULT_THREAD_PANEL_VISIBILITY: ThreadPanelVisibility = {
 };
 
 const singletonSurface = (
-  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal" | "pull-request">,
+  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal" | "pull-request" | "thread">,
 ): RightPanelSurface => {
   switch (kind) {
     case "diff":
@@ -428,6 +436,29 @@ function normalizeRevealLine(line: number | undefined): number | null {
   return Math.max(1, Math.trunc(line));
 }
 
+/**
+ * The persisted form of a thread's panel: a live cell would resubscribe on
+ * reload and show a blank tab on builds without the thread surface.
+ */
+function withoutSessionOnlySurfaces(
+  threadState: ThreadRightPanelState,
+): ThreadRightPanelState | null {
+  const index = threadState.surfaces.findIndex((surface) => surface.kind === "thread");
+  if (index < 0) return threadState;
+  const surfaces = threadState.surfaces.filter((surface) => surface.kind !== "thread");
+  const activeSurfaceId =
+    threadState.activeSurfaceId === threadState.surfaces[index]?.id
+      ? (surfaces[Math.min(index, surfaces.length - 1)]?.id ?? null)
+      : threadState.activeSurfaceId;
+  const next = {
+    ...threadState,
+    isOpen: surfaces.length > 0 && threadState.isOpen,
+    surfaces,
+    activeSurfaceId,
+  };
+  return surfaces.length === 0 && !next.dismissedDeviceSurfaceIds?.length ? null : next;
+}
+
 export function migratePersistedRightPanelState(persistedState: unknown): {
   byThreadKey: Record<string, ThreadRightPanelState>;
   threadPanelVisibilityByThreadKey: Record<string, ThreadPanelVisibility>;
@@ -622,6 +653,30 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               return upsertSurface(current, existing ?? browserSurface(null));
             }
             return upsertSurface(current, singletonSurface(kind));
+          }),
+        ),
+      openThread: (ref, threadId) =>
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) => {
+            const surface: RightPanelSurface = { id: "thread", kind: "thread", threadId };
+            const existing = current.surfaces.find((entry) => entry.id === "thread");
+            if (
+              existing?.kind === "thread" &&
+              existing.threadId === threadId &&
+              current.isOpen &&
+              current.activeSurfaceId === "thread"
+            ) {
+              return current;
+            }
+            return upsertSurface(
+              {
+                ...current,
+                surfaces: current.surfaces.map((entry) =>
+                  entry.id === "thread" ? surface : entry,
+                ),
+              },
+              surface,
+            );
           }),
         ),
       openDevice: (ref, target, automatic = false) =>
@@ -1062,9 +1117,11 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
       ),
       partialize: (state) => ({
         byThreadKey: Object.fromEntries(
-          Object.entries(state.byThreadKey).filter(
-            ([threadKey]) => !isPullRequestsPanelKey(threadKey),
-          ),
+          Object.entries(state.byThreadKey).flatMap(([threadKey, threadState]) => {
+            if (isPullRequestsPanelKey(threadKey)) return [];
+            const persisted = withoutSessionOnlySurfaces(threadState);
+            return persisted === null ? [] : [[threadKey, persisted]];
+          }),
         ),
         threadPanelVisibilityByThreadKey: Object.fromEntries(
           Object.entries(state.threadPanelVisibilityByThreadKey).flatMap(
@@ -1094,11 +1151,8 @@ useRightPanelStore.subscribe((next, previous) => {
       ...removed.filter((surface) => surface.id === before.activeSurfaceId),
     ];
     for (const surface of closedInOrder) {
-      if (
-        surface.kind === "terminal" ||
-        (surface.kind === "preview" && surface.resourceId !== null)
-      )
-        continue;
+      if (!isRestorableClosedSurface(surface)) continue;
+      if (surface.kind === "preview" && surface.resourceId !== null) continue;
       useClosedViewStore.getState().remember({ kind: "panel-tab", threadRef, surface });
     }
   }

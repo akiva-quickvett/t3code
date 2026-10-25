@@ -217,4 +217,24 @@ describe("closedViewStore", () => {
     expect(entries).toHaveLength(20);
     expect(entries[0]).toMatchObject({ surface: { id: "file:23" } });
   });
+
+  it("drops a persisted live cell instead of restoring it", async () => {
+    const { storage, name } = useClosedViewStore.persist.getOptions();
+    await storage!.setItem(name!, {
+      state: {
+        entries: [
+          {
+            id: "cell",
+            kind: "panel-tab",
+            threadRef: refA,
+            surface: { id: "thread", kind: "thread", threadId: "cell-A" },
+          },
+          { id: "diff", ...diff(refA) },
+        ] as unknown as ClosedViewEntry[],
+      },
+      version: 0,
+    });
+    await useClosedViewStore.persist.rehydrate();
+    expect(useClosedViewStore.getState().entries.map((entry) => entry.id)).toEqual(["diff"]);
+  });
 });
