@@ -254,6 +254,65 @@ it.effect("snoozes and wakes the agent tree unless the agent asks for this threa
     ),
   ),
 );
+const metaCalls: Array<{ readonly threadId: ThreadId; readonly enabled: boolean }> = [];
+it.effect("promotes and demotes metas, and reports a meta's refused settle", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const call = (args: Record<string, unknown>) =>
+      server
+        .callTool({ name: "t3_thread_organize", arguments: args })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    expect((yield* call({ action: "promote_meta" })).structuredContent).toEqual({ sequence: 1 });
+    yield* call({ action: "demote_meta" });
+    expect(metaCalls).toEqual([
+      { threadId, enabled: true },
+      { threadId, enabled: false },
+    ]);
+    for (const settleScope of ["thread", "tree"]) {
+      const refused = yield* call({ action: "settle", scope: settleScope });
+      expect(refused.isError).toBe(true);
+      expect(declaredFailure(refused)).toEqual({
+        _tag: "OrchestratorMcpFailure",
+        code: "orchestration_error",
+        message: `Thread ${threadId} is a meta, and a meta cannot be settled. Demote it first.`,
+      });
+    }
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+            getProjectThreadRecords: () =>
+              Effect.succeed(
+                McpToolAccessTestkit.idleThreadProjection(
+                  McpToolAccessTestkit.liveThreadShell(threadId),
+                ) as never,
+              ),
+            setMeta: (input) =>
+              Effect.sync(() => {
+                metaCalls.push({ threadId: input.threadId, enabled: input.enabled });
+                return { sequence: metaCalls.length, storedEvents: [] };
+              }),
+            settleThread: (input) =>
+              Effect.fail(
+                new OrchestratorDispatchError({
+                  commandId: input.commandId,
+                  commandType: "thread.settle",
+                  cause: `Thread ${input.threadId} is a meta, and a meta cannot be settled. Demote it first.`,
+                }),
+              ),
+          }),
+        ),
+      ),
+    ),
+  ),
+);
 it.effect("returns a bounded public failure without serializing storage causes", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;

@@ -300,6 +300,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           })
           .pipe(Effect.mapError(dispatchFailure));
       }
+      if (input.action === "promote_meta" || input.action === "demote_meta") {
+        const result = yield* threads
+          .setMeta({ ...common, enabled: input.action === "promote_meta" })
+          .pipe(Effect.mapError(dispatchFailure));
+        return { sequence: result.sequence };
+      }
       let command: OrchestrationV2Command;
       switch (input.action) {
         case "snooze":

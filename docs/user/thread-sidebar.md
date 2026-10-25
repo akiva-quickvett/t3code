@@ -134,6 +134,9 @@ sending an answer or restarting the agent. Settling also closes the thread's
 terminals that wait at an idle prompt, and keeps their output. A terminal that
 runs a command, such as a dev server, stays open.
 
+A meta thread is never settled, archived, or deleted, by hand or automatically, until you demote
+it. Settling a tree above a meta leaves the meta active and does not wait for its work.
+
 To reclaim disk space from settled work, turn on **Run in the thread's worktree when the
 thread settles** for one of the project's actions, or set `"runOnSettle": true` on a
 `t3.json` script, for example `cargo clean`. It runs each time a thread in its own
@@ -258,3 +261,6 @@ idle** takes it back. A tree snooze gives every thread in it the same wake time,
 earlier one. **Wake thread** wakes the tree the same way. A thread that a usage limit put to sleep stays asleep
 until its limit resets, whether you snooze or wake the tree above it; wake it directly to bring it
 back sooner.
+
+Snoozing a meta snoozes only the meta, without waiting for the threads under it, and a tree snooze
+above a meta leaves it awake.

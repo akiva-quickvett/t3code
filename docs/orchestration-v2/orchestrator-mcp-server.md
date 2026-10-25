@@ -551,6 +551,12 @@ wakes early when it has a pending request, fails, or completes after the snooze.
 state and whether its threads' snooze stopped it. `t3_thread_organize` snoozes
 and wakes the whole agent tree unless `scope` is `thread`, as the sidebar's
 Snooze does; it is the same `thread.snooze` command with `scope: "tree"`.
+Its `promote_meta` and `demote_meta` actions dispatch `thread.meta.set` through
+`ThreadManagementService.setMeta`. Only a thread with no parent in the agent tree
+(a fork qualifies), not supervised and not archived, can be promoted. The server
+refuses to settle, archive or delete a meta, and an agent's own settle of its
+meta fails at once instead of waiting for the turn to end. Tree snoozes and
+settles leave metas out, and a tree snooze on a meta snoozes the meta alone.
 
 ### `t3_thread_update`
 

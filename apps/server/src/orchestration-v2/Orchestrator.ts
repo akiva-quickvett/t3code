@@ -153,6 +153,7 @@ import {
   settleBlocker,
 } from "./settleBlocker.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
+import { DEFAULT_AGENT_ROLE_PRESETS } from "../agentRoles/defaultAgentRolePresets.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -453,6 +454,15 @@ function isGoalCommand(message: {
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
 
+const isMeta = (thread: Pick<OrchestrationV2AppThread, "metaAt">) => thread.metaAt != null;
+
+// A snapshot of the built-in label, as every rolePreset is: the decide step
+// reads no settings, and clients resolve the live preset by id.
+const META_ROLE_PRESET = {
+  id: "meta",
+  label: DEFAULT_AGENT_ROLE_PRESETS.find((preset) => preset.id === "meta")?.label ?? "Meta",
+};
+
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.create":
@@ -465,6 +475,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.snooze":
     case "thread.unsnooze":
     case "thread.auto-settle.set":
+    case "thread.meta.set":
     case "thread.pin":
     case "thread.unpin":
     case "thread.pin.reorder":
@@ -2516,6 +2527,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.snooze"
           | "thread.unsnooze"
           | "thread.auto-settle.set"
+          | "thread.meta.set"
           | "thread.pin"
           | "thread.unpin"
           | "thread.pin.reorder"
@@ -2554,6 +2566,32 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandType: command.type,
         cause: `Thread ${command.threadId} is deleted.`,
       });
+    }
+    // Covers every settle scope and auto-settle, which re-enters as a settle.
+    if ((command.type === "thread.settle" || command.type === "thread.archive") && isMeta(thread)) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} is a meta; demote it first.`,
+      });
+    }
+    if (command.type === "thread.meta.set" && command.enabled) {
+      // A thread in an agent tree would be both a meta and a row under its parent.
+      const refusal =
+        thread.lineage.relationshipToParent === "subagent"
+          ? "is a delegated child; only a thread with no parent can be a meta"
+          : thread.lineage.supervisorThreadId !== undefined
+            ? "is a supervised launch; only a thread with no parent can be a meta"
+            : thread.archivedAt !== null
+              ? "is archived; unarchive it first"
+              : null;
+      if (refusal !== null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} ${refusal}.`,
+        });
+      }
     }
     if (
       command.type === "thread.pull-request.watch" &&
@@ -2666,6 +2704,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         command.type === "thread.snooze" ||
         command.type === "thread.unsnooze" ||
         command.type === "thread.auto-settle.set" ||
+        command.type === "thread.meta.set" ||
         command.type === "thread.pin" ||
         command.type === "thread.unpin" ||
         command.type === "thread.pin.reorder" ||
@@ -2911,7 +2950,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         snoozeWhenIdle = {
           snoozedUntil: DateTime.formatIso(parsedSnoozedUntil.value),
           requestedAt: DateTime.formatIso(now),
-          scope: command.scope ?? "thread",
+          // A meta snoozes alone even if a tree snooze reached its lock.
+          scope: isMeta(thread) ? "thread" : (command.scope ?? "thread"),
         };
       } else if (projection.runtimeRequests.some((request) => request.status === "pending")) {
         return yield* new OrchestratorDispatchError({
@@ -3046,6 +3086,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...thread,
             autoSettleDisabledAt: command.enabled ? null : (thread.autoSettleDisabledAt ?? now),
             updatedAt: unchanged ? thread.updatedAt : now,
+          };
+        }
+        case "thread.meta.set": {
+          if (!command.enabled) {
+            return {
+              ...thread,
+              metaAt: null,
+              updatedAt: isMeta(thread) ? now : thread.updatedAt,
+            };
+          }
+          const settled = thread.settledOverride === "settled";
+          const snoozed = thread.snoozedUntil != null || thread.snoozeWhenIdle != null;
+          // A pending tree settle must not fire on the new meta, and a later
+          // tree unsettle must not treat it as one its tree settled.
+          return {
+            ...thread,
+            metaAt: thread.metaAt ?? now,
+            autoSettleDisabledAt: thread.autoSettleDisabledAt ?? now,
+            rolePreset: thread.rolePreset ?? META_ROLE_PRESET,
+            settleWhenIdle: null,
+            settledByTree: null,
+            ...(settled ? { settledOverride: "active", settledAt: null, unsettledAt: now } : {}),
+            ...(snoozed
+              ? { snoozedUntil: null, snoozedAt: null, snoozeWhenIdle: null, lastSnoozeWakeAt: now }
+              : {}),
+            updatedAt:
+              isMeta(thread) &&
+              thread.autoSettleDisabledAt != null &&
+              thread.rolePreset != null &&
+              !settled &&
+              !snoozed &&
+              thread.settleWhenIdle == null &&
+              thread.settledByTree == null
+                ? thread.updatedAt
+                : now,
           };
         }
         case "thread.pin": {
@@ -3452,6 +3527,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return "thread.unsnoozed" as const;
         case "thread.auto-settle.set":
           return "thread.auto-settle-set" as const;
+        case "thread.meta.set":
+          return "thread.metadata-updated" as const;
         case "thread.pin":
           return "thread.pinned" as const;
         case "thread.unpin":
@@ -11318,6 +11395,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       }
       case "thread.delete": {
+        // Not in planThreadDeletion: a project delete runs it for every
+        // thread and would fail part way.
+        if (
+          isMeta(
+            yield* projectionStore
+              .getThread(command.threadId)
+              .pipe(
+                Effect.mapError(
+                  (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+                ),
+              ),
+          )
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Thread ${command.threadId} is a meta; demote it first.`,
+          });
+        }
         const projection = yield* projectionStore
           .getThreadRecords(command.threadId, [
             "runs",
@@ -11351,6 +11447,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.snooze":
       case "thread.unsnooze":
       case "thread.auto-settle.set":
+      case "thread.meta.set":
       case "thread.pin":
       case "thread.unpin":
       case "thread.pin.reorder":
@@ -11857,8 +11954,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ),
         );
       const root = tree.find((thread) => thread.id === command.threadId);
+      // A meta snoozes alone, as soon as asked; settling one is refused under its own lock.
+      if (command.type === "thread.snooze" && root !== undefined && root.metaAt !== null)
+        return yield* dispatchWithReceipt({ ...command, scope: "thread" });
       const descendants = tree.filter((thread) => {
         if (thread.id === command.threadId || thread.archived) return false;
+        // Skipped, not refused: dispatchDescendants would report a refusal as the tree's failure.
+        if (
+          thread.metaAt !== null &&
+          (command.type === "thread.settle" || command.type === "thread.snooze")
+        )
+          return false;
         switch (command.type) {
           case "thread.settle":
             return !thread.settled;

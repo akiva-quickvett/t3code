@@ -6198,3 +6198,70 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 });
+
+const metaShellAndParking = Effect.gen(function* () {
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const metaAt = DateTime.makeUnsafe("2026-10-01T09:00:00Z");
+  const read = [];
+  for (const [name, threadMetaAt] of [
+    ["meta", metaAt],
+    ["plain", null],
+  ] as const) {
+    const threadId = ThreadId.make(`thread:meta-parity:${name}`);
+    yield* store.apply({
+      id: EventId.make(`event:meta-parity:${name}`),
+      type: "thread.created",
+      threadId,
+      occurredAt: metaAt,
+      payload: {
+        createdBy: "user",
+        creationSource: "web",
+        id: threadId,
+        projectId: ProjectId.make("project:meta-parity"),
+        title: name,
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: metaAt,
+        updatedAt: metaAt,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+        metaAt: threadMetaAt,
+      },
+    });
+    const shell = yield* store.getThreadShell(threadId);
+    const listed = (yield* store.getShellSnapshot({ location: "active" })).threads.find(
+      (thread) => thread.id === threadId,
+    );
+    const [parking] = yield* store.getThreadParking({ treeOf: threadId });
+    read.push({
+      name,
+      shell: shell !== null && "metaAt" in shell ? shell.metaAt : "absent",
+      listed: listed !== undefined && "metaAt" in listed ? listed.metaAt : "absent",
+      parking: parking?.metaAt,
+    });
+  }
+  return read;
+});
+
+it.effect("SQL and memory stores carry metaAt alike on shells and parking rows", () =>
+  Effect.gen(function* () {
+    const sql = yield* metaShellAndParking.pipe(Effect.provide(layerTest));
+    const memory = yield* metaShellAndParking.pipe(Effect.provide(ProjectionStore.layerMemory));
+    const metaAt = DateTime.makeUnsafe("2026-10-01T09:00:00Z");
+    assert.deepEqual(sql, [
+      { name: "meta", shell: metaAt, listed: metaAt, parking: metaAt },
+      { name: "plain", shell: "absent", listed: "absent", parking: null },
+    ]);
+    assert.deepEqual(memory, sql);
+  }),
+);

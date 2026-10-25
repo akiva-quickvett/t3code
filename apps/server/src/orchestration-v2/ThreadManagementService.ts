@@ -417,6 +417,14 @@ export interface ThreadManagementServiceShape {
     | { readonly settlesWhenTurnEnds: true },
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
   >;
+  readonly setMeta: (input: {
+    readonly threadId: ThreadId;
+    readonly commandId: CommandId;
+    readonly enabled: boolean;
+  }) => Effect.Effect<
+    Orchestrator.OrchestratorV2DispatchResult,
+    Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
+  >;
   readonly interruptThread: (
     input: ThreadManagementInterruptInput,
   ) => Effect.Effect<ThreadManagementInterruptResult, ThreadManagementFailure>;
@@ -962,6 +970,15 @@ const make = Effect.gen(function* () {
     "orchestrationV2.threadManagement.settleThread",
   )(function* (input) {
     const shell = input.byOwnAgent ? yield* orchestrator.getThreadShell(input.threadId) : null;
+    // Refused up front: a settle deferred to the turn's end would report one
+    // that never happens. Other callers' settles reach the orchestrator's refusal.
+    if (shell?.metaAt != null) {
+      return yield* new Orchestrator.OrchestratorDispatchError({
+        commandId: input.commandId,
+        commandType: "thread.settle",
+        cause: `Thread ${input.threadId} is a meta, and a meta cannot be settled. Demote it first.`,
+      });
+    }
     if (shell != null && shell.activeRunId !== null) {
       // The agent's own turn keeps its tree busy, so a tree settle records a
       // wait that applies once the tree is idle, and persists across restarts.
@@ -992,6 +1009,14 @@ const make = Effect.gen(function* () {
       ...(result.waitsForIdle === true ? { settlesWhenIdle: true as const } : {}),
     };
   });
+
+  const setMeta: ThreadManagementServiceShape["setMeta"] = (input) =>
+    dispatch({
+      type: "thread.meta.set",
+      commandId: input.commandId,
+      threadId: input.threadId,
+      enabled: input.enabled,
+    });
 
   const interruptThread: ThreadManagementServiceShape["interruptThread"] = (input) =>
     Effect.gen(function* () {
@@ -1238,6 +1263,7 @@ const make = Effect.gen(function* () {
     waitForThread,
     settleAfterRun,
     settleThread,
+    setMeta,
     interruptThread,
     stopDelegatedTasks,
     stopWorkflow,

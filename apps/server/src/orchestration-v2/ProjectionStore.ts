@@ -187,6 +187,8 @@ export interface ProjectionThreadParking {
   readonly snoozedAt: DateTime.Utc | null;
   readonly snoozeWhenIdle: NonNullable<OrchestrationV2AppThread["snoozeWhenIdle"]> | null;
   readonly settleWhenIdle: NonNullable<OrchestrationV2AppThread["settleWhenIdle"]> | null;
+  /** Tree snoozes and settles leave a meta out. */
+  readonly metaAt: DateTime.Utc | null;
   readonly status: OrchestrationV2ShellThreadStatus;
   readonly latestRunCompletedAt: DateTime.Utc | null;
   /** Bumped when the thread settles, so it says when a settled thread parked. */
@@ -231,6 +233,7 @@ export type ProjectionSettlementCandidate = Pick<
   | "settledOverride"
   | "pinnedAt"
   | "autoSettleDisabledAt"
+  | "metaAt"
   | "snoozedUntil"
   | "snoozedAt"
   | "latestRunId"
@@ -1648,6 +1651,7 @@ export function threadShellFromProjection(
     pinnedAt: projection.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
+    ...(projection.thread.metaAt == null ? {} : { metaAt: projection.thread.metaAt }),
     pinOrderKey: projection.thread.pinOrderKey ?? null,
     ...(projection.thread.rolePreset == null ? {} : { rolePreset: projection.thread.rolePreset }),
     lastVisitedAt: projection.thread.lastVisitedAt,
@@ -1899,6 +1903,7 @@ function shellFromState(input: {
     pinnedAt: input.state.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
+    ...(input.state.thread.metaAt == null ? {} : { metaAt: input.state.thread.metaAt }),
     pinOrderKey: input.state.thread.pinOrderKey ?? null,
     ...(input.state.thread.rolePreset == null ? {} : { rolePreset: input.state.thread.rolePreset }),
     lastVisitedAt: input.state.thread.lastVisitedAt,
@@ -5726,6 +5731,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND json_extract(t.payload_json, '$.settledOverride') IS NULL
               AND json_extract(t.payload_json, '$.pinnedAt') IS NULL
               AND json_extract(t.payload_json, '$.autoSettleDisabledAt') IS NULL
+              AND json_extract(t.payload_json, '$.metaAt') IS NULL
               AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runs active
                 WHERE active.thread_id = t.thread_id
@@ -5930,6 +5936,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             snoozedAt: thread.snoozedAt ?? null,
             snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
             settleWhenIdle: thread.settleWhenIdle ?? null,
+            metaAt: thread.metaAt ?? null,
             status,
             latestRunCompletedAt:
               row.latest_run_completed_at === null
@@ -6477,6 +6484,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 thread.settledOverride === null &&
                 thread.pinnedAt == null &&
                 thread.autoSettleDisabledAt == null &&
+                thread.metaAt == null &&
                 !runs.some(isActivityRunForShell) &&
                 !runtimeRequests.some((request) => request.status === "pending"),
             )
@@ -6565,6 +6573,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   snoozedAt: thread.snoozedAt ?? null,
                   snoozeWhenIdle: thread.snoozeWhenIdle ?? null,
                   settleWhenIdle: thread.settleWhenIdle ?? null,
+                  metaAt: thread.metaAt ?? null,
                   status: shellStatusFromStoredRunStatus(latest?.status ?? null),
                   latestRunCompletedAt: latest?.completedAt ?? null,
                   updatedAt: thread.updatedAt,

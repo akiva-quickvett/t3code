@@ -31,7 +31,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. snooze and unsnooze cover the thread and every thread under it in the agent tree (its delegated threads and the threads it supervises) unless scope is thread. A snooze is refused while a thread it covers has an active or queued run or a pending request; whenIdle=true waits for that work to end and snoozes then (unsnooze cancels the wait); snoozing your own thread waits for your turn to end unless whenIdle is false. settle and unsettle cover only the thread unless scope is tree; a tree settle waits for active runs, queued messages and pending approvals or questions anywhere in the tree to end, your own turn included, then settles it, returning settlesWhenIdle=true while it waits (unsettle or a new message to the thread cancels the wait), and a tree unsettle reopens the threads that tree settle retired, leaving ones settled on their own. A pod whose threads are all snoozed or settled stops, and starts again when one wakes. Existing thread lifecycle rules apply. Settling this thread, or its tree, takes effect when your turn ends, returning settlesWhenTurnEnds=true; for this thread alone, a turn that fails or is interrupted, or a queued message, leaves it active.",
+    "Pin, snooze, settle, archive, or mark a thread unread, or promote a thread to a meta or demote it. Omit threadId for this thread. snooze requires snoozedUntil. snooze and unsnooze cover the thread and every thread under it in the agent tree (its delegated threads and the threads it supervises) unless scope is thread. A snooze is refused while a thread it covers has an active or queued run or a pending request; whenIdle=true waits for that work to end and snoozes then (unsnooze cancels the wait); snoozing your own thread waits for your turn to end unless whenIdle is false. settle and unsettle cover only the thread unless scope is tree; a tree settle waits for active runs, queued messages and pending approvals or questions anywhere in the tree to end, your own turn included, then settles it, returning settlesWhenIdle=true while it waits (unsettle or a new message to the thread cancels the wait), and a tree unsettle reopens the threads that tree settle retired, leaving ones settled on their own. A pod whose threads are all snoozed or settled stops, and starts again when one wakes. Only a thread with no parent in the agent tree, not supervised and not archived, can be promoted; a meta refuses settle and archive (demote it first), a tree snooze on a meta snoozes the meta alone, and tree snoozes and settles above one leave it out. Existing thread lifecycle rules apply. Settling this thread, or its tree, takes effect when your turn ends, returning settlesWhenTurnEnds=true; for this thread alone, a turn that fails or is interrupted, or a queued message, leaves it active.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     action: Schema.Literals([
@@ -44,6 +44,8 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
       "archive",
       "unarchive",
       "mark_unread",
+      "promote_meta",
+      "demote_meta",
     ]),
     snoozedUntil: Schema.optional(IsoDateTime),
     scope: Schema.optional(ThreadSnoozeScope),
