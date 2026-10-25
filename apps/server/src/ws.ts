@@ -100,6 +100,7 @@ import {
   WS_METHODS,
   WsRpcGroup,
   ChatChannelRpcGroup,
+  OrganPresetRpcGroup,
   PodRuntimeRpcGroup,
   UsageRpcGroup,
   ServerSettings as ServerSettingsSchema,
@@ -127,6 +128,7 @@ import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as AgentRolePresetService from "./agentRoles/AgentRolePresetService.ts";
+import * as OrganPresetService from "./organs/OrganPresetService.ts";
 import * as ChatChannelService from "./chat/ChatChannelService.ts";
 import * as PodRuntimeService from "./pod/PodRuntimeService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
@@ -265,7 +267,10 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 
 const clientSettingsEqual = Schema.toEquivalence(ServerSettingsSchema);
 
-/** A role preset edit changes nothing clients see here; agentRoles.subscribe carries it. */
+/**
+ * A role or organ preset edit changes nothing clients see here; agentRoles.subscribe
+ * and organPresets.subscribe carry them.
+ */
 export const clientSettingsUpdates = <E, R>(changes: Stream.Stream<ServerSettingsSchema, E, R>) =>
   changes.pipe(
     Stream.map((settings) => ServerSettings.redactServerSettingsForClient(settings)),
@@ -566,7 +571,7 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-// Chat channel, pod and usage RPCs have their own handler layers; see ChatChannelRpcGroup.
+// Chat channel, organ preset, pod and usage RPCs have their own handler layers; see ChatChannelRpcGroup.
 const ServerCoreWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.chatChannelsSubscribe,
   WS_METHODS.chatChannelsMutate,
@@ -582,6 +587,10 @@ const ServerCoreWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.serverGetUsageSummary,
   WS_METHODS.serverRefreshUsageRates,
   WS_METHODS.serverGetUsageThreadTree,
+  WS_METHODS.organPresetsSubscribe,
+  WS_METHODS.organPresetsSave,
+  WS_METHODS.organPresetsRemove,
+  WS_METHODS.organPresetsReset,
 );
 const ServerChatChannelRpcGroup = ChatChannelRpcGroup.middleware(RpcInstrumentation);
 
@@ -597,6 +606,7 @@ const layerChatChannelRpc = ServerChatChannelRpcGroup.toLayer(
 );
 const ServerPodRuntimeRpcGroup = PodRuntimeRpcGroup.middleware(RpcInstrumentation);
 const ServerUsageRpcGroup = UsageRpcGroup.middleware(RpcInstrumentation);
+const ServerOrganPresetRpcGroup = OrganPresetRpcGroup.middleware(RpcInstrumentation);
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
@@ -3162,6 +3172,18 @@ const layerUsageRpc = ServerUsageRpcGroup.toLayer(
   }),
 );
 
+const layerOrganPresetRpc = ServerOrganPresetRpcGroup.toLayer(
+  Effect.gen(function* () {
+    const organPresets = yield* OrganPresetService.OrganPresetService;
+    return ServerOrganPresetRpcGroup.of({
+      [WS_METHODS.organPresetsSubscribe]: (input) => organPresets.subscribe(input),
+      [WS_METHODS.organPresetsSave]: (input) => organPresets.save(input),
+      [WS_METHODS.organPresetsRemove]: (input) => organPresets.remove(input),
+      [WS_METHODS.organPresetsReset]: (input) => organPresets.reset(input),
+    });
+  }),
+);
+
 // RpcServer's default sends a socket-level Defect frame instead, and the client
 // ends every pending request on the socket with it.
 export const WS_RPC_SERVER_OPTIONS = {
@@ -3252,6 +3274,7 @@ export const layer = Layer.unwrap(
               layerChatChannelRpc,
               layerPodRuntimeRpc,
               layerUsageRpc,
+              layerOrganPresetRpc,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Request fibers run in the handlers' context, so this reporter sees

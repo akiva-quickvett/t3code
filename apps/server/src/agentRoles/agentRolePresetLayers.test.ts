@@ -9,7 +9,11 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   type AgentRolePresetEdit,
   applyAgentRolePresetEdit,
+  applyPresetEdit,
   layerAgentRolePresets,
+  layerPresets,
+  type PresetEdit,
+  type PresetSettings,
 } from "./agentRolePresetLayers.ts";
 
 const preset = (id: string, label = id): AgentRolePreset => ({
@@ -137,5 +141,48 @@ describe("applyAgentRolePresetEdit", () => {
     expect(edit(settings, { type: "reset", scope: environment }).environment).toEqual(
       none.environment,
     );
+  });
+});
+
+describe("layerPresets", () => {
+  interface Shelf {
+    readonly id: string;
+    readonly label: string;
+    readonly slots: number;
+  }
+  const shelf = (id: string, slots: number): Shelf => ({ id, label: id, slots });
+  const shelves = [shelf("small", 1), shelf("large", 4)];
+  const empty: PresetSettings<Shelf> = {
+    environment: { overrides: {}, removed: [] },
+    projects: {},
+  };
+
+  it("layers any preset with an id and a label like role presets", () => {
+    const settings = [
+      { type: "save", scope: { type: "environment" }, preset: shelf("large", 6) },
+      { type: "save", scope: { type: "project", projectId }, preset: shelf("large", 8) },
+      { type: "remove", scope: { type: "environment" }, id: "small" },
+    ] satisfies ReadonlyArray<PresetEdit<Shelf>>;
+    const edited = settings.reduce(
+      (current, next) => applyPresetEdit({ defaults: shelves, settings: current, edit: next }),
+      empty,
+    );
+    const slots = (project?: ProjectId) =>
+      layerPresets({ defaults: shelves, settings: edited, projectId: project }).presets.map(
+        (entry) => [entry.preset.id, entry.preset.slots, entry.source],
+      );
+
+    expect(slots()).toEqual([["large", 6, "environment"]]);
+    expect(slots(projectId)).toEqual([["large", 8, "project"]]);
+    expect(layerPresets({ defaults: shelves, settings: edited }).removed).toEqual([
+      { id: "small", label: "small", removedIn: "environment" },
+    ]);
+    expect(
+      applyPresetEdit({
+        defaults: shelves,
+        settings: edited,
+        edit: { type: "reset", scope: { type: "environment" } },
+      }).environment,
+    ).toEqual(empty.environment);
   });
 });

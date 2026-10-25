@@ -112,6 +112,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverReportHostPowerState]: AuthEnvironmentMaintainScope,
   [WS_METHODS.serverGetBackgroundPolicy]: AuthOrchestrationReadScope,
   [WS_METHODS.agentRolesSubscribe]: AuthOrchestrationReadScope,
+  [WS_METHODS.organPresetsSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.chatChannelsSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.scheduledTasksList]: AuthOrchestrationReadScope,
   [WS_METHODS.scheduledTasksSubscribe]: AuthOrchestrationReadScope,

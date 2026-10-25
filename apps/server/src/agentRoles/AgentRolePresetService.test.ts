@@ -184,10 +184,23 @@ it("says why a preset cannot start", () => {
     kind: "model",
     reason: "claudeAgent does not offer claude-opus-9.",
   });
-  assert.deepEqual(list.presets.find((preset) => preset.id === "review-t3-grok")?.unavailable, {
-    kind: "provider",
-    reason: "No cursor provider is configured.",
+  assert.deepEqual(
+    list.presets.find((preset) => preset.id === "review-t3-grok")?.resolvedModelSelection,
+    {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-opus-5-5",
+      options: [{ id: "effort", value: "high" }],
+    },
+  );
+  const withoutProviders = AgentRolePresetService.buildAgentRolePresetList({
+    settings,
+    providers: [],
+    projectId: undefined,
   });
+  assert.deepEqual(
+    withoutProviders.presets.find((preset) => preset.id === "review-t3-grok")?.unavailable,
+    { kind: "provider", reason: "No claudeAgent provider is configured." },
+  );
 });
 
 it("finds a thread's preset by a loosely typed id", () => {

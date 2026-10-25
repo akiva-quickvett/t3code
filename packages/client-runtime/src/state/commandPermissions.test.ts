@@ -90,6 +90,9 @@ describe("command permissions", () => {
     WS_METHODS.agentRolesSave,
     WS_METHODS.agentRolesRemove,
     WS_METHODS.agentRolesReset,
+    WS_METHODS.organPresetsSave,
+    WS_METHODS.organPresetsRemove,
+    WS_METHODS.organPresetsReset,
     WS_METHODS.chatChannelsMutate,
     WS_METHODS.chatChannelsGetTemplateStatus,
   ])("requires the destination settings grant to edit role presets and messaging (%s)", (method) =>
