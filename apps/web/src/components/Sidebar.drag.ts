@@ -126,9 +126,6 @@ export function createSidebarSortingStrategy(input: {
     let cardHeight = input.cardHeight;
     let slimHeight = input.slimHeight;
     let headerScale: number | undefined;
-    // Nested agent-tree rows are slim, never reordered, and move with their root.
-    const childrenByRootKey = new Map<string, SidebarListItem[]>();
-    let rootKey: string | null = null;
     for (const [index, item] of items.entries()) {
       if (item.kind === "marker") {
         if (isShelfHeader(item)) {
@@ -137,15 +134,6 @@ export function createSidebarSortingStrategy(input: {
         }
         continue;
       }
-      if (item.kind === "child") {
-        slimHeight ??= rects[index]?.height;
-        if (rootKey === null) continue;
-        const children = childrenByRootKey.get(rootKey);
-        if (children === undefined) childrenByRootKey.set(rootKey, [item]);
-        else children.push(item);
-        continue;
-      }
-      rootKey = item.key;
       if (item.section === "pinned" || item.section === "active" || item.section === "working")
         cardHeight ??= rects[index]?.height;
       else slimHeight ??= rects[index]?.height;
@@ -182,7 +170,7 @@ export function createSidebarSortingStrategy(input: {
     groups.settled = visible.map((key) => ({ kind: "thread", key, section: "settled" }));
     const projected: SidebarListItem[] = [];
     const push = (group: readonly ThreadItem[]) => {
-      for (const item of group) projected.push(item, ...(childrenByRootKey.get(item.key) ?? []));
+      projected.push(...group);
     };
     const marker = (name: SidebarListMarker) => projected.push({ kind: "marker", marker: name });
     const section = (name: "active" | "settled") => {

@@ -46,27 +46,8 @@ export type SidebarView = "chat" | "orchestration";
 
 export interface UiAgentTreeState {
   sidebarView: SidebarView;
-  /**
-   * `sidebarView === "orchestration"`, kept in step by every writer for readers
-   * of the old agent-tree flag until they move to `sidebarView`.
-   */
-  sidebarAgentTreeEnabled: boolean;
   /** A meta's scoped thread key, `"no-meta"`, or null for the first tab. */
   selectedMetaThreadKey: string | null;
-  /**
-   * Thread keys whose children show. Kept for the session only: children start
-   * collapsed, and a persisted set would only grow.
-   */
-  agentTreeExpandedKeys: Readonly<Record<string, true>>;
-  /**
-   * Bumped by "Show agent tree" so the sidebar opens and scrolls to the thread.
-   * `scrolled` keeps a remounted sidebar (the mobile sheet) from scrolling again.
-   */
-  agentTreeReveal: {
-    readonly threadKey: string;
-    readonly request: number;
-    readonly scrolled: boolean;
-  } | null;
 }
 
 export interface UiThreadState {
@@ -90,10 +71,7 @@ const initialState: UiState = {
   projectOrder: [],
   sidebarProjectScopeKey: null,
   sidebarView: "chat",
-  sidebarAgentTreeEnabled: false,
   selectedMetaThreadKey: null,
-  agentTreeExpandedKeys: {},
-  agentTreeReveal: null,
   threadLastVisitedAtById: {},
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
@@ -184,8 +162,6 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
       ? sanitizeStringArray(parsed.projectOrderCwds).map(legacyProjectCwdPreferenceKey)
       : sanitizeStringArray(parsed.projectOrder);
 
-  const sidebarView = parseSidebarView(parsed);
-
   return {
     projectExpandedById,
     projectOrder,
@@ -196,11 +172,8 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
         : {},
     defaultAdvertisedEndpointKey: sanitizeOptionalKey(parsed.defaultAdvertisedEndpointKey),
     sidebarProjectScopeKey: sanitizeOptionalKey(parsed.sidebarProjectScopeKey),
-    sidebarView,
-    sidebarAgentTreeEnabled: sidebarView === "orchestration",
+    sidebarView: parseSidebarView(parsed),
     selectedMetaThreadKey: sanitizeOptionalKey(parsed.selectedMetaThreadKey),
-    agentTreeExpandedKeys: initialState.agentTreeExpandedKeys,
-    agentTreeReveal: null,
     pullRequestMergeMethod: isPullRequestMergeMethod(parsed.pullRequestMergeMethod)
       ? parsed.pullRequestMergeMethod
       : initialState.pullRequestMergeMethod,
@@ -388,17 +361,11 @@ export function setSidebarProjectScopeKey(state: UiState, projectKey: string | n
 }
 
 export function setSidebarView(state: UiState, view: SidebarView): UiState {
-  return state.sidebarView === view
-    ? state
-    : { ...state, sidebarView: view, sidebarAgentTreeEnabled: view === "orchestration" };
+  return state.sidebarView === view ? state : { ...state, sidebarView: view };
 }
 
 export function toggleSidebarView(state: UiState): UiState {
   return setSidebarView(state, state.sidebarView === "orchestration" ? "chat" : "orchestration");
-}
-
-export function setSidebarAgentTreeEnabled(state: UiState, enabled: boolean): UiState {
-  return setSidebarView(state, enabled ? "orchestration" : "chat");
 }
 
 export function setSelectedMetaThreadKey(state: UiState, key: string | null): UiState {
@@ -406,42 +373,6 @@ export function setSelectedMetaThreadKey(state: UiState, key: string | null): Ui
   return state.selectedMetaThreadKey === nextKey
     ? state
     : { ...state, selectedMetaThreadKey: nextKey };
-}
-
-export function setAgentTreeExpanded(
-  state: UiState,
-  threadKey: string,
-  expanded: boolean,
-): UiState {
-  if ((state.agentTreeExpandedKeys[threadKey] === true) === expanded) return state;
-  const agentTreeExpandedKeys = { ...state.agentTreeExpandedKeys };
-  if (expanded) agentTreeExpandedKeys[threadKey] = true;
-  else delete agentTreeExpandedKeys[threadKey];
-  return { ...state, agentTreeExpandedKeys };
-}
-
-/** Switches to the orchestration view and expands `ancestorKeys` so `threadKey`'s row shows. */
-export function showAgentTree(
-  state: UiState,
-  threadKey: string | null,
-  ancestorKeys: readonly string[],
-): UiState {
-  const agentTreeExpandedKeys = { ...state.agentTreeExpandedKeys };
-  for (const key of ancestorKeys) agentTreeExpandedKeys[key] = true;
-  return {
-    ...setSidebarView(state, "orchestration"),
-    agentTreeExpandedKeys,
-    agentTreeReveal:
-      threadKey === null
-        ? state.agentTreeReveal
-        : { threadKey, request: (state.agentTreeReveal?.request ?? 0) + 1, scrolled: false },
-  };
-}
-
-export function markAgentTreeRevealScrolled(state: UiState): UiState {
-  return state.agentTreeReveal === null || state.agentTreeReveal.scrolled
-    ? state
-    : { ...state, agentTreeReveal: { ...state.agentTreeReveal, scrolled: true } };
 }
 
 function setPullRequestMergeMethod(state: UiState, method: PullRequestMergeMethod): UiState {
@@ -535,11 +466,7 @@ interface UiStateStore extends UiState {
   setSidebarProjectScopeKey: (projectKey: string | null) => void;
   setSidebarView: (view: SidebarView) => void;
   toggleSidebarView: () => void;
-  setSidebarAgentTreeEnabled: (enabled: boolean) => void;
   setSelectedMetaThreadKey: (key: string | null) => void;
-  setAgentTreeExpanded: (threadKey: string, expanded: boolean) => void;
-  showAgentTree: (threadKey: string | null, ancestorKeys: readonly string[]) => void;
-  markAgentTreeRevealScrolled: () => void;
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
@@ -563,14 +490,7 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setSidebarProjectScopeKey(state, projectKey)),
   setSidebarView: (view) => set((state) => setSidebarView(state, view)),
   toggleSidebarView: () => set((state) => toggleSidebarView(state)),
-  setSidebarAgentTreeEnabled: (enabled) =>
-    set((state) => setSidebarAgentTreeEnabled(state, enabled)),
   setSelectedMetaThreadKey: (key) => set((state) => setSelectedMetaThreadKey(state, key)),
-  setAgentTreeExpanded: (threadKey, expanded) =>
-    set((state) => setAgentTreeExpanded(state, threadKey, expanded)),
-  showAgentTree: (threadKey, ancestorKeys) =>
-    set((state) => showAgentTree(state, threadKey, ancestorKeys)),
-  markAgentTreeRevealScrolled: () => set((state) => markAgentTreeRevealScrolled(state)),
   setPullRequestMergeMethod: (method) => set((state) => setPullRequestMergeMethod(state, method)),
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),

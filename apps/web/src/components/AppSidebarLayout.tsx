@@ -256,12 +256,10 @@ function ProjectProjectionRetention() {
   return null;
 }
 
-// The view toggle and "Show in agent tree" also come from the command palette
-// and the keybinding, which act outside the sidebar provider, so a view switch or
-// a reveal request opens the sidebar from in here. A focused desktop preview
-// forwards the toggle shortcut as a menu action.
+// The view toggle also comes from the command palette and the keybinding, which
+// act outside the sidebar provider, so a view switch opens the sidebar from in
+// here. A focused desktop preview forwards the toggle shortcut as a menu action.
 function AgentTreeSidebarControl() {
-  const request = useUiStateStore((state) => state.agentTreeReveal?.request ?? null);
   const sidebarView = useUiStateStore((state) => state.sidebarView);
   const { isMobile, setOpen, setOpenMobile } = useSidebar();
   const legacySidebarEnabled = useLegacySidebarEnabled();
@@ -273,15 +271,13 @@ function AgentTreeSidebarControl() {
       }
     });
   }, [legacySidebarEnabled]);
-  const handledRef = useRef({ request, sidebarView });
+  const handledViewRef = useRef(sidebarView);
   useEffect(() => {
-    const handled = handledRef.current;
-    handledRef.current = { request, sidebarView };
-    const revealed = request !== null && request !== handled.request;
-    if (!revealed && sidebarView === handled.sidebarView) return;
+    if (sidebarView === handledViewRef.current) return;
+    handledViewRef.current = sidebarView;
     if (isMobile) setOpenMobile(true);
     else void setOpen(true);
-  }, [isMobile, request, setOpen, setOpenMobile, sidebarView]);
+  }, [isMobile, setOpen, setOpenMobile, sidebarView]);
   return null;
 }
 
