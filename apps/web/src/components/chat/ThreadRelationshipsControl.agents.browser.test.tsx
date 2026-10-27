@@ -93,7 +93,10 @@ vi.mock(import("../ui/tooltip"), async () => {
   };
 });
 
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { selectThreadRightPanelState, useRightPanelStore } from "../../rightPanelStore";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
+import { pendingTimelineReveal } from "./timelineReveal";
 
 let root: Root;
 let container: HTMLDivElement;
@@ -1241,3 +1244,77 @@ it.each(["source", "target"])(
     }
   },
 );
+
+function cellFixture(relationshipToParent: "subagent" | "fork") {
+  const environmentId = EnvironmentId.make("test");
+  const pod = {
+    id: "pod",
+    title: "Pod",
+    status: "running",
+    lineage: { parentThreadId: null, relationshipToParent: null },
+  };
+  const cell = {
+    id: "cell",
+    title: "Review cell",
+    status: "running",
+    lineage: { parentThreadId: "pod", relationshipToParent },
+  };
+  state.shells = [pod, cell].map((source) => ({ environmentId, source }));
+  return { environmentId, pod, cell };
+}
+
+const projectionOf = (thread: object) => ({
+  thread: { ...thread, activeProviderThreadId: null },
+  runs: [],
+  providerThreads: [],
+  providerSessions: [],
+  contextTransfers: [],
+  subagents: [],
+});
+const menuItem = (label: string) =>
+  [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (item) => item.textContent === label,
+  );
+
+it("opens a cell's parent chat with the cell's row revealed", async () => {
+  const { environmentId, cell } = cellFixture("subagent");
+  state.projection = projectionOf(cell);
+  await render(
+    <ThreadRelationshipsPanel environmentId={environmentId} threadId={ThreadId.make("cell")} />,
+  );
+  await click(byLabel("More thread actions"));
+  await vi.waitFor(() => expect(menuItem("Show in parent chat")).toBeDefined());
+  await click(menuItem("Show in parent chat")!);
+
+  expect(state.navigate).toHaveBeenCalledWith(
+    expect.objectContaining({ params: expect.objectContaining({ threadId: "pod" }) }),
+  );
+  const parentKey = scopedThreadKey(scopeThreadRef(environmentId, ThreadId.make("pod")));
+  expect(pendingTimelineReveal(parentKey)?.childThreadId).toBe("cell");
+});
+
+it("offers no parent chat to a fork, whose parent holds no row for it", async () => {
+  const { environmentId, cell } = cellFixture("fork");
+  state.projection = projectionOf(cell);
+  await render(
+    <ThreadRelationshipsPanel environmentId={environmentId} threadId={ThreadId.make("cell")} />,
+  );
+  expect(allByLabel("More thread actions")).toHaveLength(0);
+});
+
+it("opens a child cell beside the current chat", async () => {
+  const { environmentId, pod } = cellFixture("subagent");
+  state.projection = projectionOf(pod);
+  await render(
+    <ThreadRelationshipsPanel environmentId={environmentId} threadId={ThreadId.make("pod")} />,
+  );
+  await click(byLabel("Open Review cell beside the chat"));
+
+  const panel = selectThreadRightPanelState(
+    useRightPanelStore.getState().byThreadKey,
+    scopeThreadRef(environmentId, ThreadId.make("pod")),
+  );
+  expect(panel.isOpen).toBe(true);
+  expect(panel.surfaces).toContainEqual({ id: "thread", kind: "thread", threadId: "cell" });
+  expect(state.navigate).not.toHaveBeenCalled();
+});

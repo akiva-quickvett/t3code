@@ -3,6 +3,7 @@ import type { OrchestrationRootRollup } from "@t3tools/client-runtime/state/orch
 import type { EnvironmentShellStatus } from "@t3tools/client-runtime/state/shell";
 import {
   EnvironmentId,
+  type OrchestrationStatsSnapshot,
   type OrchestrationV2ThreadShell,
   ProjectId,
   ProviderInstanceId,
@@ -16,6 +17,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import "~/index.css";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
 
 import { StaleBanner } from "./StaleBanner";
 import { TreeRow, type TreeRowProps } from "./TreeRow";
@@ -48,6 +50,15 @@ const h = await vi.hoisted(async () => {
       Atom.make<EnvironmentShellStatus>("live"),
     ),
     rollupAtom: Atom.family((_rootKey: string) => Atom.make<OrchestrationRootRollup | null>(null)),
+    // Stands in for the strip's stats stream; a mounted strip keeps its node alive.
+    statsAtom: Atom.family((_environmentId: string) =>
+      Atom.make(
+        AsyncResult.initial<OrchestrationStatsSnapshot, never>() as AsyncResult.AsyncResult<
+          OrchestrationStatsSnapshot,
+          never
+        >,
+      ),
+    ),
     renders: new Map<string, number>(),
     openMenu: vi.fn(),
     menuThreadRefs: [] as ScopedThreadRef[],
@@ -85,6 +96,11 @@ vi.mock("../../state/shell", () => ({
 vi.mock("../../state/environments", () => ({
   useEnvironment: () => ({ label: "homelab" }),
 }));
+vi.mock("./StatsStrip", async () => {
+  const { createSliceBurnReader } =
+    await import("@t3tools/client-runtime/state/orchestration-stats");
+  return { sliceBurn: createSliceBurnReader(h.registry, h.statsAtom) };
+});
 vi.mock("../../hooks/useThreadActionMenu", () => ({
   useThreadActionMenu: (input: { readonly threadRef: ScopedThreadRef }) => {
     h.menuThreadRefs.push(input.threadRef);
@@ -296,6 +312,52 @@ describe("TreeRow", () => {
     const dot = rowElement("a").querySelector<HTMLElement>("[data-dot]")!;
     expect(getComputedStyle(dot.parentElement!).opacity).toBe("1");
     expect(getComputedStyle(rowElement("a").querySelector(".truncate")!).opacity).toBe("0.55");
+  });
+
+  it("reads a slice's burn on hover, so a stats push renders no row", async () => {
+    const burnSnapshot = (usdPerHour: number): OrchestrationStatsSnapshot => ({
+      activeAgents: { runningTurns: 1, liveSessions: 1, idleSessions: 0 },
+      burn: {
+        state: "ready",
+        tokensPerMinute: 1_000,
+        usdPerHour,
+        approximate: false,
+        perMeta: {},
+        perSlice: { [ThreadId.make("slice")]: { tokensPerMinute: 1_000, usdPerHour } },
+      },
+      host: { verdict: "ok", cpu: null, ram: null, swap: null, load: null },
+    });
+    const tooltipText = () =>
+      document.querySelector('[data-slot="tooltip-popup"]')?.textContent ?? null;
+    const hoverSlice = async () => {
+      await userEvent.unhover(rowElement("slice"));
+      await vi.waitFor(() => expect(tooltipText()).toBeNull());
+      await userEvent.hover(rowElement("slice"));
+      await vi.waitFor(() => expect(tooltipText()).not.toBeNull());
+      return tooltipText();
+    };
+    const releaseStrip = h.registry.mount(h.statsAtom(environmentId));
+    try {
+      h.registry.set(h.statsAtom(environmentId), AsyncResult.success(burnSnapshot(1.1)));
+      setThreads([thread("slice"), thread("pod")]);
+      await render([
+        rowProps("slice", { kind: "slice", depth: 0 }),
+        rowProps("pod", { kind: "pod", depth: 0 }),
+      ]);
+      expect(await hoverSlice()).toBe("slice · burn $1.1/h");
+
+      h.renders.clear();
+      await act(() =>
+        h.registry.set(h.statsAtom(environmentId), AsyncResult.success(burnSnapshot(2.4))),
+      );
+      expect([...h.renders]).toEqual([]);
+      expect(await hoverSlice()).toBe("slice · burn $2.4/h");
+    } finally {
+      releaseStrip();
+    }
+    // With no strip holding the stream there is no figure, only the title.
+    await act(async () => {});
+    expect(await hoverSlice()).toBe("slice");
   });
 
   it("mounts the shared thread action menu only on its own row's first click", async () => {

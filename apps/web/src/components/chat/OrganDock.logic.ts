@@ -108,8 +108,9 @@ export function organDockSummaryText(organs: ReadonlyArray<OrganDockOrgan>): str
 }
 
 /**
- * Child threads of running organs' cells. The background-work banner would list these same
- * cells and, ranking ahead of the dock, hide it; callers drop them from its tasks.
+ * Child threads of the cells the dock lists: each running organ's latest round. The
+ * background-work banner would list these same cells and, ranking ahead of the dock, hide it;
+ * callers drop them from its tasks.
  */
 export function runningOrganCellThreadIds(
   groups: ReadonlyArray<OrganGroup>,
@@ -117,10 +118,8 @@ export function runningOrganCellThreadIds(
   const ids = new Set<ThreadId>();
   for (const group of groups) {
     if (!group.running) continue;
-    for (const round of group.rounds) {
-      for (const cell of round.cells) {
-        if (cell.childThreadId !== null) ids.add(cell.childThreadId);
-      }
+    for (const cell of group.rounds.at(-1)?.cells ?? []) {
+      if (cell.childThreadId !== null) ids.add(cell.childThreadId);
     }
   }
   return ids;

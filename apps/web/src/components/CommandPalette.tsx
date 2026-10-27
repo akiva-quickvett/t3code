@@ -258,6 +258,7 @@ import type { ChatComposerHandle } from "./chat/ChatComposer";
 import { getProjectOrderKey } from "../logicalProject";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { readNavigationParentRef } from "../state/agentTree";
+import { useOrchestrationEnvironmentIds } from "./sidebar/orchestrationEnvironments";
 import {
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
@@ -784,10 +785,9 @@ function OpenCommandPaletteDialog(props: {
   const activeThreadServerConfig = serverConfigs.get(
     activeThread?.environmentId ?? ("" as EnvironmentId),
   );
+  const orchestrationEnvironmentIds = useOrchestrationEnvironmentIds();
   const orchestrationViewAvailable =
-    !legacySidebarEnabled &&
-    serverConfigs.get(activeThread?.environmentId ?? primaryEnvironmentId ?? ("" as EnvironmentId))
-      ?.environment.capabilities.orchestrationMetas === true;
+    !legacySidebarEnabled && orchestrationEnvironmentIds.length > 0;
   const activeThreadReferenceCopyTarget =
     referenceThreadRef === null || (pathname === "/pull-requests" && !openPanelPullRequestUrl)
       ? null
