@@ -121,6 +121,9 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.subscribeBackgroundPolicy)).toBe(
       AuthOrchestrationReadScope,
     );
+    expect(requiredScopeForRpcMethod(WS_METHODS.orchestrationSubscribeStats)).toBe(
+      AuthOrchestrationReadScope,
+    );
   });
 
   it("keeps webhook delivery logs, which hold request bodies, behind operate scope", () => {
@@ -395,6 +398,47 @@ describe("organ preset authorization", () => {
         requiredPermission: AuthSettingsWriteScope,
       });
       expect(saved).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+});
+
+describe("orchestration stats authorization", () => {
+  const method = WS_METHODS.orchestrationSubscribeStats;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+    ),
+  );
+  const snapshot = {
+    activeAgents: { runningTurns: 1, liveSessions: 2, idleSessions: 1 },
+    burn: {
+      state: "warming" as const,
+      tokensPerMinute: 0,
+      usdPerHour: 0,
+      approximate: false,
+      perMeta: {},
+      perSlice: {},
+    },
+    host: { verdict: "ok" as const, cpu: 0.3, ram: 0.5, swap: null, load: 0.25 },
+  };
+  const subscribeWith = (scopes: Parameters<typeof RpcAuthorization.layer>[0]) =>
+    RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(method, () => Stream.make(snapshot)),
+          RpcAuthorization.layer(scopes),
+        ),
+      ),
+      Effect.flatMap((client) => client[method]({}).pipe(Stream.runCollect)),
+    );
+
+  it.effect("streams stats to an orchestration reader and refuses other clients", () =>
+    Effect.gen(function* () {
+      expect(Array.from(yield* subscribeWith([AuthOrchestrationReadScope]))).toEqual([snapshot]);
+      expect(yield* subscribeWith([AuthDiagnosticsReadScope]).pipe(Effect.flip)).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+        requiredPermission: AuthOrchestrationReadScope,
+      });
     }).pipe(Effect.scoped),
   );
 });
