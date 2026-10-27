@@ -30,6 +30,7 @@ Linked worktrees default to their own `.t3/userdata`, even when `T3CODE_HOME` is
 The main checkout defaults to `~/.t3/dev/userdata`. An explicit `--home-dir` wins in both cases.
 Never run a development server against the live `~/.t3/userdata`.
 See [test data](../../AGENTS.md#test-data) for copying a consistent database snapshot.
+`vp run seed-orchestration-tree`, with the dev server stopped, seeds the orchestration sign-off tree.
 
 Read ports from the `[dev-runner]` output. Worktrees derive stable preferences from their paths,
 but occupied ports can shift them. `T3CODE_PORT_OFFSET` or `T3CODE_DEV_INSTANCE` can select a
