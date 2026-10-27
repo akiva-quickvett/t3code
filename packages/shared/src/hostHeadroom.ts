@@ -20,8 +20,11 @@ type HostSample = Pick<
 >;
 
 export function hostPressure(sample: HostSample): HostPressure {
+  // Used bytes over total, not `1 - available / total`, so a boundary like 85% compares exactly.
   const ram =
-    sample.totalMemoryBytes > 0 ? 1 - sample.availableMemoryBytes / sample.totalMemoryBytes : null;
+    sample.totalMemoryBytes > 0
+      ? (sample.totalMemoryBytes - sample.availableMemoryBytes) / sample.totalMemoryBytes
+      : null;
   const swap =
     sample.swapUsedBytes !== undefined &&
     sample.swapTotalBytes !== undefined &&
@@ -35,41 +38,51 @@ export function hostPressure(sample: HostSample): HostPressure {
   return { cpu: sample.cpuUtilization, ram, swap, load };
 }
 
-const RANK: Record<"ok" | "low" | "exhausted", number> = { ok: 0, low: 1, exhausted: 2 };
+export interface HostResourceVerdicts {
+  readonly cpu: HostHeadroom;
+  readonly ram: HostHeadroom;
+  readonly swap: HostHeadroom;
+  readonly load: HostHeadroom;
+}
 
-const worst = (verdicts: ReadonlyArray<"ok" | "low" | "exhausted">) =>
-  verdicts.reduce((left, right) => (RANK[right] > RANK[left] ? right : left), "ok");
+const RANK: Record<HostHeadroom, number> = { unknown: -1, ok: 0, low: 1, exhausted: 2 };
+
+const band = (value: number | null, low: number, exhausted: number): HostHeadroom =>
+  value === null ? "unknown" : value > exhausted ? "exhausted" : value > low ? "low" : "ok";
 
 /**
- * Fixed thresholds: RAM available below 15% is low and below 5% exhausted; swap
- * used above 50% low and above 90% exhausted; 1-minute load per CPU above 1.5
- * low and above 3 exhausted; CPU above 90% on this and the previous sample low.
- * The server runs on the host it reports, so `os.*` readings are the host's.
+ * Fixed thresholds over used fractions: RAM used above 85% is low and above 95%
+ * exhausted; swap used above 50% low and above 90% exhausted; 1-minute load per
+ * CPU above 1.5 low and above 3 exhausted; CPU above 90% on this and the
+ * previous sample low. A resource the host did not report is `unknown`.
+ */
+export function hostResourceVerdicts(
+  pressure: HostPressure,
+  previousCpu: number | null = null,
+): HostResourceVerdicts {
+  return {
+    cpu:
+      pressure.cpu === null
+        ? "unknown"
+        : pressure.cpu > 0.9 && previousCpu !== null && previousCpu > 0.9
+          ? "low"
+          : "ok",
+    ram: band(pressure.ram, 0.85, 0.95),
+    swap: band(pressure.swap, 0.5, 0.9),
+    load: band(pressure.load, 1.5, 3),
+  };
+}
+
+/**
+ * The worst resource verdict. Unknown only when RAM is: a host without swap,
+ * load or a CPU reading still has a verdict. The server runs on the host it
+ * reports, so `os.*` readings are the host's.
  */
 export function hostHeadroom(sample: HostSample, previous?: HostSample | null): HostHeadroom {
-  if (sample.totalMemoryBytes <= 0) return "unknown";
-  // From the raw bytes, not `1 - ram`, so a boundary like 15% compares exactly.
-  const ramAvailable = sample.availableMemoryBytes / sample.totalMemoryBytes;
-  const pressure = hostPressure(sample);
-  const previousCpu = previous?.cpuUtilization ?? null;
-  return worst([
-    ramAvailable < 0.05 ? "exhausted" : ramAvailable < 0.15 ? "low" : "ok",
-    pressure.swap === null
-      ? "ok"
-      : pressure.swap > 0.9
-        ? "exhausted"
-        : pressure.swap > 0.5
-          ? "low"
-          : "ok",
-    pressure.load === null
-      ? "ok"
-      : pressure.load > 3
-        ? "exhausted"
-        : pressure.load > 1.5
-          ? "low"
-          : "ok",
-    pressure.cpu !== null && pressure.cpu > 0.9 && previousCpu !== null && previousCpu > 0.9
-      ? "low"
-      : "ok",
-  ]);
+  const verdicts = hostResourceVerdicts(hostPressure(sample), previous?.cpuUtilization ?? null);
+  if (verdicts.ram === "unknown") return "unknown";
+  return [verdicts.cpu, verdicts.swap, verdicts.load].reduce<HostHeadroom>(
+    (left, right) => (RANK[right] > RANK[left] ? right : left),
+    verdicts.ram,
+  );
 }

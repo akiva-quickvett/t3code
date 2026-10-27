@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { hostHeadroom, hostPressure } from "./hostHeadroom.ts";
+import { hostHeadroom, hostPressure, hostResourceVerdicts } from "./hostHeadroom.ts";
 
 const healthy = {
   cpuUtilization: 0.3,
@@ -59,5 +59,21 @@ describe("hostHeadroom", () => {
       "unknown",
     );
     expect(hostPressure({ ...healthy, totalMemoryBytes: 0 }).ram).toBeNull();
+  });
+});
+
+describe("hostResourceVerdicts", () => {
+  it("judges each resource from the snapshot's fractions", () => {
+    expect(
+      hostResourceVerdicts(
+        hostPressure({ ...healthy, availableMemoryBytes: 10, swapUsedBytes: 95 }),
+      ),
+    ).toEqual({ cpu: "ok", ram: "low", swap: "exhausted", load: "ok" });
+    expect(hostResourceVerdicts({ cpu: 0.95, ram: 0.2, swap: null, load: null }, 0.95)).toEqual({
+      cpu: "low",
+      ram: "ok",
+      swap: "unknown",
+      load: "unknown",
+    });
   });
 });

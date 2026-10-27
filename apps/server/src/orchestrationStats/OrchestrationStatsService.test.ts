@@ -7,10 +7,12 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 
@@ -22,7 +24,14 @@ import * as OrchestrationStatsService from "./OrchestrationStatsService.ts";
 
 const MINUTE = 60_000;
 
+/** An event for the domain stream, or a barrier the stream opens once everything before it ran. */
+type Fed = { readonly event: unknown } | { readonly barrier: Deferred.Deferred<void> };
+
 interface Fixture {
+  /** Set when the stats layer is built. */
+  events: Queue.Queue<Fed> | null;
+  /** Fails the next domain stream subscription, then opens this. */
+  failNextSubscription: Deferred.Deferred<void> | null;
   shells: ReadonlyArray<unknown>;
   modelByThread: Map<string, string>;
   host: Omit<HostResourcesSnapshot, "sampledAt">;
@@ -31,6 +40,8 @@ interface Fixture {
 }
 
 const makeFixture = (): Fixture => ({
+  events: null,
+  failNextSubscription: null,
   shells: [],
   modelByThread: new Map(),
   host: {
@@ -47,11 +58,37 @@ const makeFixture = (): Fixture => ({
 });
 
 const statsLayer = (fixture: Fixture) =>
+  Layer.unwrap(
+    Effect.map(Queue.unbounded<Fed>(), (events) => {
+      fixture.events = events;
+      return statsServiceLayer(fixture, events);
+    }),
+  );
+
+const statsServiceLayer = (fixture: Fixture, events: Queue.Queue<Fed>) =>
   OrchestrationStatsService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(Orchestrator.OrchestratorV2)({
-          streamDomainEvents: Stream.never,
+          streamDomainEvents: Stream.unwrap(
+            Effect.sync(() => {
+              const failed = fixture.failNextSubscription;
+              if (failed !== null) {
+                fixture.failNextSubscription = null;
+                return Stream.fromEffect(Deferred.succeed(failed, undefined)).pipe(
+                  Stream.flatMap(() => Stream.fail("unavailable")),
+                );
+              }
+              // One element at a time, so a barrier opens only after the consumer ran what preceded it.
+              return Stream.fromQueue(events).pipe(
+                Stream.flatMap((fed) =>
+                  "barrier" in fed
+                    ? Stream.fromEffect(Deferred.succeed(fed.barrier, undefined)).pipe(Stream.drain)
+                    : Stream.make(fed.event),
+                ),
+              );
+            }),
+          ) as never,
           getThreadRecords: (threadId, _fields, filter) =>
             Effect.succeed({
               runs: (filter?.runIds ?? []).map((id) => ({
@@ -82,12 +119,22 @@ const statsLayer = (fixture: Fixture) =>
     ),
   );
 
+/** Hands events to the service and waits until it has handled them. */
+const feed = (fixture: Fixture, ...events: ReadonlyArray<unknown>) =>
+  Effect.gen(function* () {
+    if (fixture.events === null) return yield* Effect.die("the stats layer is not built");
+    const barrier = yield* Deferred.make<void>();
+    yield* Queue.offerAll(fixture.events, [...events.map((event) => ({ event })), { barrier }]);
+    yield* Deferred.await(barrier);
+  });
+
 const turn = (input: {
   readonly id: string;
   readonly threadId: string;
   readonly atMs: number;
   readonly inputTokens: number;
   readonly outputTokens: number;
+  readonly withoutUsage?: boolean;
 }) =>
   ({
     type: "provider-turn.updated",
@@ -100,13 +147,17 @@ const turn = (input: {
       status: "completed",
       runAttemptId: null,
       completedAt: DateTime.makeUnsafe(input.atMs),
-      turnTokenUsage: {
-        usageScope: "main_agent",
-        usageStatus: "complete",
-        inputTokens: input.inputTokens,
-        outputTokens: input.outputTokens,
-        hasSubagents: false,
-      },
+      ...(input.withoutUsage
+        ? {}
+        : {
+            turnTokenUsage: {
+              usageScope: "main_agent",
+              usageStatus: "complete",
+              inputTokens: input.inputTokens,
+              outputTokens: input.outputTokens,
+              hasSubagents: false,
+            },
+          }),
     },
   }) as never;
 
@@ -143,7 +194,8 @@ describe("OrchestrationStatsService", () => {
       expect((yield* stats.read).burn.state).toBe("warming");
 
       yield* TestClock.setTime(14 * MINUTE);
-      yield* stats.onProviderTurn(
+      yield* feed(
+        fixture,
         turn({ id: "a", threadId: "t", atMs: 14 * MINUTE, inputTokens: 400, outputTokens: 600 }),
       );
       yield* TestClock.setTime(18 * MINUTE);
@@ -154,9 +206,8 @@ describe("OrchestrationStatsService", () => {
         inputTokens: 1000,
         outputTokens: 2000,
       });
-      yield* stats.onProviderTurn(second);
       // A re-emitted terminal turn counts once.
-      yield* stats.onProviderTurn(second);
+      yield* feed(fixture, second, second);
 
       yield* TestClock.setTime(20 * MINUTE);
       expect((yield* stats.read).burn).toEqual({
@@ -180,7 +231,8 @@ describe("OrchestrationStatsService", () => {
     fixture.modelByThread.set("t", "mystery-model");
     return Effect.gen(function* () {
       const stats = yield* OrchestrationStatsService.OrchestrationStatsService;
-      yield* stats.onProviderTurn(
+      yield* feed(
+        fixture,
         turn({ id: "a", threadId: "t", atMs: 0, inputTokens: 100, outputTokens: 100 }),
       );
       expect((yield* stats.read).burn).toMatchObject({
@@ -202,10 +254,12 @@ describe("OrchestrationStatsService", () => {
     ];
     return Effect.gen(function* () {
       const stats = yield* OrchestrationStatsService.OrchestrationStatsService;
-      yield* stats.onProviderTurn(
+      yield* feed(
+        fixture,
         turn({ id: "a", threadId: "cell", atMs: 0, inputTokens: 500, outputTokens: 500 }),
       );
-      yield* stats.onProviderTurn(
+      yield* feed(
+        fixture,
         turn({ id: "b", threadId: "loose", atMs: 0, inputTokens: 1000, outputTokens: 1000 }),
       );
       const { burn } = yield* stats.read;
@@ -235,7 +289,7 @@ describe("OrchestrationStatsService", () => {
           const [greeting] = yield* second;
           expect(greeting).toEqual(yield* stats.read);
           expect(greeting.activeAgents).toEqual({
-            runningTurns: 0,
+            runningTurns: 1,
             liveSessions: 2,
             idleSessions: 1,
           });
@@ -273,6 +327,91 @@ describe("OrchestrationStatsService", () => {
           expect(change.host).toMatchObject({ verdict: "low", cpu: 0.33 });
         }),
       );
+    }).pipe(Effect.provide(statsLayer(fixture)));
+  });
+
+  it.effect("marks the burn approximate for a turn its provider reported no usage for", () => {
+    const fixture = makeFixture();
+    return Effect.gen(function* () {
+      const stats = yield* OrchestrationStatsService.OrchestrationStatsService;
+      yield* feed(
+        fixture,
+        turn({ id: "a", threadId: "t", atMs: 0, inputTokens: 500, outputTokens: 500 }),
+        turn({
+          id: "b",
+          threadId: "t",
+          atMs: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          withoutUsage: true,
+        }),
+      );
+      expect((yield* stats.read).burn).toMatchObject({
+        approximate: true,
+        tokensPerMinute: 100,
+        usdPerHour: 3,
+      });
+
+      // A later update with usage replaces the usage-less record of the same turn.
+      yield* feed(
+        fixture,
+        turn({ id: "b", threadId: "t", atMs: 0, inputTokens: 500, outputTokens: 500 }),
+      );
+      expect((yield* stats.read).burn).toMatchObject({ approximate: false, tokensPerMinute: 200 });
+    }).pipe(Effect.provide(statsLayer(fixture)));
+  });
+
+  it.effect("keeps counting turns after the domain event stream fails", () => {
+    const fixture = makeFixture();
+    return Effect.gen(function* () {
+      const failed = yield* Deferred.make<void>();
+      fixture.failNextSubscription = failed;
+      const stats = yield* OrchestrationStatsService.OrchestrationStatsService;
+      yield* Deferred.await(failed);
+      yield* TestClock.adjust("5 seconds");
+      yield* feed(
+        fixture,
+        turn({ id: "a", threadId: "t", atMs: 0, inputTokens: 500, outputTokens: 500 }),
+      );
+      expect((yield* stats.read).burn.tokensPerMinute).toBe(100);
+    }).pipe(Effect.provide(statsLayer(fixture)));
+  });
+
+  it.effect("pushes a resource changing verdict while the overall verdict holds", () => {
+    const fixture = makeFixture();
+    fixture.host = { ...fixture.host, swapUsedBytes: 95 };
+    return Effect.gen(function* () {
+      const stats = yield* OrchestrationStatsService.OrchestrationStatsService;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const pull = yield* Stream.toPull(stats.subscribe);
+          const [greeting] = yield* pull;
+          expect(greeting.host.verdict).toBe("exhausted");
+
+          fixture.host = { ...fixture.host, availableMemoryBytes: 10 };
+          const pushed = yield* pull.pipe(Effect.forkChild);
+          yield* TestClock.adjust("15 seconds");
+          const [change] = yield* Fiber.join(pushed);
+          expect(change.host).toMatchObject({ verdict: "exhausted", ram: 0.9 });
+        }),
+      );
+    }).pipe(Effect.provide(statsLayer(fixture)));
+  });
+
+  it.effect("does not pair CPU samples across a gap with no subscribers", () => {
+    const fixture = makeFixture();
+    fixture.host = { ...fixture.host, cpuUtilization: 0.95 };
+    return Effect.gen(function* () {
+      const stats = yield* OrchestrationStatsService.OrchestrationStatsService;
+      const greet = Effect.scoped(
+        Effect.gen(function* () {
+          const [greeting] = yield* yield* Stream.toPull(stats.subscribe);
+          return greeting.host.verdict;
+        }),
+      );
+      expect(yield* greet).toBe("ok");
+      yield* TestClock.adjust("2 minutes");
+      expect(yield* greet).toBe("ok");
     }).pipe(Effect.provide(statsLayer(fixture)));
   });
 });

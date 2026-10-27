@@ -98,25 +98,22 @@ const make = Effect.fn("makeHostResources")(function* () {
       if (available) availableMemoryBytes = Number(available) * 1024;
       swap = linuxSwap(meminfo);
     } else if (platform === "darwin") {
-      const output = yield* spawner
-        .string(ChildProcess.make("/usr/bin/vm_stat", [], { stdin: "ignore", stderr: "ignore" }))
-        .pipe(
-          Effect.timeout("1 second"),
-          Effect.orElseSucceed(() => ""),
-        );
-      availableMemoryBytes = darwinAvailableMemory(output) ?? availableMemoryBytes;
-      const swapusage = yield* spawner
-        .string(
-          ChildProcess.make("/usr/sbin/sysctl", ["-n", "vm.swapusage"], {
-            stdin: "ignore",
-            stderr: "ignore",
-          }),
-        )
-        .pipe(
-          Effect.timeout("1 second"),
-          Effect.orElseSucceed(() => ""),
-        );
-      swap = darwinSwap(swapusage);
+      const run = (command: string, args: ReadonlyArray<string>) =>
+        spawner
+          .string(ChildProcess.make(command, args, { stdin: "ignore", stderr: "ignore" }))
+          .pipe(
+            Effect.timeout("1 second"),
+            Effect.orElseSucceed(() => ""),
+          );
+      const output = yield* Effect.all(
+        {
+          vmStat: run("/usr/bin/vm_stat", []),
+          swapusage: run("/usr/sbin/sysctl", ["-n", "vm.swapusage"]),
+        },
+        { concurrency: 2 },
+      );
+      availableMemoryBytes = darwinAvailableMemory(output.vmStat) ?? availableMemoryBytes;
+      swap = darwinSwap(output.swapusage);
     }
     // Windows reports [0, 0, 0]; that reads as no load, never as pressure.
     const loadAverage1m = NodeOS.loadavg()[0];

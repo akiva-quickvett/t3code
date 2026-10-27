@@ -2083,6 +2083,9 @@ export const OrganPresetRpcGroup = RpcGroup.make(
 );
 
 /** Part of WsRpcGroup, with its own server handler layer, as ChatChannelRpcGroup. */
+export const OrchestrationStatsRpcGroup = RpcGroup.make(WsOrchestrationSubscribeStatsRpc);
+
+/** Part of WsRpcGroup, with its own server handler layer, as ChatChannelRpcGroup. */
 export const PodRuntimeRpcGroup = RpcGroup.make(
   WsPodRuntimeSubscribeRpc,
   WsPodRuntimeStatusRpc,

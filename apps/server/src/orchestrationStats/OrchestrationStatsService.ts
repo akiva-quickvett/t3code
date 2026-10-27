@@ -17,7 +17,7 @@ import type {
   ThreadId,
   UsageTokenTotals,
 } from "@t3tools/contracts";
-import { hostHeadroom, hostPressure } from "@t3tools/shared/hostHeadroom";
+import { hostHeadroom, hostPressure, hostResourceVerdicts } from "@t3tools/shared/hostHeadroom";
 import {
   classifyOrchestration,
   orchestrationParentThreadId,
@@ -32,6 +32,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
@@ -62,12 +63,12 @@ const TERMINAL_TURN_STATUSES: ReadonlySet<string> = new Set([
 interface BurnEntry {
   readonly atMs: number;
   readonly threadId: ThreadId;
-  /** Null when the turn's run could not be found. */
-  readonly model: string | null;
-  readonly totals: UsageTokenTotals;
   readonly tokens: number;
+  /** Priced once on arrival; null when the model is unknown or unpriced. */
+  readonly usd: number | null;
   /** The provider reported partial or no usage. */
   readonly partial: boolean;
+  readonly reportedUsage: boolean;
 }
 
 export class OrchestrationStatsService extends Context.Service<
@@ -77,7 +78,6 @@ export class OrchestrationStatsService extends Context.Service<
     readonly read: Effect.Effect<OrchestrationStatsSnapshot>;
     /** The current snapshot first, then changes only. */
     readonly subscribe: Stream.Stream<OrchestrationStatsSnapshot>;
-    readonly onProviderTurn: (event: ProviderTurnEvent) => Effect.Effect<void>;
   }
 >()("t3/orchestrationStats/OrchestrationStatsService") {}
 
@@ -103,7 +103,12 @@ const burnRate = (tokens: number, usd: number): OrchestrationBurnRate => ({
 
 /** Burn values are already rounded, so equal significant fields mean nothing to push. */
 const significant = (snapshot: OrchestrationStatsSnapshot) =>
-  JSON.stringify([snapshot.activeAgents, snapshot.burn, snapshot.host.verdict]);
+  JSON.stringify([
+    snapshot.activeAgents,
+    snapshot.burn,
+    snapshot.host.verdict,
+    hostResourceVerdicts(snapshot.host),
+  ]);
 
 /** `inputTokens` includes cache reads and writes; `outputTokens` includes reasoning. */
 function turnTotals(usage: NonNullable<ProviderTurnEvent["payload"]["turnTokenUsage"]>) {
@@ -222,16 +227,26 @@ const make = Effect.gen(function* () {
   const onProviderTurn = (event: ProviderTurnEvent) =>
     Effect.gen(function* () {
       const turn = event.payload;
-      if (
-        !TERMINAL_TURN_STATUSES.has(turn.status) ||
-        turn.turnTokenUsage === undefined ||
-        window.has(turn.id)
-      ) {
-        return;
-      }
+      if (!TERMINAL_TURN_STATUSES.has(turn.status)) return;
+      // A later update may add the usage a first terminal update lacked.
+      const seen = window.get(turn.id);
+      if (seen !== undefined && (seen.reportedUsage || turn.turnTokenUsage === undefined)) return;
       const nowMs = yield* Clock.currentTimeMillis;
       const atMs = DateTime.toEpochMillis(turn.completedAt ?? event.occurredAt);
       if (nowMs - atMs > WINDOW_MS) return;
+      prune(nowMs);
+      // Only some adapters report usage; a turn without it still makes the burn a lower bound.
+      if (turn.turnTokenUsage === undefined) {
+        window.set(turn.id, {
+          atMs,
+          threadId: event.threadId,
+          tokens: 0,
+          usd: null,
+          partial: true,
+          reportedUsage: false,
+        });
+        return;
+      }
       // Turns carry no model; their run does.
       const runs = yield* orchestrator
         .getThreadRecords(
@@ -250,12 +265,17 @@ const make = Effect.gen(function* () {
                 turn.runAttemptId !== null && candidate.activeAttemptId === turn.runAttemptId,
             )
           : runs.find((candidate) => candidate.id === event.runId);
-      prune(nowMs);
+      const { totals, tokens, partial } = turnTotals(turn.turnTokenUsage);
+      const model = run?.modelSelection.model ?? null;
+      // Priced per turn, not over summed totals: tiered rates depend on each request's size.
+      const usd = model === null ? null : yield* usage.priceTokens(model, totals);
       window.set(turn.id, {
         atMs,
         threadId: event.threadId,
-        model: run?.modelSelection.model ?? null,
-        ...turnTotals(turn.turnTokenUsage),
+        tokens,
+        usd,
+        partial,
+        reportedUsage: true,
       });
     }).pipe(Effect.ignoreCause);
 
@@ -272,7 +292,7 @@ const make = Effect.gen(function* () {
     yield* update((current) => ({
       ...current,
       activeAgents: {
-        ...current.activeAgents,
+        runningTurns: counts.busy,
         liveSessions: counts.live,
         idleSessions: Math.max(0, counts.live - counts.busy),
       },
@@ -304,10 +324,8 @@ const make = Effect.gen(function* () {
       totals.set(key, { tokens: sum.tokens + entryTokens, usd: sum.usd + entryUsd });
     };
     for (const entry of window.values()) {
-      const price =
-        entry.model === null ? null : yield* usage.priceTokens(entry.model, entry.totals);
-      if (price === null || entry.partial) approximate = true;
-      const entryUsd = price ?? 0;
+      if (entry.usd === null || entry.partial) approximate = true;
+      const entryUsd = entry.usd ?? 0;
       tokens += entry.tokens;
       usd += entryUsd;
       if (attribute !== null) {
@@ -325,13 +343,6 @@ const make = Effect.gen(function* () {
     const overall = burnRate(tokens, usd);
     yield* update((current) => ({
       ...current,
-      activeAgents: {
-        ...current.activeAgents,
-        runningTurns:
-          shells === null
-            ? current.activeAgents.runningTurns
-            : shells.filter((shell) => shell.activeRunId !== null).length,
-      },
       burn: {
         state: nowMs - startedAtMs >= WINDOW_MS ? "ready" : "warming",
         ...overall,
@@ -369,12 +380,20 @@ const make = Effect.gen(function* () {
       const running = sampler;
       sampler = null;
       yield* Fiber.interrupt(running);
+      // CPU needs two consecutive samples; samples on either side of a gap are not.
+      previousHost = null;
+      lastHost = null;
     }),
   );
 
   yield* forkParked(
     Stream.runForEach(orchestrator.streamDomainEvents, (event) =>
       event.type === "provider-turn.updated" ? onProviderTurn(event) : Effect.void,
+    ).pipe(
+      Effect.retry(Schedule.spaced("5 seconds")),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("orchestration stats event stream failed", { cause }),
+      ),
     ),
   );
 
@@ -396,7 +415,6 @@ const make = Effect.gen(function* () {
         return Stream.concat(Stream.make(current), next);
       }),
     ),
-    onProviderTurn,
   });
 });
 

@@ -103,6 +103,7 @@ import {
   OrganPresetRpcGroup,
   PodRuntimeRpcGroup,
   UsageRpcGroup,
+  OrchestrationStatsRpcGroup,
   ServerSettings as ServerSettingsSchema,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
@@ -572,7 +573,7 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-// Chat channel, organ preset, pod and usage RPCs have their own handler layers; see ChatChannelRpcGroup.
+// Chat channel, organ preset, pod, usage and stats RPCs have their own handler layers; see ChatChannelRpcGroup.
 const ServerCoreWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.chatChannelsSubscribe,
   WS_METHODS.chatChannelsMutate,
@@ -592,6 +593,7 @@ const ServerCoreWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.organPresetsSave,
   WS_METHODS.organPresetsRemove,
   WS_METHODS.organPresetsReset,
+  WS_METHODS.orchestrationSubscribeStats,
 );
 const ServerChatChannelRpcGroup = ChatChannelRpcGroup.middleware(RpcInstrumentation);
 
@@ -608,6 +610,7 @@ const layerChatChannelRpc = ServerChatChannelRpcGroup.toLayer(
 const ServerPodRuntimeRpcGroup = PodRuntimeRpcGroup.middleware(RpcInstrumentation);
 const ServerUsageRpcGroup = UsageRpcGroup.middleware(RpcInstrumentation);
 const ServerOrganPresetRpcGroup = OrganPresetRpcGroup.middleware(RpcInstrumentation);
+const ServerOrchestrationStatsRpcGroup = OrchestrationStatsRpcGroup.middleware(RpcInstrumentation);
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
@@ -1367,7 +1370,6 @@ const layerWsRpc = (
       const hostResources = yield* HostResources.HostResources;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
-      const orchestrationStats = yield* OrchestrationStatsService.OrchestrationStatsService;
       const relayClient = yield* RelayClient.RelayClient;
       // A webhook URL starts agent runs, so only sessions that may operate
       // see it; read-only sessions still see the task itself.
@@ -3141,7 +3143,6 @@ const layerWsRpc = (
               Stream.concat(Stream.make(latest), changes),
             ),
           ),
-        [WS_METHODS.orchestrationSubscribeStats]: (_input) => orchestrationStats.subscribe,
       });
       return handlers;
     }),
@@ -3171,6 +3172,15 @@ const layerUsageRpc = ServerUsageRpcGroup.toLayer(
       [WS_METHODS.serverGetUsageSummary]: (input) => usage.readSummary(input),
       [WS_METHODS.serverRefreshUsageRates]: (_input) => usage.refreshRates,
       [WS_METHODS.serverGetUsageThreadTree]: (input) => usage.readThreadTree(input),
+    });
+  }),
+);
+
+const layerOrchestrationStatsRpc = ServerOrchestrationStatsRpcGroup.toLayer(
+  Effect.gen(function* () {
+    const orchestrationStats = yield* OrchestrationStatsService.OrchestrationStatsService;
+    return ServerOrchestrationStatsRpcGroup.of({
+      [WS_METHODS.orchestrationSubscribeStats]: (_input) => orchestrationStats.subscribe,
     });
   }),
 );
@@ -3277,6 +3287,7 @@ export const layer = Layer.unwrap(
               layerChatChannelRpc,
               layerPodRuntimeRpc,
               layerUsageRpc,
+              layerOrchestrationStatsRpc,
               layerOrganPresetRpc,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
