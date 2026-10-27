@@ -215,8 +215,9 @@ Returns:
 - the organ presets in effect for the caller's project; and
 - feature flags for polling, cancellation, batch thread creation,
   `t3_usage_limits`, `t3_usage_thread_tree` (`usageThreadTree`), and supervised
-  wakes (`supervisedWakes`), the last two missing on older servers, and
-  `organs` for `start_organ` and `delegate_task.organ`.
+  wakes (`supervisedWakes`), the last two missing on older servers,
+  `organs` for `start_organ` and `delegate_task.organ`, and `metas` for metas
+  and `t3_thread_compact`.
 
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
@@ -587,6 +588,18 @@ The target runtime and interaction modes may not be broader than the caller's.
 Stable command and message IDs are derived from `clientRequestId` for
 idempotent retries, so a retried follow-up records one task and one wake. A send to the
 caller's delegated or supervised child that starts a turn returns that turn's `taskId`.
+
+### `t3_thread_compact`
+
+Queues `/compact` on the thread (omit `threadId` for the caller's) behind any
+active run, never steering it, and returns `{ queued: true, commandId }`. The
+provider's own compaction runs on the same thread and session, so the transcript
+stays. It is refused when the thread has no user message other than `/compact`,
+or when its provider does not advertise the `compact` slash command.
+
+The dispatch has agent origin, so supervised wakes held by a user Stop stay held
+until the user's next message. A `/compact` the user sends from a client is a
+user message and releases them onto the compaction run, which wakes once it ends.
 
 ### `t3_thread_wait`
 

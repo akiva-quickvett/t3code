@@ -2602,6 +2602,7 @@ const make = Effect.gen(function* () {
             snoozeTree: true,
             settleTree: true,
             organs: true,
+            metas: true,
           },
         };
       }),

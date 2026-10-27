@@ -57,6 +57,7 @@ import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimi
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
@@ -296,6 +297,20 @@ export class ThreadManagementProviderInstanceDisabledError extends Schema.Tagged
   }
 }
 
+export class ThreadManagementCompactionUnavailableError extends Schema.TaggedError<ThreadManagementCompactionUnavailableError>()(
+  "ThreadManagementCompactionUnavailableError",
+  {
+    threadId: ThreadId,
+    reason: Schema.Literals(["no_conversation", "provider_unsupported"]),
+  },
+) {
+  override get message(): string {
+    return this.reason === "no_conversation"
+      ? `Thread ${this.threadId} has no conversation to compact.`
+      : `The provider of thread ${this.threadId} can't compact.`;
+  }
+}
+
 export const ThreadManagementError = Schema.Union([
   ThreadManagementThreadNotFoundError,
   ThreadManagementRunNotFoundError,
@@ -424,6 +439,23 @@ export interface ThreadManagementServiceShape {
   }) => Effect.Effect<
     Orchestrator.OrchestratorV2DispatchResult,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
+  >;
+  /**
+   * Queues `/compact` behind any active run with agent/mcp origin, so held
+   * supervised wakes stay held: only a user's web or mobile message releases them.
+   */
+  readonly compact: (input: {
+    readonly projectId: ProjectId;
+    readonly threadId: ThreadId;
+    readonly commandId: CommandId;
+  }) => Effect.Effect<
+    Orchestrator.OrchestratorV2DispatchResult,
+    | ThreadManagementCompactionUnavailableError
+    | ThreadManagementProjectionLoadError
+    | ThreadManagementThreadNotFoundError
+    | Orchestrator.OrchestratorV2Error
+    | ThreadManagementProviderInstanceDisabledError,
+    ProviderRegistry.ProviderRegistry
   >;
   readonly interruptThread: (
     input: ThreadManagementInterruptInput,
@@ -1018,6 +1050,49 @@ const make = Effect.gen(function* () {
       enabled: input.enabled,
     });
 
+  const compact: ThreadManagementServiceShape["compact"] = Effect.fn(
+    "orchestrationV2.threadManagement.compact",
+  )(function* (input) {
+    // Same rule as the turn start's empty-compaction check (ProjectionStore hasConversation).
+    const { thread, messages } = yield* getProjectThreadRecords(input, ["messages"], {
+      messageRoles: ["user"],
+    });
+    if (
+      !messages.some(
+        (message) =>
+          message.role === "user" &&
+          (message.text.trim().toLowerCase() !== "/compact" || message.attachments.length > 0),
+      )
+    ) {
+      return yield* new ThreadManagementCompactionUnavailableError({
+        threadId: input.threadId,
+        reason: "no_conversation",
+      });
+    }
+    const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
+    // The compaction run uses the thread's selected model, as a queued message does.
+    const provider = providers.find(
+      (candidate) => candidate.instanceId === thread.modelSelection.instanceId,
+    );
+    if (!provider?.slashCommands.some((command) => command.name === "compact")) {
+      return yield* new ThreadManagementCompactionUnavailableError({
+        threadId: input.threadId,
+        reason: "provider_unsupported",
+      });
+    }
+    return yield* dispatch({
+      type: "message.dispatch",
+      commandId: input.commandId,
+      threadId: input.threadId,
+      messageId: MessageId.make(input.commandId),
+      text: "/compact",
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+  });
+
   const interruptThread: ThreadManagementServiceShape["interruptThread"] = (input) =>
     Effect.gen(function* () {
       const target = yield* getProjectThreadRecords(input, ["runs", "providerTurns"]);
@@ -1264,6 +1339,7 @@ const make = Effect.gen(function* () {
     settleAfterRun,
     settleThread,
     setMeta,
+    compact,
     interruptThread,
     stopDelegatedTasks,
     stopWorkflow,

@@ -98,9 +98,12 @@ import { layerWithoutPods } from "../../pod/testkit/layerWithoutPods.ts";
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 
-const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
+const layerThreadToolkitWithoutProviders = McpHttpServer.layerThreadToolkit.pipe(
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+);
+const layerThreadToolkit = layerThreadToolkitWithoutProviders.pipe(
+  Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
 );
 
 it("publishes unique tool names with reference-free object-root inputs", () => {
@@ -307,6 +310,60 @@ it.effect("promotes and demotes metas, and reports a meta's refused settle", () 
                   cause: `Thread ${input.threadId} is a meta, and a meta cannot be settled. Demote it first.`,
                 }),
               ),
+          }),
+        ),
+      ),
+    ),
+  ),
+);
+const compactCalls: Array<ThreadId> = [];
+it.effect("queues a compaction on the caller's thread and reports a refusal", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const call = (args: Record<string, unknown>) =>
+      server
+        .callTool({ name: "t3_thread_compact", arguments: args })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const queued = (yield* call({})).structuredContent as { queued: boolean; commandId: string };
+    expect(queued.queued).toBe(true);
+    expect(queued.commandId).toMatch(/^mcp:/);
+    expect(compactCalls).toEqual([threadId]);
+
+    const refused = yield* call({ threadId: ThreadId.make("mcp-core-empty") });
+    expect(declaredFailure(refused)).toEqual({
+      _tag: "OrchestratorMcpFailure",
+      code: "invalid_request",
+      message: "Thread mcp-core-empty has no conversation to compact.",
+    });
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+            getProjectThreadRecords: (input) =>
+              Effect.succeed(
+                McpToolAccessTestkit.idleThreadProjection(
+                  McpToolAccessTestkit.liveThreadShell(input.threadId),
+                ) as never,
+              ),
+            compact: (input) =>
+              input.threadId === threadId
+                ? Effect.sync(() => {
+                    compactCalls.push(input.threadId);
+                    return { sequence: 1, storedEvents: [] };
+                  })
+                : Effect.fail(
+                    new ThreadManagement.ThreadManagementCompactionUnavailableError({
+                      threadId: input.threadId,
+                      reason: "no_conversation",
+                    }),
+                  ),
           }),
         ),
       ),
@@ -570,7 +627,7 @@ it.effect("records the calling agent and the agent a tool acted on", () => {
     });
   }).pipe(
     Effect.provide(
-      layerThreadToolkit.pipe(
+      layerThreadToolkitWithoutProviders.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
