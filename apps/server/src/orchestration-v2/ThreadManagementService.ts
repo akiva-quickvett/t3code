@@ -1060,8 +1060,7 @@ const make = Effect.gen(function* () {
     if (
       !messages.some(
         (message) =>
-          message.role === "user" &&
-          (message.text.trim().toLowerCase() !== "/compact" || message.attachments.length > 0),
+          message.text.trim().toLowerCase() !== "/compact" || message.attachments.length > 0,
       )
     ) {
       return yield* new ThreadManagementCompactionUnavailableError({

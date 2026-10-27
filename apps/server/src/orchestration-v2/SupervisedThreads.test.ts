@@ -703,7 +703,11 @@ it.effect("a user's /compact releases held supervised wakes, which run after the
     const held = yield* heldCohort(launcherId, childId);
 
     const afterCompact = yield* eventSink.latestSequence();
-    const compaction = yield* send({ threadId: launcherId, text: "/compact" });
+    const compaction = yield* send({
+      threadId: launcherId,
+      text: "/compact",
+      mode: "queue_after_active",
+    });
     const [task] = yield* supervisedTasks(launcherId, childId);
     assert.equal(task?.id, held.id);
     assert.equal(task?.runId, compaction.id);
@@ -736,10 +740,10 @@ it.effect("a user's /compact releases held supervised wakes, which run after the
       (event) =>
         event.type === "run.updated" &&
         event.runId === wakeRunId &&
-        event.payload.status !== "queued",
+        event.payload.status === "starting",
     );
     assert.isTrue(Option.isSome(started));
-    assert.notEqual((yield* wakeRun())?.status, "queued");
+    assert.equal((yield* wakeRun())?.status, "starting");
     assert.equal((yield* wakeRun())?.threadId, launcherId);
   }).pipe(Effect.provide(layerCompaction)),
 );
@@ -759,10 +763,17 @@ it.effect("an agent's compaction leaves held supervised wakes held", () =>
     const compaction = (yield* threads.getThreadProjection(launcherId)).runs.find(
       (run) => run.userMessageId === MessageId.make("compact:agent"),
     )!;
-    yield* completeLive(launcherId, compaction.id);
+    yield* endRun(launcherId, compaction.id, "completed");
     const [task] = yield* supervisedTasks(launcherId, childId);
     assert.equal(task?.runId, held.runId);
     assert.equal(task?.completionDelivery?.state, "pending");
+    // No cohort was planned onto any run, so no wake message or wake run exists.
+    const launcher = yield* threads.getThreadProjection(launcherId);
+    assert.deepEqual(
+      launcher.runs.map((run) => run.id),
+      [held.runId, compaction.id],
+    );
+    assert.isTrue(launcher.runs.every((run) => run.delegatedCompletion?.delivery == null));
   }).pipe(Effect.provide(layerCompaction)),
 );
 

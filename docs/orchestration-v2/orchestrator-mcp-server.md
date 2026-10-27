@@ -599,7 +599,8 @@ or when its provider does not advertise the `compact` slash command.
 
 The dispatch has agent origin, so supervised wakes held by a user Stop stay held
 until the user's next message. A `/compact` the user sends from a client is a
-user message and releases them onto the compaction run, which wakes once it ends.
+user message and releases them onto the compaction run, which wakes once it ends. If a user Stop
+held the thread's queue, the compaction waits in that held queue too.
 
 ### `t3_thread_wait`
 
