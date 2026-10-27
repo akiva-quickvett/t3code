@@ -627,7 +627,7 @@ function MetaRow(props: {
  * Reads the thread list once when it opens, so streaming ticks neither
  * re-sort it nor move rows under the cursor; the search filters that snapshot.
  */
-function PromotePickerDialog(props: {
+export function PromotePickerDialog(props: {
   readonly environmentId: EnvironmentId;
   readonly canOperate: boolean;
   readonly onPick: (threadId: ThreadId) => void;
