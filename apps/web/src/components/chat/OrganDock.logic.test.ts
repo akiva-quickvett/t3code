@@ -29,10 +29,10 @@ function group(
   };
 }
 
-it("collects every round's cell threads of running organs only", () => {
+it("collects the latest round's cell threads of running organs only, as the dock lists", () => {
   const ids = runningOrganCellThreadIds([
     group("live", true, ["a", null]),
     group("done", false, ["b"]),
   ]);
-  expect([...ids].sort()).toEqual(["a-r1", "a-r2"]);
+  expect([...ids].sort()).toEqual(["a-r2"]);
 });

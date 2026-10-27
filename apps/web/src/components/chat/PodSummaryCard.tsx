@@ -83,9 +83,10 @@ function sameCellShells(
   return true;
 }
 
-// The pod's organ cells as `deriveOrganGroups` reads them, built the way the
-// orchestration tree builds its inputs so card and sidebar dots agree. Read
-// only while expanded.
+// The organ cells a thread delegated, as `deriveOrganGroups` reads them, built
+// the way the orchestration tree builds its inputs so card and sidebar dots
+// agree. Read by an expanded pod card, and by the chat of any thread that has
+// organs (its dock and organ cards); each read walks the environment's shells.
 const podCellShellsAtom = Atom.family((key: string) => {
   const separator = key.indexOf("\u0000");
   const environmentId = key.slice(0, separator) as EnvironmentId;

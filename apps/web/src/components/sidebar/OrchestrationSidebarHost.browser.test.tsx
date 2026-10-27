@@ -23,7 +23,6 @@ const h = await vi.hoisted(async () => {
     >(new Map()),
     sidebarProps: null as OrchestrationSidebarProps | null,
     dispatched: [] as Array<{ readonly command: unknown; readonly value: unknown }>,
-    route: null as ScopedThreadRef | null,
   };
 });
 
@@ -37,6 +36,7 @@ vi.mock("../../connection/catalog", () => ({
   environmentCatalog: { catalogValueAtom: h.catalogAtom },
 }));
 vi.mock("../../state/server", () => ({ environmentServerConfigsAtom: h.configsAtom }));
+vi.mock("../../rpc/atomRegistry", () => ({ appAtomRegistry: h.registry }));
 vi.mock("../../state/threads", () => ({ threadEnvironment: { startTurn: "start-turn" } }));
 vi.mock("../../state/use-orchestration-command", async () => {
   const { AsyncResult } = await import("effect/reactivity");
@@ -56,15 +56,12 @@ vi.mock("../../state/entities", () => ({
     interactionMode: "plan",
   }),
 }));
-vi.mock("../../hooks/useThreadRouteTarget", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../hooks/useThreadRouteTarget")>()),
-  useThreadRouteRef: () => h.route,
-}));
 
+import { OrchestrationSidebarHost } from "./OrchestrationSidebarHost";
 import {
-  OrchestrationSidebarHost,
+  readOrchestrationEnvironmentIds,
   useOrchestrationEnvironmentIds,
-} from "./OrchestrationSidebarHost";
+} from "./orchestrationEnvironments";
 
 const local = EnvironmentId.make("environment-local");
 const remote = EnvironmentId.make("environment-remote");
@@ -80,7 +77,6 @@ beforeEach(() => {
   root = createRoot(container);
   h.sidebarProps = null;
   h.dispatched = [];
-  h.route = null;
 });
 
 afterEach(async () => {
@@ -91,7 +87,7 @@ afterEach(async () => {
 
 function renderHost(props: {
   readonly onCommitRename?: (ref: ScopedThreadRef, title: string, originalTitle: string) => void;
-  readonly onNavigate?: () => void;
+  readonly onRowActivate?: () => void;
 }) {
   return act(() =>
     root.render(
@@ -99,7 +95,7 @@ function renderHost(props: {
         <OrchestrationSidebarHost
           environmentIds={[local]}
           onCommitRename={props.onCommitRename ?? (() => undefined)}
-          onNavigate={props.onNavigate ?? (() => undefined)}
+          onRowActivate={props.onRowActivate ?? (() => undefined)}
         />
       </RegistryContext.Provider>,
     ),
@@ -137,7 +133,7 @@ describe("OrchestrationSidebarHost", () => {
   it("hands stable callbacks to the view across renders", async () => {
     await renderHost({});
     const first = h.sidebarProps!;
-    await renderHost({ onNavigate: () => undefined });
+    await renderHost({ onRowActivate: () => undefined });
     expect(h.sidebarProps!.onClearMeta).toBe(first.onClearMeta);
     expect(h.sidebarProps!.onRenameThread).toBe(first.onRenameThread);
   });
@@ -157,16 +153,6 @@ describe("OrchestrationSidebarHost", () => {
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
     );
     expect(onCommitRename).toHaveBeenCalledWith(metaRef, "Planning", "Work");
-  });
-
-  it("reports a new route as a pick, but not the route it mounted on", async () => {
-    const onNavigate = vi.fn();
-    h.route = metaRef;
-    await renderHost({ onNavigate });
-    expect(onNavigate).not.toHaveBeenCalled();
-    h.route = { environmentId: local, threadId: ThreadId.make("pod") };
-    await renderHost({ onNavigate });
-    expect(onNavigate).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -204,6 +190,8 @@ describe("useOrchestrationEnvironmentIds", () => {
       ),
     );
     expect(seen.at(-1)).toEqual([remote, local]);
+    // The shortcut, menu action and palette gate on the same list.
+    expect(readOrchestrationEnvironmentIds()).toBe(seen.at(-1));
     const renders = seen.length;
 
     // A config change that leaves the capable set alone renders nothing.
@@ -220,5 +208,11 @@ describe("useOrchestrationEnvironmentIds", () => {
 
     await act(() => h.registry.set(h.configsAtom, new Map([[local, metas]])));
     expect(seen.at(-1)).toEqual([local]);
+
+    // Handlers outside React read it as it is now.
+    h.registry.set(h.configsAtom, new Map([[remote, metas]]));
+    expect(readOrchestrationEnvironmentIds()).toEqual([remote]);
+    h.registry.set(h.configsAtom, new Map());
+    expect(readOrchestrationEnvironmentIds()).toEqual([]);
   });
 });

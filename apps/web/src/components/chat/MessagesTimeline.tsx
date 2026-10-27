@@ -312,14 +312,17 @@ import { TimelineSystemDivider } from "./TimelineSystemDivider";
 import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
 import { OrganCard } from "./OrganCard";
 import {
+  type OrganCardCell,
+  type OrganCardGroup,
   organCardFromOrgan,
   organCardFromWorkflow,
   organCardSummary,
   organCardTiming,
 } from "./OrganCard.logic";
+import { useStableCallback } from "../../hooks/useStableCallback";
 import { PodSummaryCard, useOrganCellShells } from "./PodSummaryCard";
 import { organName } from "./PodSummaryCard.logic";
-import { pendingTimelineReveal, settleTimelineReveal } from "./timelineReveal";
+import { clearTimelineReveal, pendingTimelineReveal } from "./timelineReveal";
 
 import { SkillChipIcon, SkillInlineText } from "./SkillInlineText";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
@@ -851,7 +854,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // A revealed cell's row may sit in a folded turn; unfold it as find does.
   const reveal = pendingTimelineReveal(listIdentityKey);
   const revealEntry =
-    reveal === null || reveal.scrolled
+    reveal === null
       ? undefined
       : timelineEntries.find(
           (entry) =>
@@ -913,16 +916,29 @@ const ConversationTimeline = memo(function ConversationTimeline({
   });
   const rows = useStableRows(rawRows, listIdentityKey);
   // After the position restore, so restoring to the end can't scroll the revealed row away.
+  // Resolved on the first settled pass either way, so a cell outside the loaded rows costs no
+  // scans on later renders.
   useLayoutEffect(() => {
     const pending = pendingTimelineReveal(listIdentityKey);
-    if (restoringThreadPosition || pending === null || pending.scrolled) return;
+    if (pending === null || restoringThreadPosition || rows.length === 0) return;
+    clearTimelineReveal(pending);
     const index = rows.findIndex((row) => rowHoldsChild(row, pending.childThreadId));
-    if (index < 0) return;
-    pending.scrolled = true;
-    settleTimelineReveal(pending);
+    const row = rows[index];
+    if (row?.kind !== "event") return;
+    // Rows that mount after the scroll read this; rows already mounted read the pending reveal.
+    workGroupViewState.expandedEntries.add(
+      row.organId === undefined ? `subagent-group:${row.id}` : row.id,
+    );
     onManualNavigation();
     void listRef.current?.scrollToIndex({ index, animated: false, viewPosition: 0 });
-  }, [listIdentityKey, listRef, onManualNavigation, restoringThreadPosition, rows]);
+  }, [
+    listIdentityKey,
+    listRef,
+    onManualNavigation,
+    restoringThreadPosition,
+    rows,
+    workGroupViewState,
+  ]);
   // Run status/timestamps churn on every stream event; the shared row context
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
@@ -3340,6 +3356,63 @@ function useOrganIdBySubagentId(subagents: ReadonlyArray<OrchestrationV2Subagent
   return next;
 }
 
+/**
+ * The timeline's own thread when the row belongs to it. A fork's inherited rows keep their
+ * source thread's id, and reading that thread's records would subscribe to its whole projection.
+ */
+function useRowOwnThreadRef(row: TimelineEventRow) {
+  const { threadRef } = use(TimelineRowCtx);
+  return threadRef !== null && row.projectedItem.item.threadId === threadRef.threadId
+    ? threadRef
+    : null;
+}
+
+function sameCardCell(left: OrganCardCell, right: OrganCardCell) {
+  return (
+    left.key === right.key &&
+    left.threadId === right.threadId &&
+    left.role === right.role &&
+    left.model === right.model &&
+    left.dot === right.dot &&
+    left.state === right.state
+  );
+}
+
+function sameCardGroup(left: OrganCardGroup, right: OrganCardGroup) {
+  return (
+    left.kind === right.kind &&
+    left.id === right.id &&
+    left.label === right.label &&
+    left.round === right.round &&
+    left.goal === right.goal &&
+    left.outcome?.status === right.outcome?.status &&
+    left.outcome?.summary === right.outcome?.summary &&
+    left.timing.status === right.timing.status &&
+    left.timing.startedAt === right.timing.startedAt &&
+    left.timing.completedAt === right.timing.completedAt &&
+    left.sections.length === right.sections.length &&
+    left.sections.every((section, index) => {
+      const other = right.sections[index]!;
+      return (
+        section.key === other.key &&
+        section.title === other.title &&
+        section.running === other.running &&
+        section.defaultOpen === other.defaultOpen &&
+        section.cells.length === other.cells.length &&
+        section.cells.every((cell, cellIndex) => sameCardCell(cell, other.cells[cellIndex]!))
+      );
+    })
+  );
+}
+
+/** Kept by content, so a record update that changes nothing the card draws skips its render. */
+function useKeptCardGroup(next: OrganCardGroup | null) {
+  const [kept, setKept] = useState(next);
+  if (kept === next || (kept !== null && next !== null && sameCardGroup(kept, next))) return kept;
+  setKept(next);
+  return next;
+}
+
 function rowHoldsChild(row: TimelineRow, childThreadId: ThreadId) {
   return (
     row.kind === "event" &&
@@ -3349,24 +3422,17 @@ function rowHoldsChild(row: TimelineRow, childThreadId: ThreadId) {
   );
 }
 
-function revealTargeting(threadKey: string, row: TimelineRow) {
+function revealTargets(threadKey: string, row: TimelineRow) {
   const reveal = pendingTimelineReveal(threadKey);
-  return reveal !== null && rowHoldsChild(row, reveal.childThreadId) ? reveal : null;
+  return reveal !== null && rowHoldsChild(row, reveal.childThreadId);
 }
 
 function useTimelineGroupExpansion(row: TimelineEventRow, key: string) {
   const ctx = use(TimelineRowCtx);
   const { expandedEntries } = ctx.workGroupViewState;
   const [expanded, setExpanded] = useState(
-    () => expandedEntries.has(key) || revealTargeting(ctx.routeThreadKey, row) !== null,
+    () => expandedEntries.has(key) || revealTargets(ctx.routeThreadKey, row),
   );
-  useEffect(() => {
-    const reveal = revealTargeting(ctx.routeThreadKey, row);
-    if (reveal === null) return;
-    expandedEntries.add(key);
-    reveal.expanded = true;
-    settleTimelineReveal(reveal);
-  }, [ctx.routeThreadKey, expandedEntries, key, row]);
   const toggle = (open: boolean) => {
     ctx.onToggleWorkEntry(row.id, expanded);
     if (open) expandedEntries.add(key);
@@ -3384,18 +3450,23 @@ const TimelineOrganRow = memo(function TimelineOrganRow({
   organId: OrganId;
 }) {
   const ctx = use(TimelineRowCtx);
-  const parentRef = scopeThreadRef(ctx.activeThreadEnvironmentId, row.projectedItem.item.threadId);
-  const subagents = useThreadSubagents(parentRef);
-  const cellShells = useOrganCellShells(parentRef);
+  const ownThreadRef = useRowOwnThreadRef(row);
+  const subagents = useThreadSubagents(ownThreadRef);
+  const cellShells = useOrganCellShells(ownThreadRef);
   const [expanded, toggleExpanded] = useTimelineGroupExpansion(row, row.id);
+  const onToggle = useStableCallback(() => toggleExpanded(!expanded));
   const organ = deriveOrganGroups(subagents, (id) => cellShells.get(id)).find(
     (group) => group.organId === organId,
   );
-  if (organ === undefined) return <V2SubagentGroup row={row} />;
-  const group = organCardFromOrgan(organ, {
-    label: organName(organ.presetId),
-    records: subagents.filter((subagent) => subagent.organ?.id === organId),
-  });
+  const group = useKeptCardGroup(
+    organ === undefined
+      ? null
+      : organCardFromOrgan(organ, {
+          label: organName(organ.presetId),
+          records: subagents.filter((subagent) => subagent.organ?.id === organId),
+        }),
+  );
+  if (organ === undefined || group === null) return <V2SubagentGroup row={row} />;
   if (ctx.organsDocked && organ.running) {
     const summary = organCardSummary(group.sections.flatMap((section) => section.cells));
     return (
@@ -3419,7 +3490,7 @@ const TimelineOrganRow = memo(function TimelineOrganRow({
       <OrganCard
         group={group}
         expanded={expanded}
-        onToggle={() => toggleExpanded(!expanded)}
+        onToggle={onToggle}
         onOpenCell={ctx.onOpenCell}
         onOpenChat={ctx.onOpenThread}
       />
@@ -3487,9 +3558,7 @@ function V2SubagentMembers({ row }: { row: TimelineEventRow }) {
 function V2SingleSubagentRow({ row }: { row: TimelineEventRow }) {
   const ctx = use(TimelineRowCtx);
   const { item } = row.projectedItem;
-  const subagents = useThreadSubagents(
-    scopeThreadRef(ctx.activeThreadEnvironmentId, item.threadId),
-  );
+  const subagents = useThreadSubagents(useRowOwnThreadRef(row));
   const record =
     item.type === "subagent"
       ? subagents.find((subagent) => subagent.id === item.subagentId)
@@ -3518,20 +3587,23 @@ function TimelineWorkflowCard({
 }) {
   const ctx = use(TimelineRowCtx);
   const [expanded, toggleExpanded] = useTimelineGroupExpansion(row, `subagent-group:${row.id}`);
-  const [workflow] = deriveWorkflowGroups(projectedSubagentsToRuntime([record]));
-  if (workflow === undefined) return null;
+  const onToggle = useStableCallback(() => toggleExpanded(!expanded));
   const { childThreadId } = record;
+  const onOpenGroupChat = useStableCallback(() => {
+    if (childThreadId !== null) ctx.onOpenThread(childThreadId);
+  });
+  const [workflow] = deriveWorkflowGroups(projectedSubagentsToRuntime([record]));
+  const group = useKeptCardGroup(workflow === undefined ? null : organCardFromWorkflow(workflow));
+  if (group === null) return null;
   return (
     <WorkLogBlock continues={row.continuesWorkLog}>
       <OrganCard
-        group={organCardFromWorkflow(workflow)}
+        group={group}
         expanded={expanded}
-        onToggle={() => toggleExpanded(!expanded)}
+        onToggle={onToggle}
         onOpenCell={ctx.onOpenCell}
         onOpenChat={ctx.onOpenThread}
-        {...(childThreadId === null
-          ? {}
-          : { onOpenGroupChat: () => ctx.onOpenThread(childThreadId) })}
+        {...(childThreadId === null ? {} : { onOpenGroupChat })}
       />
     </WorkLogBlock>
   );

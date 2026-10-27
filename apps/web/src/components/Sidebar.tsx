@@ -298,10 +298,8 @@ import {
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
-import {
-  OrchestrationSidebarHost,
-  useOrchestrationEnvironmentIds,
-} from "./sidebar/OrchestrationSidebarHost";
+import { OrchestrationSidebarHost } from "./sidebar/OrchestrationSidebarHost";
+import { useOrchestrationEnvironmentIds } from "./sidebar/orchestrationEnvironments";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { PodChip } from "./pods/PodChip";
@@ -5003,7 +5001,7 @@ export default function Sidebar() {
             <OrchestrationSidebarHost
               environmentIds={orchestrationEnvironmentIds}
               onCommitRename={commitOrchestrationRename}
-              onNavigate={closeMobileSheet}
+              onRowActivate={closeMobileSheet}
             />
           ) : null}
           {!isSearchingThreads && !showOrchestration ? (

@@ -40,8 +40,7 @@ import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import { useProjects } from "../state/entities";
 import { useUiStateStore } from "../uiStateStore";
-import { usePrimaryEnvironmentId } from "../state/environments";
-import { readEnvironmentSupportsOrchestrationMetas } from "../state/orchestrationTree";
+import { readOrchestrationEnvironmentIds } from "./sidebar/orchestrationEnvironments";
 import {
   clampThreadSidebarWidth,
   resolveInitialThreadSidebarWidth,
@@ -266,20 +265,14 @@ function AgentTreeSidebarControl() {
   const sidebarView = useUiStateStore((state) => state.sidebarView);
   const { isMobile, setOpen, setOpenMobile } = useSidebar();
   const legacySidebarEnabled = useLegacySidebarEnabled();
-  const routeThreadRef = useThreadRouteRef();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const environmentId = routeThreadRef?.environmentId ?? primaryEnvironmentId;
   useEffect(() => {
-    if (legacySidebarEnabled || environmentId === null) return;
+    if (legacySidebarEnabled) return;
     return window.desktopBridge?.onMenuAction((action) => {
-      if (
-        action === "sidebar.showAgentTree" &&
-        readEnvironmentSupportsOrchestrationMetas(environmentId)
-      ) {
+      if (action === "sidebar.showAgentTree" && readOrchestrationEnvironmentIds().length > 0) {
         useUiStateStore.getState().toggleSidebarView();
       }
     });
-  }, [environmentId, legacySidebarEnabled]);
+  }, [legacySidebarEnabled]);
   const handledRef = useRef({ request, sidebarView });
   useEffect(() => {
     const handled = handledRef.current;

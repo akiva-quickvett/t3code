@@ -130,7 +130,7 @@ function replaceThread(
 
 const noop = () => undefined;
 
-function render() {
+function render(onRowActivate?: () => void) {
   return act(() =>
     root.render(
       <RegistryContext.Provider value={registry}>
@@ -138,6 +138,7 @@ function render() {
           environmentIds={[environmentId]}
           onClearMeta={noop}
           onRenameThread={noop}
+          onRowActivate={onRowActivate}
         />
       </RegistryContext.Provider>,
     ),
@@ -275,6 +276,24 @@ describe("OrchestrationSidebar", () => {
     await act(() => registry.set(h.routeAtom, refOf(seedPodId(3))));
     expect(rowElement(keyOf(seedPodId(3)))).toBeDefined();
     expect(rowElement(keyOf(seedPodId(3)))!.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("reports every opened thread row, the routed one included, but not a toggle", async () => {
+    const onRowActivate = vi.fn();
+    await render(onRowActivate);
+    await act(() => clickChevron(keyOf(seedSliceId(1))));
+    expect(onRowActivate).not.toHaveBeenCalled();
+    await act(() => rowElement(keyOf(seedSliceId(1)))!.click());
+    expect(onRowActivate).toHaveBeenCalledTimes(1);
+
+    // Opening the thread that is already routed still counts.
+    await act(() => registry.set(h.routeAtom, refOf(seedSliceId(1))));
+    await act(() => rowElement(keyOf(seedSliceId(1)))!.click());
+    expect(onRowActivate).toHaveBeenCalledTimes(2);
+    await act(() => treeElement().focus());
+    expect(activeRowKey()).toBe(keyOf(seedSliceId(1)));
+    await pressKey("Enter");
+    expect(onRowActivate).toHaveBeenCalledTimes(3);
   });
 
   it("moves focus with the arrow keys and opens the focused row with Enter", async () => {

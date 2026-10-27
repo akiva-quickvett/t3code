@@ -5050,8 +5050,8 @@ export default function ChatView(props: ChatViewProps) {
   );
   const organGroups = deriveOrganGroups(activeSubagents, (id) => organCellShells.get(id));
   const dockOrgans = useOrganDockOrgans(organGroups, (group) => organName(group.presetId));
+  // The dock lists these cells itself; listed here too, this banner would cover it.
   const runningOrganCells = runningOrganCellThreadIds(organGroups);
-  // The dock lists running organ cells itself; listed here too, this banner would cover it.
   const activeBackgroundTasks =
     !isWorking && activeThread
       ? pendingBackgroundTasks.filter(

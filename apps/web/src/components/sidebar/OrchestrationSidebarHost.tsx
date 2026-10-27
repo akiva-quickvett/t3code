@@ -1,20 +1,13 @@
-import { useAtomValue } from "@effect/atom-react";
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
-import { Atom } from "effect/reactivity";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useState } from "react";
 
-import { environmentCatalog } from "../../connection/catalog";
 import { useStableCallback } from "../../hooks/useStableCallback";
-import { useThreadRouteRef } from "../../hooks/useThreadRouteTarget";
 import { newMessageId } from "../../lib/utils";
 import { readThreadShell } from "../../state/entities";
-import { environmentServerConfigsAtom } from "../../state/server";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { OrchestrationSidebar } from "../orchestration/OrchestrationSidebar";
@@ -30,30 +23,6 @@ import {
 import { Input } from "../ui/input";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
-// The same order `_chat.tsx` feeds `mergeOrchestrationOrders`, so tabs and
-// next-needs-you agree. Kept by reference while unchanged, so config churn
-// re-renders nothing.
-const orchestrationEnvironmentIdsAtom = (() => {
-  let previous: ReadonlyArray<EnvironmentId> = [];
-  return Atom.make((get) => {
-    const configs = get(environmentServerConfigsAtom);
-    const next = Array.from(enabledEnvironmentIds(get(environmentCatalog.catalogValueAtom))).filter(
-      (environmentId) =>
-        configs.get(environmentId)?.environment.capabilities.orchestrationMetas === true,
-    );
-    if (next.length === previous.length && next.every((id, index) => id === previous[index])) {
-      return previous;
-    }
-    previous = next;
-    return next;
-  }).pipe(Atom.withLabel("web-orchestration-environment-ids"));
-})();
-
-/** Empty when no enabled environment has metas, which hides the Orchestration view. */
-export function useOrchestrationEnvironmentIds(): ReadonlyArray<EnvironmentId> {
-  return useAtomValue(orchestrationEnvironmentIdsAtom);
-}
-
 export interface OrchestrationSidebarHostProps {
   readonly environmentIds: ReadonlyArray<EnvironmentId>;
   /** The Chat view's rename commit, so both views validate and report alike. */
@@ -62,8 +31,8 @@ export interface OrchestrationSidebarHostProps {
     title: string,
     originalTitle: string,
   ) => void;
-  /** Called when the routed thread changes, e.g. to close the mobile sheet. */
-  readonly onNavigate: () => void;
+  /** A thread row was opened, e.g. to close the mobile sheet. */
+  readonly onRowActivate: () => void;
 }
 
 /** Memoized: the chat list's host renders on every shell tick, and this view must not. */
@@ -113,16 +82,7 @@ export const OrchestrationSidebarHost = memo(function OrchestrationSidebarHost(
     props.onCommitRename(renaming.threadRef, renaming.title, renaming.originalTitle);
   };
 
-  // The tree navigates on its own; a new route is the pick.
-  const routeRef = useThreadRouteRef();
-  const routeKey = routeRef === null ? null : scopedThreadKey(routeRef);
-  const shownRouteKey = useRef(routeKey);
-  const onNavigate = useStableCallback(props.onNavigate);
-  useEffect(() => {
-    if (shownRouteKey.current === routeKey) return;
-    shownRouteKey.current = routeKey;
-    onNavigate();
-  }, [routeKey, onNavigate]);
+  const onRowActivate = useStableCallback(props.onRowActivate);
 
   return (
     <>
@@ -130,6 +90,7 @@ export const OrchestrationSidebarHost = memo(function OrchestrationSidebarHost(
         environmentIds={props.environmentIds}
         onClearMeta={clearMeta}
         onRenameThread={startRename}
+        onRowActivate={onRowActivate}
       />
       <Dialog
         open={renaming !== null}

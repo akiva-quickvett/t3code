@@ -1,4 +1,5 @@
 import { RegistryContext } from "@effect/atom-react";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { deriveOrganGroups } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   EnvironmentId,
@@ -18,7 +19,7 @@ import "~/index.css";
 import { ComposerBannerStack } from "./ComposerBannerStack";
 import { MessagesTimeline } from "./MessagesTimeline";
 import { OrganDock, organDockBannerItem, useOrganDockOrgans } from "./OrganDock";
-import { revealSubagentInTimeline } from "./timelineReveal";
+import { pendingTimelineReveal, revealSubagentInTimeline } from "./timelineReveal";
 
 const h = await vi.hoisted(async () => {
   const { Atom, AtomRegistry } = await import("effect/reactivity");
@@ -49,7 +50,9 @@ vi.mock(import("./PodSummaryCard"), () => ({
 }));
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
-const PARENT_ID = ThreadId.make("thread-1");
+// The timeline remembers scroll position and disclosures per thread, so every test gets a fresh one.
+let threadCount = 0;
+let PARENT_ID = ThreadId.make("organ-thread-0");
 const ORGAN_ID = "organ_review_council" as OrganId;
 const CREATED_AT = "2026-10-27T09:00:00.000Z";
 const CELLS = ["cell-a", "cell-b"] as const;
@@ -138,9 +141,7 @@ function entries(status: CellStatus): Entry[] {
 const setSubagents = (subagents: ReadonlyArray<OrchestrationV2Subagent>) =>
   act(async () => h.registry.set(h.thread, { projection: { subagents } }));
 
-let threadCount = 0;
 function timelineProps(overrides: Partial<TimelineProps> = {}): TimelineProps {
-  threadCount += 1;
   return {
     isWorking: false,
     activeTurnInProgress: false,
@@ -148,7 +149,7 @@ function timelineProps(overrides: Partial<TimelineProps> = {}): TimelineProps {
     latestRun: null,
     turnDiffSummaries: [],
     runs: [],
-    routeThreadKey: `environment-local:organ-thread-${threadCount}`,
+    routeThreadKey: scopedThreadKey(scopeThreadRef(ENVIRONMENT_ID, PARENT_ID)),
     timelineEntries: [],
     onOpenTurnDiff: () => {},
     onOpenThread: () => {},
@@ -211,6 +212,8 @@ let root: Root;
 let container: HTMLDivElement;
 
 beforeEach(() => {
+  threadCount += 1;
+  PARENT_ID = ThreadId.make(`organ-thread-${threadCount}`);
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   container = document.body.appendChild(document.createElement("div"));
   container.style.cssText = "height: 900px; width: 900px; display: flex; flex-direction: column;";
@@ -292,4 +295,20 @@ it("opens with the organ's card expanded after Show in parent chat", async () =>
   await vi.waitFor(() => expect(cellRows()).toHaveLength(2));
   expect(container.textContent).toContain("review cell-b");
   expect(onManualNavigation).toHaveBeenCalled();
+});
+
+it("drops a reveal whose cell is in no loaded row, and one that targets a lone subagent", async () => {
+  await setSubagents(CELLS.map((cell) => record(cell, "completed")));
+  const props = timelineProps({ timelineEntries: entries("completed") });
+  revealSubagentInTimeline(props.routeThreadKey, ThreadId.make("cell-elsewhere"));
+  await render(<MessagesTimeline {...props} />);
+  await vi.waitFor(() => expect(pendingTimelineReveal(props.routeThreadKey)).toBeNull());
+
+  threadCount += 1;
+  PARENT_ID = ThreadId.make(`organ-thread-${threadCount}`);
+  await setSubagents([]);
+  const lone = timelineProps({ timelineEntries: entries("completed").slice(0, 2) });
+  revealSubagentInTimeline(lone.routeThreadKey, ThreadId.make("cell-a"));
+  await render(<MessagesTimeline {...lone} />);
+  await vi.waitFor(() => expect(pendingTimelineReveal(lone.routeThreadKey)).toBeNull());
 });
