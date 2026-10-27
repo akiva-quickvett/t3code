@@ -1802,7 +1802,7 @@ describe("meta and organ contracts", () => {
     expect(command.type === "delegated_task.request" && command.organ).toEqual(organLabel);
   });
 
-  it("defines thread.meta.set outside the command union, which stays pinned", () => {
+  it("decodes thread.meta.set as a command", () => {
     const metaSet = {
       type: "thread.meta.set",
       commandId: "command-meta-1",
@@ -1812,7 +1812,7 @@ describe("meta and organ contracts", () => {
     expect(Schema.decodeUnknownSync(OrchestrationV2ThreadMetaSetCommand)(metaSet).enabled).toBe(
       true,
     );
-    expect(() => decodeOrchestrationV2Command(metaSet)).toThrow();
+    expect(decodeOrchestrationV2Command(metaSet).type).toBe("thread.meta.set");
 
     expect(typeLiterals(OrchestrationV2Command)).toEqual([
       "thread.create",
@@ -1825,6 +1825,7 @@ describe("meta and organ contracts", () => {
       "thread.snooze",
       "thread.unsnooze",
       "thread.auto-settle.set",
+      "thread.meta.set",
       "thread.pin",
       "thread.unpin",
       "thread.pin.reorder",

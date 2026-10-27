@@ -483,6 +483,21 @@ export const setThreadAutoSettle = Effect.fn("EnvironmentCommands.setThreadAutoS
   });
 });
 
+export interface SetThreadMetaInput extends ThreadCommandInput {
+  readonly enabled: boolean;
+}
+/** Promote or demote; the server refuses a promote that breaks a meta precondition. */
+export const setThreadMeta = Effect.fn("EnvironmentCommands.setThreadMeta")(function* (
+  input: SetThreadMetaInput,
+) {
+  return yield* dispatch({
+    type: "thread.meta.set",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    enabled: input.enabled,
+  });
+});
+
 export const reorderPinnedThread = Effect.fn("EnvironmentCommands.reorderPinnedThread")(function* (
   input: ReorderPinnedThreadInput,
 ) {

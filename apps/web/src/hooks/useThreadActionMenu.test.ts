@@ -4,6 +4,7 @@ import {
   ThreadId,
   type ContextMenuItem,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -21,6 +22,9 @@ const state = vi.hoisted(() => ({
   granted: new Set<string>(),
   effects: [] as string[],
   completed: deferred<void>(),
+  toasts: [] as Array<{ title: string; description: string }>,
+  dispatched: [] as unknown[],
+  dispatchFailure: null as Error | null,
   show: vi.fn<
     (
       items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>>,
@@ -65,14 +69,27 @@ vi.mock("../state/entities", () => ({
     worktreePath: null,
     runtime: null,
     latestRun: null,
+    lineage: { relationshipToParent: null },
+    archivedAt: null,
+    metaAt: null,
   }),
   useProjects: () => [{ id: "project", environmentId: "secondary" }],
 }));
 vi.mock("../state/environments", () => ({ usePrimaryEnvironmentId: () => "primary" }));
-vi.mock("../state/threads", () => ({ threadEnvironment: { updateMetadata: "metadata" } }));
+vi.mock("../state/threads", () => ({
+  threadEnvironment: { updateMetadata: "metadata", setMeta: "set-meta" },
+}));
+vi.mock("../state/orchestrationTree", () => ({
+  readEnvironmentSupportsOrchestrationMetas: () => true,
+}));
 vi.mock("../state/use-atom-command", () => ({
-  useAtomCommand: () => async () => {
-    recordEffect("metadata");
+  useAtomCommand: (command: string) => async (value: unknown) => {
+    if (command === "set-meta") {
+      state.dispatched.push(value);
+      if (state.dispatchFailure !== null)
+        return AsyncResult.failure(Cause.fail(state.dispatchFailure));
+    }
+    recordEffect(command === "set-meta" ? "set-meta" : "metadata");
     return AsyncResult.success(undefined);
   },
 }));
@@ -103,7 +120,12 @@ vi.mock("../uiStateStore", () => ({
 }));
 vi.mock("../components/ui/toast", () => ({
   stackedThreadToast: (toast: unknown) => toast,
-  toastManager: { add: () => state.completed.resolve() },
+  toastManager: {
+    add: (toast: { title: string; description: string }) => {
+      state.toasts.push(toast);
+      state.completed.resolve();
+    },
+  },
 }));
 vi.mock("../components/Sidebar.snooze", () => ({
   resolveSnoozePresets: () => [
@@ -174,6 +196,9 @@ beforeEach(() => {
   state.granted = new Set(["primary"]);
   state.effects = [];
   state.completed = deferred<void>();
+  state.toasts = [];
+  state.dispatched = [];
+  state.dispatchFailure = null;
   state.show.mockReset().mockResolvedValue(null);
 });
 
@@ -229,5 +254,33 @@ describe("thread menu permissions", () => {
     createMenu().openMenu(position);
     await state.completed.promise;
     expect(state.effects).toEqual([effect]);
+  });
+});
+
+describe("meta promotion", () => {
+  it("dispatches thread.meta.set through setMeta", async () => {
+    state.granted.add("secondary");
+    state.show.mockResolvedValue("promote-meta");
+    createMenu().openMenu(position);
+    await state.completed.promise;
+    expect(state.show.mock.calls[0]![0].map((item) => item.id)).toContain("promote-meta");
+    expect(state.dispatched).toEqual([
+      { environmentId: "secondary", input: { threadId: "thread", enabled: true } },
+    ]);
+  });
+
+  it("shows the server's refusal when a promote is rejected", async () => {
+    state.granted.add("secondary");
+    state.dispatchFailure = new Error("Thread thread is archived; unarchive it first.");
+    state.show.mockResolvedValue("promote-meta");
+    createMenu().openMenu(position);
+    await state.completed.promise;
+    expect(state.toasts).toEqual([
+      {
+        type: "error",
+        title: "Failed to promote thread",
+        description: "Thread thread is archived; unarchive it first.",
+      },
+    ]);
   });
 });

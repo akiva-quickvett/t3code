@@ -24,12 +24,14 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
@@ -1118,4 +1120,278 @@ it.effect("replays a thread.create receipt without changing the thread", () =>
     assert.deepEqual(yield* projections.getThread(threadId), before);
     assert.equal(yield* orchestrator.getThreadEventSequence(threadId), original.sequence);
   }).pipe(Effect.provide(layerTest)),
+);
+
+const layerMetaTest = Layer.mergeAll(
+  layerTest,
+  EventStore.layer.pipe(Layer.provide(layerDatabase)),
+);
+
+const createMetaCandidate = (threadId: ThreadId) =>
+  Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+    orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`create:${threadId}`),
+      threadId,
+      projectId: ProjectId.make("project:metas"),
+      title: threadId,
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    }),
+  );
+
+const setMeta = (threadId: ThreadId, enabled: boolean, id = `${enabled}`) =>
+  Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+    orchestrator.dispatch({
+      type: "thread.meta.set",
+      commandId: CommandId.make(`meta:${threadId}:${id}`),
+      threadId,
+      enabled,
+    }),
+  );
+
+const eventTypesOf = (commandId: string) =>
+  Effect.flatMap(EventStore.EventStoreV2, (events) =>
+    events.readByCommandId({ commandId: CommandId.make(commandId) }).pipe(
+      Stream.map((stored) => stored.event.type),
+      Stream.runCollect,
+    ),
+  );
+
+it.effect("promotes a thread to a meta in one event, keeping a role it has", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const plain = ThreadId.make("thread:meta-plain");
+    const research = ThreadId.make("thread:meta-research");
+    yield* createMetaCandidate(plain);
+    yield* createMetaCandidate(research);
+    yield* orchestrator.dispatch({
+      type: "thread.settle",
+      commandId: CommandId.make("settle:meta-plain"),
+      threadId: plain,
+    });
+    const until = DateTime.formatIso(DateTime.add(yield* DateTime.now, { hours: 2 }));
+    yield* orchestrator.dispatch({
+      type: "thread.snooze",
+      commandId: CommandId.make("snooze:meta-plain"),
+      threadId: plain,
+      snoozedUntil: until,
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("role:meta-research"),
+      threadId: research,
+      rolePreset: { id: "research", label: "Researcher" },
+    });
+
+    yield* setMeta(plain, true);
+    assert.deepEqual(yield* eventTypesOf(`meta:${plain}:true`), ["thread.metadata-updated"]);
+    const promoted = yield* projections.getThread(plain);
+    assert.isNotNull(promoted.metaAt ?? null);
+    assert.isNotNull(promoted.autoSettleDisabledAt ?? null);
+    assert.deepEqual(promoted.rolePreset, { id: "meta", label: "Meta orchestrator" });
+    assert.notEqual(promoted.settledOverride, "settled");
+    assert.isNull(promoted.settledAt);
+    assert.isNull(promoted.snoozedUntil ?? null);
+    assert.isNull(promoted.snoozeWhenIdle ?? null);
+    assert.deepEqual((yield* projections.getThreadShell(plain))?.metaAt, promoted.metaAt);
+
+    yield* setMeta(research, true);
+    assert.deepEqual((yield* projections.getThread(research)).rolePreset, {
+      id: "research",
+      label: "Researcher",
+    });
+
+    // A repeated promote changes nothing, not even updatedAt.
+    yield* TestClock.adjust("1 second");
+    yield* setMeta(plain, true, "again");
+    assert.deepEqual(yield* projections.getThread(plain), promoted);
+  }).pipe(Effect.provide(layerMetaTest)),
+);
+
+it.effect("demotes a meta by clearing only the marker", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:meta-demote");
+    yield* createMetaCandidate(threadId);
+    yield* setMeta(threadId, true);
+    const promoted = yield* projections.getThread(threadId);
+    yield* TestClock.adjust("1 second");
+    yield* setMeta(threadId, false);
+    const demoted = yield* projections.getThread(threadId);
+    assert.isNull(demoted.metaAt ?? null);
+    assert.deepEqual(demoted.rolePreset, promoted.rolePreset);
+    assert.deepEqual(demoted.autoSettleDisabledAt, promoted.autoSettleDisabledAt);
+    assert.deepEqual(
+      { ...demoted, metaAt: null, updatedAt: promoted.updatedAt },
+      {
+        ...promoted,
+        metaAt: null,
+      },
+    );
+    assert.isUndefined((yield* projections.getThreadShell(threadId))?.metaAt);
+  }).pipe(Effect.provide(layerMetaTest)),
+);
+
+it.effect("refuses to promote a subagent child, an archived thread or a deleted one", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const parent = ThreadId.make("thread:meta-parent");
+    const child = ThreadId.make("thread:meta-child");
+    const archived = ThreadId.make("thread:meta-archived");
+    const deleted = ThreadId.make("thread:meta-deleted");
+    yield* createMetaCandidate(parent);
+    yield* createMetaCandidate(archived);
+    yield* createMetaCandidate(deleted);
+    const parentThread = yield* projections.getThread(parent);
+    yield* projections.apply({
+      id: EventId.make("event:created:meta-child"),
+      type: "thread.created",
+      threadId: child,
+      providerInstanceId: instanceId,
+      occurredAt: yield* DateTime.now,
+      payload: {
+        ...parentThread,
+        id: child,
+        lineage: { parentThreadId: parent, relationshipToParent: "subagent", rootThreadId: parent },
+      },
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.archive",
+      commandId: CommandId.make("archive:meta-archived"),
+      threadId: archived,
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("delete:meta-deleted"),
+      threadId: deleted,
+    });
+    for (const [threadId, reason] of [
+      [child, "is a delegated child"],
+      [archived, "unarchive it first"],
+      [deleted, "is deleted"],
+    ] as const) {
+      const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+      const refused = yield* setMeta(threadId, true).pipe(Effect.flip);
+      assert.equal(refused._tag, "OrchestratorDispatchError", threadId);
+      assert.include(String(refused.cause), reason);
+      assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+      assert.isNull((yield* projections.getThread(threadId)).metaAt ?? null);
+    }
+  }).pipe(Effect.provide(layerMetaTest)),
+);
+
+it.effect("refuses to settle, archive or delete a meta, and still pins and snoozes it", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:meta-guarded");
+    yield* createMetaCandidate(threadId);
+    yield* setMeta(threadId, true);
+    for (const command of [
+      { type: "thread.settle", commandId: CommandId.make("settle:guarded"), threadId },
+      {
+        type: "thread.settle",
+        commandId: CommandId.make("settle-tree:guarded"),
+        threadId,
+        scope: "tree",
+      },
+      { type: "thread.archive", commandId: CommandId.make("archive:guarded"), threadId },
+      { type: "thread.delete", commandId: CommandId.make("delete:guarded"), threadId },
+    ] as const) {
+      const refused = yield* orchestrator.dispatch(command).pipe(Effect.flip);
+      assert.equal(refused._tag, "OrchestratorDispatchError", command.commandId);
+      assert.include(String(refused.cause), "is a meta; demote it first");
+    }
+    const guarded = yield* projections.getThread(threadId);
+    assert.notEqual(guarded.settledOverride, "settled");
+    assert.isNull(guarded.archivedAt);
+    assert.isNull(guarded.deletedAt);
+
+    yield* orchestrator.dispatch({
+      type: "thread.pin",
+      commandId: CommandId.make("pin:guarded"),
+      threadId,
+    });
+    const until = DateTime.formatIso(DateTime.add(yield* DateTime.now, { hours: 1 }));
+    yield* orchestrator.dispatch({
+      type: "thread.snooze",
+      commandId: CommandId.make("snooze:guarded"),
+      threadId,
+      snoozedUntil: until,
+      scope: "thread",
+    });
+    const pinned = yield* projections.getThread(threadId);
+    assert.isNotNull(pinned.pinnedAt ?? null);
+    assert.equal(pinned.snoozedUntil && DateTime.formatIso(pinned.snoozedUntil), until);
+
+    // Demoted, it settles again.
+    yield* setMeta(threadId, false);
+    yield* orchestrator.dispatch({
+      type: "thread.settle",
+      commandId: CommandId.make("settle:demoted"),
+      threadId,
+    });
+    assert.equal((yield* projections.getThread(threadId)).settledOverride, "settled");
+  }).pipe(Effect.provide(layerMetaTest)),
+);
+
+it.effect("clears a pending tree settle and a tree-settle mark on promote, in the same event", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:meta-tree-marks");
+    yield* createMetaCandidate(threadId);
+    const thread = yield* projections.getThread(threadId);
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make("event:meta-tree-marks"),
+      type: "thread.metadata-updated",
+      threadId,
+      providerInstanceId: instanceId,
+      occurredAt: now,
+      payload: {
+        ...thread,
+        settleWhenIdle: { requestedAt: DateTime.formatIso(now), scope: "tree" },
+        settledByTree: ThreadId.make("thread:some-root"),
+      },
+    });
+    yield* setMeta(threadId, true);
+    assert.deepEqual(yield* eventTypesOf(`meta:${threadId}:true`), ["thread.metadata-updated"]);
+    const promoted = yield* projections.getThread(threadId);
+    assert.isNull(promoted.settleWhenIdle ?? null);
+    assert.isNull(promoted.settledByTree ?? null);
+  }).pipe(Effect.provide(layerMetaTest)),
+);
+
+it.effect("promotes a fork of a meta, which starts without the marker", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const meta = ThreadId.make("thread:meta-forked");
+    const fork = ThreadId.make("thread:meta-fork");
+    yield* createMetaCandidate(meta);
+    yield* setMeta(meta, true);
+    const source = yield* projections.getThread(meta);
+    yield* projections.apply({
+      id: EventId.make("event:created:meta-fork"),
+      type: "thread.created",
+      threadId: fork,
+      providerInstanceId: instanceId,
+      occurredAt: yield* DateTime.now,
+      payload: {
+        ...source,
+        id: fork,
+        metaAt: null,
+        lineage: { parentThreadId: meta, relationshipToParent: "fork", rootThreadId: meta },
+      },
+    });
+    yield* setMeta(fork, true);
+    assert.isNotNull((yield* projections.getThread(fork)).metaAt ?? null);
+  }).pipe(Effect.provide(layerMetaTest)),
 );

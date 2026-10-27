@@ -158,6 +158,8 @@ it.effect.each([
         ["unsettled", { settledOverride: "active" }],
         ["pinned", { pinnedAt: old }],
         ["auto-settle-disabled", { autoSettleDisabledAt: old }],
+        // Auto-settle turned back on still leaves a meta alone.
+        ["meta", { metaAt: old, autoSettleDisabledAt: null }],
       ] satisfies ReadonlyArray<readonly [string, Partial<OrchestrationV2AppThread>]>) {
         yield* createRun(yield* createThread(name, overrides));
       }
@@ -252,6 +254,10 @@ it.effect.each([
       });
       const candidates = yield* store.getSettlementCandidates();
       const shell = yield* store.getShellSnapshot({ location: "active" });
+      assert.notInclude(
+        candidates.map((thread) => thread.id),
+        ThreadId.make("thread:settlement:meta"),
+      );
       const eligible = candidates.filter((thread) =>
         isAutoSettlementCandidate(thread, DateTime.toEpochMillis(now)),
       );

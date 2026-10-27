@@ -1,34 +1,21 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import {
   AGENT_ROLE_PRESET_INSTRUCTIONS_MAX_LENGTH,
   type AgentRolePresetScope,
   type EffectiveAgentRolePreset,
   type EnvironmentId,
   type ProjectId,
-  type ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
 } from "@t3tools/contracts";
 import { MoreHorizontalIcon, PlusIcon, RotateCcwIcon, UserRoundCogIcon } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 
 import { confirmDestructive } from "../../confirmDialog";
-import { useEnvironmentSettings } from "../../hooks/useSettings";
-import { getCustomModelOptionsByInstance } from "../../modelSelection";
-import {
-  applyProviderInstanceSettings,
-  deriveProviderInstanceEntries,
-  sortProviderInstanceEntries,
-} from "../../providerInstances";
 import { useEnvironmentSupportsRolePresets } from "../../state/agentRoles";
 import { useEnvironmentQuery } from "../../state/query";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -43,12 +30,9 @@ import {
 } from "../ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { Input } from "../ui/input";
-import { Label } from "../ui/label";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
-import { toastManager } from "../ui/toast";
 import {
   EMPTY_ROLE_DRAFT,
   draftToPreset,
@@ -59,21 +43,13 @@ import {
 } from "./agentRolesSettings.logic";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
-  SETTINGS_PICKER_TRIGGER_CLASSNAME,
-  SettingsPageContainer,
-  SettingsRow,
-  SettingsSection,
-} from "./settingsLayout";
-
-function reportFailure(title: string, result: Parameters<typeof isAtomCommandInterrupted>[0]) {
-  if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;
-  const error = squashAtomCommandFailure(result);
-  toastManager.add({
-    type: "error",
-    title,
-    description: error instanceof Error ? error.message : "The request failed.",
-  });
-}
+  Field,
+  OptionalSelect,
+  PresetModelPicker,
+  RemovedPresetsSection,
+  reportFailure,
+} from "./presetSettingsControls";
+import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 
 export function AgentRolesSettings() {
   const { scope, target, connectedEnvironments } = useSettingsScope();
@@ -254,33 +230,13 @@ function AgentRolesPanel(props: {
           );
         })}
       </SettingsSection>
-      {removed.length > 0 ? (
-        <SettingsSection title="Removed roles">
-          {removed.map((entry) => (
-            <SettingsRow
-              key={entry.id}
-              title={entry.label}
-              description={
-                entry.removedIn === layer
-                  ? entry.id
-                  : `${entry.id} · removed for the whole environment`
-              }
-              control={
-                entry.removedIn === layer ? (
-                  <Button
-                    size="xs"
-                    variant="ghost-muted"
-                    disabled={!canWrite}
-                    onClick={() => void reset(entry.id)}
-                  >
-                    Restore
-                  </Button>
-                ) : null
-              }
-            />
-          ))}
-        </SettingsSection>
-      ) : null}
+      <RemovedPresetsSection
+        title="Removed roles"
+        layer={layer}
+        entries={removed}
+        canWrite={canWrite}
+        onRestore={(id) => void reset(id)}
+      />
       {editor ? (
         <AgentRoleEditorDialog
           key={editor.preset?.id ?? "new"}
@@ -293,55 +249,6 @@ function AgentRolesPanel(props: {
         />
       ) : null}
     </>
-  );
-}
-
-function Field(props: {
-  readonly label: string;
-  readonly hint?: string;
-  readonly htmlFor?: string;
-  readonly children: ReactNode;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <Label className="flex items-baseline justify-between" htmlFor={props.htmlFor}>
-        <span>{props.label}</span>
-        {props.hint ? (
-          <span className="font-normal text-2xs text-muted-foreground/80">{props.hint}</span>
-        ) : null}
-      </Label>
-      {props.children}
-    </div>
-  );
-}
-
-const INHERIT = "inherit";
-
-function OptionalSelect<Value extends string>(props: {
-  readonly id: string;
-  readonly value: Value | "";
-  readonly choices: ReadonlyArray<{ readonly value: Value; readonly label: string }>;
-  readonly emptyLabel: string;
-  readonly onChange: (value: Value | "") => void;
-}) {
-  const label = props.choices.find((choice) => choice.value === props.value)?.label;
-  return (
-    <Select
-      value={props.value === "" ? INHERIT : props.value}
-      onValueChange={(value) => props.onChange(value === INHERIT ? "" : (value as Value))}
-    >
-      <SelectTrigger id={props.id} size="sm">
-        <SelectValue>{label ?? props.emptyLabel}</SelectValue>
-      </SelectTrigger>
-      <SelectPopup>
-        <SelectItem value={INHERIT}>{props.emptyLabel}</SelectItem>
-        {props.choices.map((choice) => (
-          <SelectItem key={choice.value} value={choice.value}>
-            {choice.label}
-          </SelectItem>
-        ))}
-      </SelectPopup>
-    </Select>
   );
 }
 
@@ -393,7 +300,6 @@ function AgentRoleEditorDialog(props: {
   readonly takenIds: ReadonlyArray<string>;
   readonly onClose: () => void;
 }) {
-  const settings = useEnvironmentSettings(props.environmentId);
   const providers =
     useAtomValue(serverEnvironment.providersValueAtom(props.environmentId)) ??
     EMPTY_SERVER_PROVIDERS;
@@ -407,21 +313,6 @@ function AgentRoleEditorDialog(props: {
   const [saving, setSaving] = useState(false);
   const update = (patch: Partial<RoleDraft>) => setDraft((current) => ({ ...current, ...patch }));
 
-  const instanceEntries = sortProviderInstanceEntries(
-    applyProviderInstanceSettings(
-      deriveProviderInstanceEntries(providers),
-      settings,
-      props.projectId,
-    ),
-  );
-  // An unpinned default with no usable instance has none yet; the picker shows nothing chosen.
-  const activeInstanceId = draft.instanceId as ProviderInstanceId;
-  const modelOptionsByInstance = getCustomModelOptionsByInstance(
-    settings,
-    providers,
-    activeInstanceId,
-    draft.model,
-  );
   const descriptors =
     providers
       .find((provider) => provider.instanceId === draft.instanceId)
@@ -481,21 +372,16 @@ function AgentRoleEditorDialog(props: {
               </Field>
             </div>
             <Field label="Model">
-              <ProviderModelPicker
+              <PresetModelPicker
                 environmentId={props.environmentId}
-                activeInstanceId={activeInstanceId}
+                projectId={props.projectId}
+                instanceId={draft.instanceId}
+                driverKind={draft.driverKind}
                 model={draft.model}
-                providerLock={null}
-                instanceEntries={instanceEntries}
-                modelOptionsByInstance={modelOptionsByInstance}
-                isComposerOwned={false}
-                triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                onInstanceModelChange={(instanceId, model) =>
+                onChange={({ instanceId, driverKind, model }) =>
                   update({
                     instanceId,
-                    driverKind:
-                      instanceEntries.find((entry) => entry.instanceId === instanceId)
-                        ?.driverKind ?? draft.driverKind,
+                    driverKind,
                     model,
                     options: model === draft.model ? draft.options : [],
                   })

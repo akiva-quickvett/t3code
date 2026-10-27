@@ -430,6 +430,52 @@ describe("thread menu pod services", () => {
   });
 });
 
+describe("meta menu entries", () => {
+  const metaState = (patch: Partial<ThreadActionMenuState>): ThreadActionMenuState => ({
+    ...baseState,
+    supports: { ...baseState.supports, metas: true },
+    isMeta: false,
+    metaPromoteBlocker: null,
+    ...patch,
+  });
+  const metaItems = (state: ThreadActionMenuState) =>
+    buildThreadActionMenuItems(state)
+      .filter((item) => item.id === "promote-meta" || item.id === "demote-meta")
+      .map((item) => [item.id, item.label, item.disabled === true]);
+
+  it("hides both entries on a server without metas", () => {
+    expect(metaItems({ ...baseState, isMeta: true })).toEqual([]);
+    expect(metaItems(baseState)).toEqual([]);
+  });
+
+  it("offers promote on a top-level thread and demote on a meta", () => {
+    expect(metaItems(metaState({}))).toEqual([["promote-meta", "Promote to meta", false]]);
+    expect(metaItems(metaState({ isMeta: true }))).toEqual([["demote-meta", "Demote meta", false]]);
+  });
+
+  it("hides both entries on a delegated child", () => {
+    expect(metaItems(metaState({ metaPromoteBlocker: "delegated-child" }))).toEqual([]);
+  });
+
+  it.each([
+    ["supervised", "Promote to meta (supervised launch)"],
+    ["archived", "Promote to meta (unarchive first)"],
+  ] as const)("disables promote with the reason when %s", (blocker, label) => {
+    expect(metaItems(metaState({ metaPromoteBlocker: blocker }))).toEqual([
+      ["promote-meta", label, true],
+    ]);
+  });
+
+  it("disables both directions without operate permission", () => {
+    expect(metaItems(metaState({ canOperate: false }))).toEqual([
+      ["promote-meta", "Promote to meta", true],
+    ]);
+    expect(metaItems(metaState({ canOperate: false, isMeta: true }))).toEqual([
+      ["demote-meta", "Demote meta", true],
+    ]);
+  });
+});
+
 describe("buildDraftActionMenuItems", () => {
   it("offers only the copy values the draft has", () => {
     const items = buildDraftActionMenuItems({ hasPath: false, hasBranch: true, hasProject: true });
