@@ -1114,6 +1114,12 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:agent-roles:live",
       tag: WS_METHODS.agentRolesSubscribe,
     }),
+    // The server samples host and burn only while someone subscribes, so close on unmount.
+    orchestrationStatsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:orchestration-stats:live",
+      tag: WS_METHODS.orchestrationSubscribeStats,
+      idleTtlMs: 0,
+    }),
     chatChannelsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:chat-channels:live",
       tag: WS_METHODS.chatChannelsSubscribe,
