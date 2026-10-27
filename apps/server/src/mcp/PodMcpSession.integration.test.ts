@@ -22,6 +22,7 @@ import * as ServerHttp from "../http.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ContainerDriver from "../pod/ContainerDriver.ts";
 import * as PodRuntimeStore from "../pod/PodRuntimeStore.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { makeFakeContainerDriver } from "../pod/testkit/FakeContainerDriver.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { OrchestrationV2ServerCommand } from "@t3tools/contracts";
@@ -93,6 +94,7 @@ const layer = Layer.mergeAll(
   Layer.provide(layerServerEnvironment),
   Layer.provide(layerThreads),
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+  Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provideMerge(ServerSecretStore.layer),

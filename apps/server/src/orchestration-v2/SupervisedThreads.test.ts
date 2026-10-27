@@ -8,7 +8,9 @@ import {
   type NodeId,
   ProviderInstanceId,
   ProviderTurnId,
+  type OrchestrationV2DomainEvent,
   type RunId,
+  type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -20,6 +22,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -44,7 +47,7 @@ const adapter = {
   openSession: () => Effect.die("Runs here never reach a provider"),
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 const layerDatabase = SqlitePersistence.layerMemory;
-const makeLayerTest = (supervisedWakes: boolean) =>
+const makeLayerTest = (supervisedWakes: boolean, runContinuationWorker = false) =>
   ThreadManagementService.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
@@ -55,7 +58,12 @@ const makeLayerTest = (supervisedWakes: boolean) =>
         ProviderReplayHarness.layerWithRegistry(
           { name: "supervised-threads" },
           ProviderAdapterRegistry.layerFromAdapters([adapter]),
-          { databaseLayer: layerDatabase, runEffectWorker: false, supervisedWakes },
+          {
+            databaseLayer: layerDatabase,
+            runEffectWorker: false,
+            runContinuationWorker,
+            supervisedWakes,
+          },
         ),
       ),
     ),
@@ -619,4 +627,213 @@ it.effect("refuses a meta agent's own settle mid-turn instead of deferring it", 
     assert.isUndefined(shell?.settleWhenIdle);
     assert.notEqual(shell?.settledOverride, "settled");
   }).pipe(Effect.provide(layerTest)),
+);
+
+const layerProviders = (slashCommands: ServerProvider["slashCommands"]) =>
+  Layer.mock(ProviderRegistry.ProviderRegistry)({
+    getProviders: Effect.succeed([{ instanceId, slashCommands } as unknown as ServerProvider]),
+  });
+const layerCompaction = makeLayerTest(true, true).pipe(
+  Layer.provideMerge(layerProviders([{ name: "compact", description: "Compact" }])),
+);
+
+/** A launcher whose turn the user stopped while its supervised thread finished. */
+const heldCohort = (launcherId: ThreadId, childId: ThreadId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const launch = yield* launchSupervised(launcherId, childId);
+    const launcherRun = (yield* orchestrator.getThreadProjection(launcherId)).runs[0]!;
+    yield* orchestrator.dispatch({
+      type: "run.interrupt",
+      commandId: CommandId.make(`stop:${launcherId}`),
+      threadId: launcherId,
+      runId: launcherRun.id,
+      holdQueue: true,
+    });
+    yield* endRun(childId, launch.id, "completed");
+    const [held] = yield* supervisedTasks(launcherId, childId);
+    assert.equal(held?.completionDelivery?.state, "pending");
+    assert.equal(held?.runId, launcherRun.id);
+    return held!;
+  });
+
+/** Ends a run the way a provider does, through the event stream the orchestrator reacts to. */
+const completeLive = (threadId: ThreadId, runId: RunId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const eventSink = yield* EventSink.EventSinkV2;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+      (candidate) => candidate.id === runId,
+    )!;
+    const now = yield* DateTime.now;
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make(`event:${runId}:live-completed`),
+          type: "run.updated",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+        },
+      ],
+    });
+  });
+
+const nextEvent = (
+  afterSequence: number,
+  matches: (event: OrchestrationV2DomainEvent) => boolean,
+) =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    return yield* eventSink.stream({ afterSequence }).pipe(
+      Stream.map((stored) => stored.event),
+      Stream.filter(matches),
+      Stream.take(1),
+      Stream.runHead,
+    );
+  });
+
+it.effect("a user's /compact releases held supervised wakes, which run after the compaction", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const eventSink = yield* EventSink.EventSinkV2;
+    const launcherId = ThreadId.make("thread:compact-web-launcher");
+    const childId = ThreadId.make("thread:compact-web-child");
+    const held = yield* heldCohort(launcherId, childId);
+
+    const afterCompact = yield* eventSink.latestSequence();
+    const compaction = yield* send({
+      threadId: launcherId,
+      text: "/compact",
+      mode: "queue_after_active",
+    });
+    const [task] = yield* supervisedTasks(launcherId, childId);
+    assert.equal(task?.id, held.id);
+    assert.equal(task?.runId, compaction.id);
+    assert.equal(task?.completionDelivery?.state, "claimed");
+    const delivery = (yield* orchestrator.getThreadProjection(launcherId)).runs.find(
+      (run) => run.id === compaction.id,
+    )?.delegatedCompletion?.delivery;
+    assert.deepEqual(delivery?.taskIds, [held.id]);
+
+    // The continuation worker queues the wake message behind the compaction.
+    const queued = yield* nextEvent(
+      afterCompact,
+      (event) =>
+        event.type === "run.created" &&
+        event.threadId === launcherId &&
+        event.payload.userMessageId === delivery?.messageId,
+    );
+    assert.isTrue(Option.isSome(queued));
+    const wakeRunId = (queued as Option.Some<OrchestrationV2DomainEvent>).value.runId!;
+    const wakeRun = () =>
+      orchestrator
+        .getThreadProjection(launcherId)
+        .pipe(Effect.map((projection) => projection.runs.find((run) => run.id === wakeRunId)));
+    assert.equal((yield* wakeRun())?.status, "queued");
+
+    const afterCompaction = yield* eventSink.latestSequence();
+    yield* completeLive(launcherId, compaction.id);
+    const started = yield* nextEvent(
+      afterCompaction,
+      (event) =>
+        event.type === "run.updated" &&
+        event.runId === wakeRunId &&
+        event.payload.status === "starting",
+    );
+    assert.isTrue(Option.isSome(started));
+    assert.equal((yield* wakeRun())?.status, "starting");
+    assert.equal((yield* wakeRun())?.threadId, launcherId);
+  }).pipe(Effect.provide(layerCompaction)),
+);
+
+it.effect("an agent's compaction leaves held supervised wakes held", () =>
+  Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const launcherId = ThreadId.make("thread:compact-agent-launcher");
+    const childId = ThreadId.make("thread:compact-agent-child");
+    const held = yield* heldCohort(launcherId, childId);
+
+    yield* threads.compact({
+      projectId,
+      threadId: launcherId,
+      commandId: CommandId.make("compact:agent"),
+    });
+    const compaction = (yield* threads.getThreadProjection(launcherId)).runs.find(
+      (run) => run.userMessageId === MessageId.make("compact:agent"),
+    )!;
+    yield* endRun(launcherId, compaction.id, "completed");
+    const [task] = yield* supervisedTasks(launcherId, childId);
+    assert.equal(task?.runId, held.runId);
+    assert.equal(task?.completionDelivery?.state, "pending");
+    // No cohort was planned onto any run, so no wake message or wake run exists.
+    const launcher = yield* threads.getThreadProjection(launcherId);
+    assert.deepEqual(
+      launcher.runs.map((run) => run.id),
+      [held.runId, compaction.id],
+    );
+    assert.isTrue(launcher.runs.every((run) => run.delegatedCompletion?.delivery == null));
+  }).pipe(Effect.provide(layerCompaction)),
+);
+
+const compactThread = (threadId: ThreadId, commandId: string) =>
+  Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    return yield* threads.compact({ projectId, threadId, commandId: CommandId.make(commandId) });
+  });
+
+it.effect("an agent's compaction queues behind a running turn instead of steering it", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = ThreadId.make("thread:compact-busy");
+    yield* createThread(threadId);
+    const running = yield* steerableUserTurn(threadId);
+    yield* compactThread(threadId, "compact:busy");
+
+    const projection = yield* orchestrator.getThreadProjection(threadId);
+    const message = projection.messages.find(
+      (candidate) => candidate.id === MessageId.make("compact:busy"),
+    );
+    assert.include(message, { text: "/compact", createdBy: "agent", creationSource: "mcp" });
+    assert.notEqual(message?.runId, running.id);
+    assert.equal(projection.runs.find((run) => run.id === message?.runId)?.status, "queued");
+    assert.equal(projection.runs.find((run) => run.id === running.id)?.status, "running");
+  }).pipe(Effect.provide(layerCompaction)),
+);
+
+it.effect("refuses to compact a thread with no conversation and dispatches nothing", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = ThreadId.make("thread:compact-empty");
+    yield* createThread(threadId);
+    const empty = yield* Effect.flip(compactThread(threadId, "compact:empty"));
+    assert.include(empty, {
+      _tag: "ThreadManagementCompactionUnavailableError",
+      reason: "no_conversation",
+    });
+
+    yield* send({ threadId, text: "/compact" });
+    const onlyCompact = yield* Effect.flip(compactThread(threadId, "compact:only-compact"));
+    assert.include(onlyCompact, { reason: "no_conversation" });
+    assert.deepEqual(
+      (yield* orchestrator.getThreadProjection(threadId)).messages.map((message) => message.text),
+      ["/compact"],
+    );
+  }).pipe(Effect.provide(layerCompaction)),
+);
+
+it.effect("refuses to compact when the thread's provider does not advertise compact", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = ThreadId.make("thread:compact-unsupported");
+    yield* createThread(threadId);
+    yield* send({ threadId, text: "hello" });
+    const refused = yield* Effect.flip(compactThread(threadId, "compact:unsupported"));
+    assert.include(refused, {
+      _tag: "ThreadManagementCompactionUnavailableError",
+      reason: "provider_unsupported",
+    });
+    assert.equal((yield* orchestrator.getThreadProjection(threadId)).messages.length, 1);
+  }).pipe(Effect.provide(makeLayerTest(true).pipe(Layer.provideMerge(layerProviders([]))))),
 );

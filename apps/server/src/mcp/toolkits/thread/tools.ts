@@ -19,12 +19,14 @@ import {
   NonNegativeInt,
   ProjectId,
   ThreadSnoozeScope,
+  CommandId,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -221,6 +223,13 @@ const ThreadForkTool = Tool.make("t3_thread_fork", {
   }),
   success: transferResult,
 }).annotate(Tool.Destructive, true);
+const ThreadCompactTool = Tool.make("t3_thread_compact", {
+  ...commandTool,
+  description: "Queues a compaction; held supervised wakes stay held until the next user message.",
+  parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
+  success: Schema.Struct({ queued: Schema.Literal(true), commandId: CommandId }),
+  dependencies: [...commandTool.dependencies, ProviderRegistry.ProviderRegistry],
+});
 const ThreadMergeBackTool = Tool.make("t3_thread_merge_back", {
   ...commandTool,
   description:
@@ -285,6 +294,7 @@ export const ThreadToolkit = Toolkit.make(
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadForkTool,
+  ThreadCompactTool,
   ThreadMergeBackTool,
   ThreadTransfersTool,
   ThreadConfigurationTool,
