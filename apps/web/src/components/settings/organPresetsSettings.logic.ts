@@ -6,6 +6,8 @@ import {
   OrganPreset,
   OrganPresetId,
   type OrganPresetResetInput,
+  ProviderDriverKind,
+  type ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
@@ -14,8 +16,9 @@ export type OrganLayer = "environment" | "project";
 
 export interface OrganCellDraft {
   readonly role: string;
-  readonly count: number;
-  /** Kept as saved; the editor shows it but only clears it. */
+  /** As typed, so the field can be cleared and retyped; clamped when saved. */
+  readonly count: string;
+  /** Absent runs the cells on the role's own model. */
   readonly target?: AgentRolePresetTarget;
 }
 
@@ -32,7 +35,7 @@ export const EMPTY_ORGAN_DRAFT: OrganDraft = {
   id: "",
   label: "",
   goalTemplate: "",
-  cells: [{ role: "", count: 1 }],
+  cells: [{ role: "", count: "1" }],
 };
 
 export function organPresetToDraft(preset: EffectiveOrganPreset): OrganDraft {
@@ -43,15 +46,37 @@ export function organPresetToDraft(preset: EffectiveOrganPreset): OrganDraft {
     goalTemplate: preset.goalTemplate,
     cells: preset.cells.map((cell) => ({
       role: cell.role,
-      count: cell.count,
+      count: String(cell.count),
       ...(cell.target === undefined ? {} : { target: cell.target }),
     })),
   };
 }
 
-export function clampCellCount(value: number): number {
-  if (!Number.isFinite(value)) return 1;
-  return Math.min(ORGAN_CELL_MAX_COUNT, Math.max(1, Math.round(value)));
+export function clampCellCount(value: string): number {
+  const count = Number(value);
+  if (value.trim() === "" || !Number.isFinite(count)) return 1;
+  return Math.min(ORGAN_CELL_MAX_COUNT, Math.max(1, Math.round(count)));
+}
+
+/**
+ * The cell target for a model picked in the editor. A target pinned to an
+ * instance stays pinned; otherwise it names the driver, like an unpinned role.
+ */
+export function pickedCellTarget(
+  current: AgentRolePresetTarget | undefined,
+  pick: {
+    readonly instanceId: ProviderInstanceId;
+    readonly driverKind: string;
+    readonly model: string;
+  },
+): AgentRolePresetTarget {
+  return {
+    ...(current?.providerInstanceId !== undefined
+      ? { providerInstanceId: pick.instanceId }
+      : { driverKind: ProviderDriverKind.make(pick.driverKind) }),
+    model: pick.model,
+    options: current?.model === pick.model ? current.options : [],
+  };
 }
 
 /**

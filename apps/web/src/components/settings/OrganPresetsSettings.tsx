@@ -7,27 +7,26 @@ import {
   supportsOrganPresets,
 } from "@t3tools/client-runtime/state/organ-presets";
 import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import {
   AGENT_ROLE_PRESET_INSTRUCTIONS_MAX_LENGTH,
   type AgentRolePresetScope,
+  AuthOrchestrationOperateScope,
+  type EffectiveAgentRolePreset,
   type EffectiveOrganPreset,
   type EnvironmentId,
   ORGAN_CELL_MAX_COUNT,
-  type OrchestrationV2ThreadShell,
   type ProjectId,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { MoreHorizontalIcon, PlusIcon, RotateCcwIcon, UsersRoundIcon, XIcon } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 
 import { confirmDestructive } from "../../confirmDialog";
-import { useServerConfigs } from "../../state/entities";
+import { useQuietThreadShell, useServerConfigs } from "../../state/entities";
 import { orchestrationTree } from "../../state/orchestrationTree";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
+import { useEnvironmentScope } from "../../state/session";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
@@ -45,38 +44,36 @@ import {
 } from "../ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { Input } from "../ui/input";
-import { Label } from "../ui/label";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
-import { toastManager } from "../ui/toast";
 import {
   EMPTY_ORGAN_DRAFT,
   clampCellCount,
   missingCellRoles,
+  type OrganCellDraft,
   type OrganDraft,
   organDraftToPreset,
   type OrganLayer,
   organPresetToDraft,
   organRowState,
+  pickedCellTarget,
 } from "./organPresetsSettings.logic";
+import {
+  Field,
+  OptionalSelect,
+  PresetModelPicker,
+  RemovedPresetsSection,
+  failureMessage,
+  reportFailure,
+} from "./presetSettingsControls";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 
+/** Mirrors the cell bound on `OrganPreset` in contracts' organPreset.ts. */
 const MAX_CELLS = 16;
 /** The picker renders at most this many threads; the search narrows the rest. */
 const PICKER_LIMIT = 100;
-
-function failureMessage(result: Parameters<typeof isAtomCommandInterrupted>[0]): string | null {
-  if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return null;
-  const error = squashAtomCommandFailure(result);
-  return error instanceof Error ? error.message : "The request failed.";
-}
-
-function reportFailure(title: string, result: Parameters<typeof isAtomCommandInterrupted>[0]) {
-  const description = failureMessage(result);
-  if (description !== null) toastManager.add({ type: "error", title, description });
-}
 
 export function OrganPresetsSettings() {
   const { scope, target, connectedEnvironments } = useSettingsScope();
@@ -153,7 +150,8 @@ function OrganPresetsPanel(props: {
   const [editor, setEditor] = useState<{ preset: EffectiveOrganPreset | null } | null>(null);
   const presets = query.data?.presets ?? [];
   const removed = query.data?.removed ?? [];
-  const roleIds = roles.data === null ? null : new Set(roles.data.presets.map((role) => role.id));
+  const rolePresets = roles.data?.presets ?? null;
+  const roleIds = rolePresets === null ? null : new Set(rolePresets.map((role) => role.id));
 
   const remove = async (preset: EffectiveOrganPreset) => {
     const confirmed = await confirmDestructive(
@@ -271,41 +269,22 @@ function OrganPresetsPanel(props: {
           );
         })}
       </SettingsSection>
-      {removed.length > 0 ? (
-        <SettingsSection title="Removed organs">
-          {removed.map((entry) => (
-            <SettingsRow
-              key={entry.id}
-              title={entry.label}
-              description={
-                entry.removedIn === layer
-                  ? entry.id
-                  : `${entry.id} · removed for the whole environment`
-              }
-              control={
-                entry.removedIn === layer ? (
-                  <Button
-                    size="xs"
-                    variant="ghost-muted"
-                    disabled={!canWrite}
-                    onClick={() => void reset(entry.id)}
-                  >
-                    Restore
-                  </Button>
-                ) : null
-              }
-            />
-          ))}
-        </SettingsSection>
-      ) : null}
+      <RemovedPresetsSection
+        title="Removed organs"
+        layer={layer}
+        entries={removed}
+        canWrite={canWrite}
+        onRestore={(id) => void reset(id)}
+      />
       {editor ? (
         <OrganEditorDialog
           key={editor.preset?.id ?? "new"}
           environmentId={props.environmentId}
+          projectId={props.projectId}
           scope={scope}
           preset={editor.preset}
           takenIds={presets.map((preset) => preset.id)}
-          roleIds={roleIds}
+          rolePresets={rolePresets}
           onClose={() => setEditor(null)}
         />
       ) : null}
@@ -313,31 +292,66 @@ function OrganPresetsPanel(props: {
   );
 }
 
-function Field(props: {
-  readonly label: string;
-  readonly hint?: string;
-  readonly htmlFor?: string;
-  readonly children: ReactNode;
+const OTHER_MODEL = "other";
+
+/** "Role's model" leaves the cell on its role's target; another model sets one for the cell. */
+function CellTargetEditor(props: {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId | null;
+  readonly index: number;
+  readonly cell: OrganCellDraft;
+  readonly role: EffectiveAgentRolePreset | undefined;
+  readonly onChange: (cell: OrganCellDraft) => void;
 }) {
+  const { cell } = props;
+  const withoutTarget = (): OrganCellDraft => {
+    const { target: _target, ...rest } = cell;
+    return rest;
+  };
   return (
-    <div className="space-y-1.5">
-      <Label className="flex items-baseline justify-between" htmlFor={props.htmlFor}>
-        <span>{props.label}</span>
-        {props.hint ? (
-          <span className="font-normal text-2xs text-muted-foreground/80">{props.hint}</span>
-        ) : null}
-      </Label>
-      {props.children}
+    <div className="grid grid-cols-[10rem_1fr] items-center gap-2">
+      <OptionalSelect
+        id={`organ-cell-${props.index}-model`}
+        value={cell.target === undefined ? "" : OTHER_MODEL}
+        emptyLabel="Role's model"
+        // Seeded from the role's own target, so it needs the role to be known.
+        choices={
+          props.role === undefined && cell.target === undefined
+            ? []
+            : [{ value: OTHER_MODEL, label: "Another model" }]
+        }
+        onChange={(value) => {
+          const target = value === "" ? undefined : (cell.target ?? props.role?.target);
+          props.onChange(target === undefined ? withoutTarget() : { ...cell, target });
+        }}
+      />
+      {cell.target === undefined ? (
+        <span className="text-muted-foreground text-xs">
+          {props.role?.resolvedModelSelection?.model ?? props.role?.target.model ?? ""}
+        </span>
+      ) : (
+        <PresetModelPicker
+          environmentId={props.environmentId}
+          projectId={props.projectId}
+          instanceId={cell.target.providerInstanceId ?? ""}
+          driverKind={cell.target.driverKind ?? ""}
+          model={cell.target.model}
+          onChange={(pick) =>
+            props.onChange({ ...cell, target: pickedCellTarget(cell.target, pick) })
+          }
+        />
+      )}
     </div>
   );
 }
 
 function OrganEditorDialog(props: {
   readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId | null;
   readonly scope: AgentRolePresetScope;
   readonly preset: EffectiveOrganPreset | null;
   readonly takenIds: ReadonlyArray<string>;
-  readonly roleIds: ReadonlySet<string> | null;
+  readonly rolePresets: ReadonlyArray<EffectiveAgentRolePreset> | null;
   readonly onClose: () => void;
 }) {
   const savePreset = useAtomCommand(serverEnvironment.saveOrganPreset, {
@@ -349,12 +363,11 @@ function OrganEditorDialog(props: {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const update = (patch: Partial<OrganDraft>) => setDraft((current) => ({ ...current, ...patch }));
-  const updateCell = (index: number, patch: Partial<OrganDraft["cells"][number]>) =>
-    update({
-      cells: draft.cells.map((cell, at) => (at === index ? { ...cell, ...patch } : cell)),
-    });
-  const missing = missingCellRoles(draft, props.roleIds);
-  const roleChoices = [...(props.roleIds ?? [])];
+  const replaceCell = (index: number, next: OrganCellDraft) =>
+    update({ cells: draft.cells.map((cell, at) => (at === index ? next : cell)) });
+  const roleIds =
+    props.rolePresets === null ? null : new Set(props.rolePresets.map((role) => role.id));
+  const missing = missingCellRoles(draft, roleIds);
 
   const save = async () => {
     if (draft.isNew && props.takenIds.includes(draft.id.trim())) {
@@ -419,7 +432,7 @@ function OrganEditorDialog(props: {
               />
             </Field>
             <Field label="Cells" hint={`count 1–${ORGAN_CELL_MAX_COUNT}`}>
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {draft.cells.map((cell, index) => (
                   // Cells have no id of their own and keep their order while editing.
                   // oxlint-disable-next-line react/no-array-index-key
@@ -428,7 +441,9 @@ function OrganEditorDialog(props: {
                       <div className="flex-1">
                         <Select
                           value={cell.role}
-                          onValueChange={(role) => updateCell(index, { role: role as string })}
+                          onValueChange={(role) =>
+                            replaceCell(index, { ...cell, role: role as string })
+                          }
                         >
                           <SelectTrigger size="sm" aria-label={`Cell ${index + 1} role`}>
                             <SelectValue>
@@ -436,7 +451,7 @@ function OrganEditorDialog(props: {
                             </SelectValue>
                           </SelectTrigger>
                           <SelectPopup>
-                            {roleChoices.map((role) => (
+                            {[...(roleIds ?? [])].map((role) => (
                               <SelectItem key={role} value={role}>
                                 {role}
                               </SelectItem>
@@ -452,8 +467,12 @@ function OrganEditorDialog(props: {
                           aria-label={`Cell ${index + 1} count`}
                           value={cell.count}
                           onChange={(event) =>
-                            updateCell(index, {
-                              count: clampCellCount(event.target.valueAsNumber),
+                            replaceCell(index, { ...cell, count: event.target.value })
+                          }
+                          onBlur={() =>
+                            replaceCell(index, {
+                              ...cell,
+                              count: String(clampCellCount(cell.count)),
                             })
                           }
                         />
@@ -475,30 +494,21 @@ function OrganEditorDialog(props: {
                         No {cell.role} role in this scope.
                       </p>
                     ) : null}
-                    {cell.target ? (
-                      <p className="flex items-center gap-1 text-muted-foreground text-xs">
-                        Runs on {cell.target.model} instead of the role's model.
-                        <Button
-                          size="xs"
-                          variant="ghost-muted"
-                          onClick={() => {
-                            const { target: _target, ...rest } = cell;
-                            update({
-                              cells: draft.cells.map((entry, at) => (at === index ? rest : entry)),
-                            });
-                          }}
-                        >
-                          Use the role's model
-                        </Button>
-                      </p>
-                    ) : null}
+                    <CellTargetEditor
+                      environmentId={props.environmentId}
+                      projectId={props.projectId}
+                      index={index}
+                      cell={cell}
+                      role={props.rolePresets?.find((role) => role.id === cell.role.trim())}
+                      onChange={(next) => replaceCell(index, next)}
+                    />
                   </div>
                 ))}
                 <Button
                   size="xs"
                   variant="ghost-muted"
                   disabled={draft.cells.length >= MAX_CELLS}
-                  onClick={() => update({ cells: [...draft.cells, { role: "", count: 1 }] })}
+                  onClick={() => update({ cells: [...draft.cells, { role: "", count: "1" }] })}
                 >
                   <PlusIcon className="size-3" />
                   Add cell
@@ -523,20 +533,17 @@ function OrganEditorDialog(props: {
   );
 }
 
+/**
+ * Reads only the meta keys and each meta's own quiet shell, so threads that
+ * stream elsewhere re-render nothing here.
+ */
 function MetasSection(props: { readonly environmentId: EnvironmentId }) {
   const metaKeys = useAtomValue(orchestrationTree.metaKeysAtom(props.environmentId));
-  const threadIndex = useAtomValue(
-    environmentThreadShells.environmentThreadIndexAtom(props.environmentId),
-  );
+  const canOperate = useEnvironmentScope(props.environmentId, AuthOrchestrationOperateScope);
   const setThreadMeta = useOrchestrationCommand(threadEnvironment.setMeta, {
     reportFailure: false,
   });
   const [picking, setPicking] = useState(false);
-  const metas = metaKeys.flatMap((key) => {
-    const ref = parseScopedThreadKey(key);
-    const thread = ref === null ? undefined : threadIndex.get(ref.threadId);
-    return thread === undefined ? [] : [thread];
-  });
 
   const setMeta = async (threadId: ThreadId, enabled: boolean) =>
     reportFailure(
@@ -549,37 +556,36 @@ function MetasSection(props: { readonly environmentId: EnvironmentId }) {
       <SettingsSection
         title="Metas"
         headerAction={
-          <Button size="xs" variant="ghost-muted" onClick={() => setPicking(true)}>
+          <Button
+            size="xs"
+            variant="ghost-muted"
+            disabled={!canOperate}
+            onClick={() => setPicking(true)}
+          >
             <PlusIcon className="size-3" />
             Promote a thread…
           </Button>
         }
       >
-        {metas.length === 0 ? (
+        {metaKeys.length === 0 ? (
           <SettingsRow
             title="No metas"
             description="A meta is a top-level thread that stays open while it runs other threads."
           />
         ) : null}
-        {metas.map((thread) => (
-          <SettingsRow
-            key={thread.id}
-            title={thread.title}
-            control={
-              <Button
-                size="xs"
-                variant="ghost-muted"
-                onClick={() => void setMeta(thread.id, false)}
-              >
-                Demote
-              </Button>
-            }
+        {metaKeys.map((key) => (
+          <MetaRow
+            key={key}
+            threadKey={key}
+            canOperate={canOperate}
+            onDemote={(threadId) => void setMeta(threadId, false)}
           />
         ))}
       </SettingsSection>
       {picking ? (
         <PromotePickerDialog
-          threads={threadIndex}
+          environmentId={props.environmentId}
+          canOperate={canOperate}
           onPick={(threadId) => {
             setPicking(false);
             void setMeta(threadId, true);
@@ -591,20 +597,57 @@ function MetasSection(props: { readonly environmentId: EnvironmentId }) {
   );
 }
 
+function MetaRow(props: {
+  readonly threadKey: string;
+  readonly canOperate: boolean;
+  readonly onDemote: (threadId: ThreadId) => void;
+}) {
+  const thread = useQuietThreadShell(parseScopedThreadKey(props.threadKey));
+  if (thread === null) return null;
+  return (
+    <SettingsRow
+      title={thread.title}
+      control={
+        <Button
+          size="xs"
+          variant="ghost-muted"
+          disabled={!props.canOperate}
+          onClick={() => props.onDemote(thread.id)}
+        >
+          Demote
+        </Button>
+      }
+    />
+  );
+}
+
+/** Mounted only while open, so the full thread list is read only then. */
 function PromotePickerDialog(props: {
-  readonly threads: ReadonlyMap<ThreadId, OrchestrationV2ThreadShell>;
+  readonly environmentId: EnvironmentId;
+  readonly canOperate: boolean;
   readonly onPick: (threadId: ThreadId) => void;
   readonly onClose: () => void;
 }) {
+  const threads = useAtomValue(environmentThreadShells.environmentThreadsAtom(props.environmentId));
   const [search, setSearch] = useState("");
-  const needle = search.trim().toLowerCase();
-  const rows = [...props.threads.values()]
+  // A delegated child is never a meta, as in the thread menu. Promotable threads
+  // come first, most recently active first, so the disabled ones explain themselves below.
+  const candidates = threads
     .filter((thread) => thread.metaAt == null)
-    .filter((thread) => needle === "" || thread.title.toLowerCase().includes(needle))
     .map((thread) => ({ thread, blocker: metaPromoteBlocker(thread) }))
-    // Promotable threads first, so the disabled ones explain themselves below.
-    .sort((left, right) => Number(left.blocker !== null) - Number(right.blocker !== null))
-    .slice(0, PICKER_LIMIT);
+    .filter(({ blocker }) => blocker !== "delegated-child")
+    .toSorted(
+      (left, right) =>
+        Number(left.blocker !== null) - Number(right.blocker !== null) ||
+        DateTime.toEpochMillis(right.thread.updatedAt) -
+          DateTime.toEpochMillis(left.thread.updatedAt),
+    );
+  const needle = search.trim().toLowerCase();
+  const rows = (
+    needle === ""
+      ? candidates
+      : candidates.filter(({ thread }) => thread.title.toLowerCase().includes(needle))
+  ).slice(0, PICKER_LIMIT);
 
   return (
     <Dialog open onOpenChange={(open) => (open ? undefined : props.onClose())}>
@@ -636,7 +679,7 @@ function PromotePickerDialog(props: {
                   <Button
                     size="xs"
                     variant="ghost-muted"
-                    disabled={blocker !== null}
+                    disabled={blocker !== null || !props.canOperate}
                     onClick={() => props.onPick(thread.id)}
                   >
                     Promote

@@ -50,6 +50,7 @@ import {
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
 import { useEnvironments } from "../../state/environments";
+import { supportsOrganPresets } from "@t3tools/client-runtime/state/organ-presets";
 import { validateSettingsScopeSearch } from "./settingsScope";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
@@ -120,8 +121,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const { environments } = useEnvironments();
   // Stock servers lack organ presets; `=== true` keeps the flag a primitive for the compiler.
   const hasOrganPresets =
-    environments.some(
-      (environment) => environment.serverConfig?.environment.capabilities.organPresets,
+    environments.some((environment) =>
+      supportsOrganPresets(environment.serverConfig?.environment.capabilities),
     ) === true;
   const navItems = SETTINGS_NAV_ITEMS.filter(
     (item) =>

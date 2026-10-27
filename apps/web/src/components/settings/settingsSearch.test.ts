@@ -308,12 +308,18 @@ describe("searchSettings", () => {
       isWslSettingsRowVisible: false,
       hasThreadAutoSettlement: false,
     };
-    const organIds = (hasOrganPresets: boolean) =>
-      filterAvailableSettingsSearchItems({ ...availability, hasEnvironment: true, hasOrganPresets })
+    const organIds = (hasOrganPresets: boolean, hasOrchestrationMetas: boolean) =>
+      filterAvailableSettingsSearchItems({
+        ...availability,
+        hasEnvironment: true,
+        hasOrganPresets,
+        hasOrchestrationMetas,
+      })
         .filter((item) => item.to === "/settings/organs")
         .map((item) => item.id);
-    expect(organIds(false)).toEqual([]);
-    expect(organIds(true)).toEqual(["organ-presets", "metas"]);
+    expect(organIds(false, true)).toEqual([]);
+    expect(organIds(true, false)).toEqual(["organ-presets"]);
+    expect(organIds(true, true)).toEqual(["organ-presets", "metas"]);
   });
 
   it("finds keybinding commands by label, command id, and default key", () => {

@@ -295,17 +295,16 @@ function metaMenuItems(
   state: ThreadActionMenuState,
 ): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
   if (state.supports.metas !== true) return [];
-  if (state.isMeta === true)
-    return [{ id: "demote-meta", label: "Demote meta", icon: "folder-tree" }];
+  if (state.isMeta === true) return [{ id: "demote-meta", label: "Demote meta", icon: "crown" }];
   const blocker = state.metaPromoteBlocker ?? null;
   if (blocker === "delegated-child") return [];
   return [
     blocker === null
-      ? { id: "promote-meta", label: "Promote to meta", icon: "folder-tree" }
+      ? { id: "promote-meta", label: "Promote to meta", icon: "crown" }
       : {
           id: "promote-meta",
           label: `Promote to meta (${blocker === "archived" ? "unarchive first" : "supervised launch"})`,
-          icon: "folder-tree",
+          icon: "crown",
           disabled: true,
         },
   ];

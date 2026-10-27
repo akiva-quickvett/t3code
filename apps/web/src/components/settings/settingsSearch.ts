@@ -62,6 +62,7 @@ export interface SettingsSearchItem {
   readonly requiresPullRequestLabelRules?: boolean;
   readonly requiresChatChannels?: boolean;
   readonly requiresOrganPresets?: boolean;
+  readonly requiresOrchestrationMetas?: boolean;
 }
 
 export interface SettingsSearchAvailability {
@@ -77,6 +78,7 @@ export interface SettingsSearchAvailability {
   readonly hasPullRequestLabelRules?: boolean;
   readonly hasChatChannels?: boolean;
   readonly hasOrganPresets?: boolean;
+  readonly hasOrchestrationMetas?: boolean;
 }
 
 export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
@@ -673,7 +675,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Metas",
     to: "/settings/organs",
     searchTerms: ["meta metas promote demote orchestration"],
+    // The Metas list lives on the Organs page and shows only where both are supported.
     requiresOrganPresets: true,
+    requiresOrchestrationMetas: true,
   },
   {
     id: "usage-providers",
@@ -1198,7 +1202,8 @@ export function filterAvailableSettingsSearchItems(
       (!item.managedTunnelOnly || availability.managedTunnelActive === true) &&
       (!item.requiresPullRequestLabelRules || availability.hasPullRequestLabelRules === true) &&
       (!item.requiresChatChannels || availability.hasChatChannels === true) &&
-      (!item.requiresOrganPresets || availability.hasOrganPresets === true),
+      (!item.requiresOrganPresets || availability.hasOrganPresets === true) &&
+      (!item.requiresOrchestrationMetas || availability.hasOrchestrationMetas === true),
   );
 }
 

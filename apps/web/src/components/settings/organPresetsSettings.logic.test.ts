@@ -1,4 +1,8 @@
-import { type EffectiveOrganPreset, ProviderDriverKind } from "@t3tools/contracts";
+import {
+  type EffectiveOrganPreset,
+  ProviderDriverKind,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -8,6 +12,7 @@ import {
   organDraftToPreset,
   organPresetToDraft,
   organRowState,
+  pickedCellTarget,
 } from "./organPresetsSettings.logic";
 
 const council: EffectiveOrganPreset = {
@@ -33,11 +38,11 @@ describe("organ draft", () => {
     expect(organDraftToPreset(organPresetToDraft(council))).toEqual({ preset });
   });
 
-  it("clamps a cell count to 1..8", () => {
-    expect([0, -3, 1, 4.4, 8, 9, 100, Number.NaN].map(clampCellCount)).toEqual([
-      1, 1, 1, 4, 8, 8, 8, 1,
+  it("keeps the typed count and clamps it to 1..8 on save", () => {
+    expect(["0", "-3", "1", "4.4", "8", "9", "100", "abc", "", " "].map(clampCellCount)).toEqual([
+      1, 1, 1, 4, 8, 8, 8, 1, 1, 1,
     ]);
-    const draft = { ...organPresetToDraft(council), cells: [{ role: "scout", count: 12 }] };
+    const draft = { ...organPresetToDraft(council), cells: [{ role: "scout", count: "12" }] };
     const decoded = organDraftToPreset(draft);
     expect("preset" in decoded && decoded.preset.cells[0]?.count).toBe(8);
   });
@@ -50,13 +55,38 @@ describe("organ draft", () => {
   });
 });
 
+describe("pickedCellTarget", () => {
+  const pick = {
+    instanceId: ProviderInstanceId.make("codex-work"),
+    driverKind: "codex",
+    model: "gpt-6",
+  };
+
+  it("names the driver for a new or unpinned target", () => {
+    expect(pickedCellTarget(undefined, pick)).toEqual({
+      driverKind: "codex",
+      model: "gpt-6",
+      options: [],
+    });
+  });
+
+  it("keeps a pinned target pinned to the picked instance", () => {
+    expect(
+      pickedCellTarget(
+        { providerInstanceId: ProviderInstanceId.make("old"), model: "m", options: [] },
+        pick,
+      ),
+    ).toEqual({ providerInstanceId: "codex-work", model: "gpt-6", options: [] });
+  });
+});
+
 describe("missingCellRoles", () => {
   const draft = {
     ...EMPTY_ORGAN_DRAFT,
     cells: [
-      { role: "planner", count: 1 },
-      { role: "scout", count: 2 },
-      { role: "", count: 1 },
+      { role: "planner", count: "1" },
+      { role: "scout", count: "2" },
+      { role: "", count: "" },
     ],
   };
 
