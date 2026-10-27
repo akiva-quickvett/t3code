@@ -1,4 +1,5 @@
 import { type LegendListRef } from "@legendapp/list/react";
+import type { HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
 import {
   scopedThreadKey,
   scopeProjectRef,
@@ -12,10 +13,11 @@ import {
 } from "@t3tools/client-runtime/state/thread-execution";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { useRef, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 
 import { useIncrementalTimelineEntries } from "../../hooks/useIncrementalTimelineEntries";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
+import { useStableCallback } from "../../hooks/useStableCallback";
 import { useTheme } from "../../hooks/useTheme";
 import { derivePhase, isLatestRunSettled } from "../../session-logic";
 import {
@@ -30,6 +32,7 @@ import type { ChatMessage } from "../../types";
 import { MessagesTimeline } from "./MessagesTimeline";
 
 const NO_MESSAGES: ReadonlyArray<ChatMessage> = [];
+const EMPTY_RUNS: ReadonlyArray<HandoffTimelineRun> = [];
 const noop = () => {};
 const noopAsync = async () => {};
 
@@ -39,7 +42,7 @@ export type ThreadTimelineDensity = "compact";
  * A read-only timeline for one thread outside its route. Mounting it opens the
  * thread's subscription and unmounting closes it, so callers key it by thread.
  */
-export function ThreadTimelineHost(props: {
+export const ThreadTimelineHost = memo(function ThreadTimelineHost(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly density: ThreadTimelineDensity;
@@ -69,10 +72,28 @@ export function ThreadTimelineHost(props: {
       : { attempts: projection.attempts, nodes: projection.nodes, plans: projection.plans }),
   });
 
-  const latestRun = projection === null ? null : deriveLatestThreadRun(projection);
-  const activityRun = projection === null ? null : deriveThreadActivityRun(projection);
-  const runtime = projection === null ? null : deriveThreadRuntime(projection);
-  const runlessWorkActive = projection !== null && deriveRunlessWorkStartedAt(projection) !== null;
+  const { latestRun, activityRun, runtime, runlessWorkActive } = useMemo(
+    () =>
+      projection === null
+        ? { latestRun: null, activityRun: null, runtime: null, runlessWorkActive: false }
+        : {
+            latestRun: deriveLatestThreadRun(projection),
+            activityRun: deriveThreadActivityRun(projection),
+            runtime: deriveThreadRuntime(projection),
+            runlessWorkActive: deriveRunlessWorkStartedAt(projection) !== null,
+          },
+    [projection],
+  );
+  const onOpenThread = useStableCallback((childThreadId: ThreadId) => {
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: buildThreadRouteParams(scopeThreadRef(environmentId, childThreadId)),
+    });
+  });
+  const onIsAtEndChange = useStableCallback((isAtEnd: boolean) => {
+    if (isAtEnd) setLiveFollow(true);
+  });
+  const onManualNavigation = useStableCallback(() => setLiveFollow(false));
   const isWorking = derivePhase(runtime) === "running" || runlessWorkActive;
   const workspaceRoot = shell?.worktreePath ?? project?.workspaceRoot ?? undefined;
 
@@ -85,19 +106,14 @@ export function ThreadTimelineHost(props: {
         awaitingUser={shell !== null && (shell.hasPendingApprovals || shell.hasPendingUserInput)}
         listRef={listRef}
         timelineEntries={timelineEntries}
-        runs={projection?.runs ?? []}
+        runs={projection?.runs ?? EMPTY_RUNS}
         latestRun={activityRun}
         runningRunId={runtime?.activeRunId ?? null}
         turnDiffSummaries={turnDiffSummaries}
         activeThreadEnvironmentId={environmentId}
         routeThreadKey={threadKey}
         onOpenTurnDiff={noop}
-        onOpenThread={(childThreadId) => {
-          void navigate({
-            to: "/$environmentId/$threadId",
-            params: buildThreadRouteParams(scopeThreadRef(environmentId, childThreadId)),
-          });
-        }}
+        onOpenThread={onOpenThread}
         onForkFromRun={noopAsync}
         onRollbackCheckpoint={noop}
         supportsConversationRollback={false}
@@ -112,14 +128,12 @@ export function ThreadTimelineHost(props: {
         onAnchorReady={noop}
         onAnchorSizeChanged={noop}
         contentInsetEndAdjustment={0}
-        onIsAtEndChange={(isAtEnd) => {
-          if (isAtEnd) setLiveFollow(true);
-        }}
+        onIsAtEndChange={onIsAtEndChange}
         liveFollowEnabled={liveFollow}
-        onManualNavigation={() => setLiveFollow(false)}
+        onManualNavigation={onManualNavigation}
         hideEmptyPlaceholder={projection === null}
         topFadeEnabled={false}
       />
     </div>
   );
-}
+});

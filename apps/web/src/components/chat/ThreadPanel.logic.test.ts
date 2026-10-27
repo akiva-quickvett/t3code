@@ -1,19 +1,17 @@
-import { RunId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { cellDispatchHint, cellDispatchMode, threadSurfaceLabel } from "./ThreadPanel.logic";
 
 describe("cellDispatchMode", () => {
   it("steers the running run of a working cell", () => {
-    const runId = RunId.make("run-1");
-    const mode = cellDispatchMode(runId);
-    expect(mode).toEqual({ type: "steer_active", targetRunId: runId });
+    const mode = cellDispatchMode(true);
+    expect(mode).toBe("steer");
     expect(cellDispatchHint(mode)).toBe("steers the running turn");
   });
 
   it("queues behind the turn of an idle cell", () => {
-    const mode = cellDispatchMode(null);
-    expect(mode).toEqual({ type: "queue_after_active" });
+    const mode = cellDispatchMode(false);
+    expect(mode).toBe("queue");
     expect(cellDispatchHint(mode)).toBe("queues after the turn");
   });
 });

@@ -1,19 +1,19 @@
-import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { deriveThreadRuntime } from "@t3tools/client-runtime/state/thread-execution";
 import {
   AuthOrchestrationOperateScope,
-  CommandId,
   type EnvironmentId,
   type ThreadId,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon, XIcon } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
-import { cn, newMessageId, randomUUID } from "../../lib/utils";
-import { useQuietThreadShell } from "../../state/entities";
-import { orchestrationEnvironment } from "../../state/orchestration";
+import { cn, newMessageId } from "../../lib/utils";
+import { useQuietThreadShell, useThreadProjection } from "../../state/entities";
 import { useEnvironmentScope } from "../../state/session";
+import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { Button } from "../ui/button";
@@ -33,9 +33,16 @@ export function ThreadPanel(props: {
 }) {
   const { environmentId, threadId } = props;
   const navigate = useNavigate();
-  const shell = useQuietThreadShell(scopeThreadRef(environmentId, threadId));
+  const threadRef = scopeThreadRef(environmentId, threadId);
+  const shell = useQuietThreadShell(threadRef);
+  // The same projection atom the timeline reads, so the dot, the composer mode
+  // and the timeline agree on whether the cell is running.
+  const projection = useThreadProjection(threadRef)?.projection ?? null;
+  const running = useMemo(
+    () => projection !== null && (deriveThreadRuntime(projection)?.activeRunId ?? null) !== null,
+    [projection],
+  );
   const organ = shell?.lineage.organ;
-  const activeRunId = shell?.runtime?.activeRunId ?? null;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-card text-xs">
@@ -44,7 +51,7 @@ export function ThreadPanel(props: {
           aria-hidden
           className={cn(
             "size-2 shrink-0 rounded-full",
-            activeRunId !== null ? "bg-primary" : "bg-muted-foreground/40",
+            running ? "bg-primary" : "bg-muted-foreground/40",
           )}
         />
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
@@ -86,7 +93,8 @@ export function ThreadPanel(props: {
       <ThreadPanelComposer
         environmentId={environmentId}
         threadId={threadId}
-        activeRunId={activeRunId}
+        shell={shell}
+        running={running}
       />
     </div>
   );
@@ -95,38 +103,35 @@ export function ThreadPanel(props: {
 function ThreadPanelComposer(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
-  readonly activeRunId: Parameters<typeof cellDispatchMode>[0];
+  readonly shell: EnvironmentThreadShell | null;
+  readonly running: boolean;
 }) {
-  const dispatchCommand = useOrchestrationCommand(orchestrationEnvironment.v2.dispatchCommand);
-  const permitted = useAtomValue(
-    orchestrationEnvironment.v2.dispatchCommand.permissionAtom(props.environmentId),
-  );
-  const canOperate = useEnvironmentScope(props.environmentId, AuthOrchestrationOperateScope);
-  const canDispatch = permitted && canOperate;
+  const { shell } = props;
+  const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn);
+  const canDispatch = useEnvironmentScope(props.environmentId, AuthOrchestrationOperateScope);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
-  const mode = cellDispatchMode(props.activeRunId);
-  const canSend = canDispatch && !sending && text.trim().length > 0;
+  const mode = cellDispatchMode(props.running);
+  const canSend = canDispatch && shell !== null && !sending && text.trim().length > 0;
 
   const send = async () => {
     if (!canSend) return;
+    const sent = text.trim();
     setSending(true);
-    const result = await dispatchCommand({
+    setText("");
+    const result = await startThreadTurn({
       environmentId: props.environmentId,
       input: {
-        type: "message.dispatch",
-        commandId: CommandId.make(randomUUID()),
-        createdBy: "user",
-        creationSource: "web",
         threadId: props.threadId,
-        messageId: newMessageId(),
-        text,
-        attachments: [],
+        message: { messageId: newMessageId(), role: "user", text: sent, attachments: [] },
+        runtimeMode: shell.runtimeMode,
+        interactionMode: shell.interactionMode,
         dispatchMode: mode,
       },
     });
     setSending(false);
-    if (result._tag === "Success") setText("");
+    // Keep anything typed while the send was in flight.
+    if (result._tag === "Failure") setText((current) => (current === "" ? sent : current));
   };
 
   return (

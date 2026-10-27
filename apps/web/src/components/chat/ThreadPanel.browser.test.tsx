@@ -1,38 +1,24 @@
-import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { page, userEvent } from "vite-plus/test/browser";
 
 import { selectActiveRightPanelSurface, useRightPanelStore } from "../../rightPanelStore";
 import { RightPanelSurfaceContent } from "./RightPanelSurfaceContent";
 
-// Stands in for subscribeThread: the projection hook is what opens and closes it.
-const subscriptions = vi.hoisted(() => ({ open: new Map<string, number>() }));
-vi.mock("../../state/entities", async (importOriginal) => {
-  const { scopedThreadKey: keyOf } = await import("@t3tools/client-runtime/environment");
-  const { useEffect: useMountEffect } = await import("react");
-  return {
-    ...(await importOriginal<Record<string, unknown>>()),
-    useThreadProjection: (ref: ScopedThreadRef | null) => {
-      const key = ref === null ? null : keyOf(ref);
-      useMountEffect(() => {
-        if (key === null) return;
-        subscriptions.open.set(key, (subscriptions.open.get(key) ?? 0) + 1);
-        return () => {
-          const count = (subscriptions.open.get(key) ?? 0) - 1;
-          if (count > 0) subscriptions.open.set(key, count);
-          else subscriptions.open.delete(key);
-        };
-      }, [key]);
-      return null;
-    },
-    useQuietThreadShell: () => null,
-    useProject: () => null,
-    useThreadVisibleTurnItems: () => [],
-    useThreadCheckpointSummaries: () => [],
-  };
-});
+// Stable empties, as the real atoms return: a fresh array per render would
+// read as new data on every pass.
+const empty = vi.hoisted(() => ({ list: [] as never[] }));
+vi.mock("../../state/entities", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useThreadProjection: () => null,
+  useQuietThreadShell: () => null,
+  useProject: () => null,
+  useThreadVisibleTurnItems: () => empty.list,
+  useThreadCheckpointSummaries: () => empty.list,
+}));
 vi.mock("./MessagesTimeline", () => ({ MessagesTimeline: () => null }));
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -57,7 +43,6 @@ const environmentId = EnvironmentId.make("env-1");
 const parentRef = scopeThreadRef(environmentId, ThreadId.make("broker"));
 const cellA = ThreadId.make("cell-A");
 const cellB = ThreadId.make("cell-B");
-const openSubscriptions = () => [...subscriptions.open.entries()];
 
 function ParentPanel() {
   const surface = useRightPanelStore((state) =>
@@ -88,7 +73,6 @@ let root: Root;
 let container: HTMLDivElement;
 
 beforeEach(() => {
-  subscriptions.open.clear();
   useRightPanelStore.setState({
     byThreadKey: {},
     threadPanelVisibilityByThreadKey: {},
@@ -106,32 +90,22 @@ afterEach(() => {
   container.remove();
 });
 
-it("subscribes to the one live cell and releases it when replaced or closed", () => {
+it("starts each cell with an empty draft so text never reaches the wrong cell", async () => {
   const store = useRightPanelStore.getState();
-  const keyA = scopedThreadKey(scopeThreadRef(environmentId, cellA));
-  const keyB = scopedThreadKey(scopeThreadRef(environmentId, cellB));
+  const draft = page.getByRole("textbox", { name: "Message this cell" });
 
   act(() => store.openThread(parentRef, cellA));
-  expect(openSubscriptions()).toEqual([[keyA, 1]]);
+  await userEvent.type(draft, "x");
+  await expect.element(draft).toHaveValue("x");
 
   act(() => store.openThread(parentRef, cellB));
-  expect(openSubscriptions()).toEqual([[keyB, 1]]);
-
-  act(() => store.close(parentRef));
-  expect(openSubscriptions()).toEqual([]);
-
-  act(() => store.show(parentRef));
-  expect(openSubscriptions()).toEqual([[keyB, 1]]);
-
-  act(() => store.closeSurface(parentRef, "thread"));
-  expect(openSubscriptions()).toEqual([]);
+  await expect.element(draft).toHaveValue("");
 });
 
 it("closes the cell from its own header", () => {
   act(() => useRightPanelStore.getState().openThread(parentRef, cellA));
   const close = container.querySelector<HTMLButtonElement>('button[aria-label="Close"]');
   act(() => close!.click());
-  expect(openSubscriptions()).toEqual([]);
   expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, parentRef)).toBe(
     null,
   );

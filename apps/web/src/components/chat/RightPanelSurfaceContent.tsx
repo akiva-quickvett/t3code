@@ -166,7 +166,8 @@ export function RightPanelSurfaceContent(props: {
     case "thread":
       return (
         <ThreadPanel
-          // Remounting per cell is what closes the previous cell's subscription.
+          // A fresh mount per cell, so cell A's draft, live-follow and scroll
+          // state never carry over to cell B (a draft must not reach the wrong cell).
           key={surface.threadId}
           environmentId={props.environmentId}
           threadId={surface.threadId}

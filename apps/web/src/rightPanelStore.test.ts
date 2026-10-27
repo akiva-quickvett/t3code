@@ -1365,6 +1365,24 @@ describe("rightPanelStore", () => {
       });
     });
 
+    it("drops a cell found in saved state during migration", () => {
+      const { byThreadKey } = migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: "diff",
+            surfaces: [
+              { id: "diff", kind: "diff" },
+              { id: "thread", kind: "thread", threadId: cellA },
+            ],
+          },
+        },
+      });
+      expect(selectThreadRightPanelState(byThreadKey, refA).surfaces).toEqual([
+        { id: "diff", kind: "diff" },
+      ]);
+    });
+
     it("is not offered by reopen closed view", () => {
       const store = useRightPanelStore.getState();
       store.openThread(refA, cellA);
