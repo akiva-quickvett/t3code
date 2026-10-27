@@ -83,9 +83,10 @@ function sameCellShells(
   return true;
 }
 
-// The pod's organ cells as `deriveOrganGroups` reads them, built the way the
-// orchestration tree builds its inputs so card and sidebar dots agree. Read
-// only while expanded.
+// The organ cells a thread delegated, as `deriveOrganGroups` reads them, built
+// the way the orchestration tree builds its inputs so card and sidebar dots
+// agree. Read by an expanded pod card, and by the chat of any thread that has
+// organs (its dock and organ cards); each read walks the environment's shells.
 const podCellShellsAtom = Atom.family((key: string) => {
   const separator = key.indexOf("\u0000");
   const environmentId = key.slice(0, separator) as EnvironmentId;
@@ -114,6 +115,13 @@ const podCellShellsAtom = Atom.family((key: string) => {
     return next;
   }).pipe(Atom.withEquality(sameCellShells), Atom.withLabel(`pod-card-cell-shells:${key}`));
 });
+
+const NO_CELL_SHELLS = Atom.make<ReadonlyMap<ThreadId, OrganCellShell>>(new Map());
+
+/** The organ cells delegated by `ref`, as `deriveOrganGroups` reads them. */
+export function useOrganCellShells(ref: ScopedThreadRef | null) {
+  return useAtomValue(ref === null ? NO_CELL_SHELLS : podCellShellsAtom(podAtomKey(ref)));
+}
 
 // Module scope so the compiler keys it on its arguments, as TreeRow's does.
 function resolvePodDot(
@@ -227,7 +235,7 @@ const NO_SUBAGENTS: ReadonlyArray<never> = [];
 /** Mounted only while expanded: the one place the card subscribes to the pod. */
 function PodOrgans(props: { readonly threadRef: ScopedThreadRef; readonly onOpenPod: () => void }) {
   const projection = useThreadProjection(props.threadRef);
-  const cellShells = useAtomValue(podCellShellsAtom(podAtomKey(props.threadRef)));
+  const cellShells = useOrganCellShells(props.threadRef);
   const subagents = projection?.projection.subagents ?? NO_SUBAGENTS;
   const lines = podOrganLines(deriveOrganGroups(subagents, (id) => cellShells.get(id)));
 

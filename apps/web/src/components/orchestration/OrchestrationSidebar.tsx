@@ -65,6 +65,8 @@ export interface OrchestrationSidebarProps {
   readonly onClearMeta: (metaThreadRef: ScopedThreadRef) => void;
   /** Rows have no inline editor, so the host decides how a rename is asked for. */
   readonly onRenameThread: (threadRef: ScopedThreadRef) => void;
+  /** A thread row was opened, even the one already routed, e.g. to close a mobile sheet. */
+  readonly onRowActivate?: (() => void) | undefined;
 }
 
 const metaTabAtoms = createMetaTabAtoms(orchestrationTree);
@@ -178,6 +180,7 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
     if (threadRef === null) return;
     setActiveKey(rowKey);
     void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(threadRef) });
+    props.onRowActivate?.();
   });
   const rename = useStableCallback((rowKey: string) => {
     const threadRef = parseScopedThreadKey(rowKey);

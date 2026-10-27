@@ -14,8 +14,6 @@ import {
   createThreadJumpHintVisibilityController,
   deleteSelectedThreadEntries,
   filterSidebarProjectScopeItems,
-  filterSidebarAgentTreeThreads,
-  liftSidebarAgentTree,
   filterSidebarV2VisibleThreads,
   formatWorkingDurationLabel,
   getFallbackThreadIdAfterDelete,
@@ -39,7 +37,6 @@ import {
   resolveSidebarThreadStatus,
   resolveSidebarV2TopStatus,
   resolveThreadLastVisitedAt,
-  resolveThreadRowClassName,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
   pullRequestMatchesSearchQuery,
@@ -55,7 +52,6 @@ import {
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
   sortSidebarV2ProjectGroups,
-  shouldCreateNewThreadInCurrentProject,
   shouldNavigateAfterThreadPark,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
   type SidebarListItem,
@@ -64,7 +60,6 @@ import {
   resolveSidebarDropVerb,
 } from "./Sidebar.logic";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import { sortSettledThreads } from "@t3tools/client-runtime/state/thread-sort";
 import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 
 import {
@@ -73,8 +68,6 @@ import {
   type Project,
   type Thread,
 } from "../types";
-import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { deriveAgentTree } from "@t3tools/client-runtime/state/thread-relationships";
 import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
@@ -450,93 +443,6 @@ describe("sidebar thread lineage helpers", () => {
       ).map((thread) => thread.id),
     ).toEqual([parentId, fork.id]);
   });
-
-  it("lists app-owned subagents in tree mode but keeps provider-native ones hidden", () => {
-    const parentId = ThreadId.make("thread-parent");
-    const subagentLineage = {
-      rootThreadId: parentId,
-      parentThreadId: parentId,
-      relationshipToParent: "subagent" as const,
-    };
-    const appOwned = makeThreadFixture({
-      id: ThreadId.make("app-owned"),
-      lineage: subagentLineage,
-    });
-    const native = makeThreadFixture({ id: ThreadId.make("native"), lineage: subagentLineage });
-    const archived = makeThreadFixture({
-      id: ThreadId.make("archived"),
-      lineage: subagentLineage,
-      archivedAt: "2026-01-02T00:00:00.000Z",
-    });
-
-    expect(
-      filterSidebarAgentTreeThreads(
-        [
-          makeThreadFixture({ id: parentId }),
-          appOwned,
-          { ...native, source: { ...native.source, creationSource: "provider" } },
-          archived,
-        ],
-        null,
-      ).map((thread) => thread.id),
-    ).toEqual([parentId, appOwned.id]);
-  });
-
-  it.each(["settled", "snoozed"] as const)(
-    "keeps live work under a %s parent visible in its own section",
-    (parkedSection) => {
-      const meta = makeThreadFixture({ id: ThreadId.make("meta") });
-      const supervisedBy = (id: string, supervisor: ThreadId) =>
-        makeThreadFixture({
-          id: ThreadId.make(id),
-          lineage: {
-            rootThreadId: ThreadId.make(id),
-            parentThreadId: null,
-            relationshipToParent: null,
-            supervisorThreadId: supervisor,
-          },
-        });
-      const subagentOf = (id: string, parent: ThreadId) =>
-        makeThreadFixture({
-          id: ThreadId.make(id),
-          lineage: {
-            rootThreadId: parent,
-            parentThreadId: parent,
-            relationshipToParent: "subagent",
-          },
-        });
-      const runningSlice = supervisedBy("running-slice", meta.id);
-      const finishedSlice = supervisedBy("finished-slice", meta.id);
-      const broker = subagentOf("broker", runningSlice.id);
-      const pinnedCell = subagentOf("pinned-cell", broker.id);
-      const sections = new Map<string, SidebarSection>([
-        [meta.id, parkedSection],
-        [runningSlice.id, "active"],
-        [finishedSlice.id, "settled"],
-        [broker.id, "working"],
-        [pinnedCell.id, "pinned"],
-      ]);
-
-      const tree = liftSidebarAgentTree(
-        deriveAgentTree([meta, runningSlice, finishedSlice, broker, pinnedCell]),
-        (thread) => sections.get(thread.id),
-      );
-
-      expect(tree.roots.map((thread) => thread.id).toSorted()).toEqual(
-        ["meta", "pinned-cell", "running-slice"].toSorted(),
-      );
-      const childIds = (thread: typeof meta) =>
-        (
-          tree.childrenByKey.get(
-            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-          ) ?? []
-        ).map((child) => child.id);
-      expect(childIds(meta)).toEqual([finishedSlice.id]);
-      // Working sits as high as Active, so the broker stays under its slice.
-      expect(childIds(runningSlice)).toEqual([broker.id]);
-      expect(childIds(broker)).toEqual([]);
-    },
-  );
 
   it("identifies subagent threads so the sidebar can hide them", () => {
     const parentId = ThreadId.make("thread-parent");
@@ -2393,36 +2299,6 @@ describe("Working shelf (beta)", () => {
       marker("settled-header"),
       row("s1", "settled"),
     ];
-
-    it("drops between nested agent rows without ordering them", () => {
-      const child = (key: string, section: SidebarSection): SidebarListItem => ({
-        kind: "child",
-        key,
-        section,
-      });
-      const tree: readonly SidebarListItem[] = [
-        marker("pinned-header"),
-        row("p1", "pinned"),
-        child("p1-child", "pinned"),
-        marker("pinned-divider"),
-        row("a1", "active"),
-        child("a1-child", "active"),
-        row("a2", "active"),
-        marker("settled-header"),
-      ];
-
-      expect(resolveSidebarDropTarget(tree, "a2", "a1-child")).toEqual({
-        section: "active",
-        pinnedOrder: ["p1"],
-        activeOrder: ["a1", "a2"],
-      });
-      expect(resolveSidebarDropTarget(tree, "a1", "p1-child")).toEqual({
-        section: "pinned",
-        pinnedOrder: ["p1", "a1"],
-        activeOrder: ["a2"],
-      });
-      expect(resolveSidebarDropTarget(tree, "a1-child", "a2")).toBeNull();
-    });
 
     it("never drops into the Working shelf, and keeps it out of the inbox order", () => {
       expect(resolveSidebarDropTarget(items, "a1", "w1")).toBeNull();

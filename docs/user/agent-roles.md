@@ -55,6 +55,24 @@ organ won't start until you fix it. The starting thread's role decides who may s
 **Child roles** limit which cell roles it can start, so a role override that drops one blocks the
 organ even when the preset is unchanged.
 
+### Organs in chat
+
+An organ shows as one card in the turn that started it, with a section per round. While any of its
+cells is working, the organ docks above the composer instead and its turn holds a placeholder; when
+the last cell finishes, the card returns to its turn.
+
+Click a cell, in the card or the dock, to watch it beside the chat; **↗** opens its full chat. The
+side panel holds one cell at a time and closes when you reload. A message you send there steers the
+cell if it is working and queues otherwise. The cell's reply to a mid-task message becomes its
+result, so that reply is what the thread that started the organ receives.
+
+A slice's chat shows a card for each pod, with its organs and what needs you. Expand a pod card to
+list its organs, or click it to open the pod's chat.
+
+From a cell's chat, **Show in parent chat** in the Lineage panel's menu opens the chat that started
+it, scrolled to its card and expanded. In the Lineage panel, a child thread's row can also open it
+beside the chat.
+
 ## Metas
 
 A meta is a top-level thread you keep open to run other work, such as an orchestrator. Promote a

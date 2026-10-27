@@ -43,9 +43,10 @@ import {
   CornerLeftUpIcon,
   EyeIcon,
   GitForkIcon,
-  ListTreeIcon,
   LoaderCircleIcon,
+  MessageSquareShareIcon,
   MoreHorizontalIcon,
+  PanelRightIcon,
   PlusIcon,
   SquareIcon,
   UnplugIcon,
@@ -53,8 +54,7 @@ import {
 import { useState, type ReactNode } from "react";
 
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
-import { useLegacySidebarEnabled } from "../../hooks/useSettings";
-import { showThreadInAgentTree } from "../../state/agentTree";
+import { useRightPanelStore } from "../../rightPanelStore";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import {
   useProjects,
@@ -68,6 +68,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { AgentElapsed } from "./AgentElapsed";
 import { ThreadRelationshipIcon, threadRelationshipStatusLabel } from "./ThreadRelationshipIcon";
 import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
+import { revealSubagentInTimeline } from "./timelineReveal";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -223,7 +224,6 @@ export function ThreadRelationshipsPanel(props: {
   const allProjects = useProjects();
   const archived = useArchivedThreadSnapshots([props.environmentId]);
   const navigate = useNavigate();
-  const legacySidebarEnabled = useLegacySidebarEnabled();
   const mergeBack = useAtomCommand(threadEnvironment.mergeBack);
   const stopSession = useAtomCommand(threadEnvironment.stopSession);
   const interruptTurn = useAtomCommand(threadEnvironment.interruptTurn);
@@ -291,9 +291,11 @@ export function ThreadRelationshipsPanel(props: {
   });
   const canMerge = mergeTargetThreadId !== null && latestMergeBackRun !== null;
   const canDetach = projection ? canDetachThreadProviderSession(projection) : false;
-  const canShowAgentTree =
-    !legacySidebarEnabled &&
-    relationshipRows.some(({ edge }) => edge.kind === "subagent" || edge.kind === "supervised");
+  // The parent's chat holds this thread's row: its organ card, else its subagent group.
+  const parentChatThreadId =
+    currentThread?.lineage.relationshipToParent === "subagent"
+      ? currentThread.lineage.parentThreadId
+      : null;
 
   const {
     related = [],
@@ -327,6 +329,14 @@ export function ThreadRelationshipsPanel(props: {
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(scopeThreadRef(props.environmentId, threadId)),
     });
+  };
+
+  const showInParentChat = (parentThreadId: ThreadId) => {
+    revealSubagentInTimeline(
+      scopedThreadKey(scopeThreadRef(props.environmentId, parentThreadId)),
+      props.threadId,
+    );
+    openThread(parentThreadId);
   };
 
   const merge = async () => {
@@ -397,7 +407,7 @@ export function ThreadRelationshipsPanel(props: {
       title={runningCount > 0 ? `Lineage · ${runningCount} running` : "Lineage"}
       data-thread-relationships-panel
       actions={
-        canDetach || canShowAgentTree ? (
+        canDetach || parentChatThreadId !== null ? (
           <Menu>
             <MenuTrigger
               render={
@@ -413,10 +423,10 @@ export function ThreadRelationshipsPanel(props: {
               <MoreHorizontalIcon className="size-3.5" />
             </MenuTrigger>
             <MenuPopup align="end" className="min-w-60 max-w-(--available-width)">
-              {canShowAgentTree ? (
-                <MenuItem onClick={() => showThreadInAgentTree(ref)}>
-                  <ListTreeIcon className="size-3.5" />
-                  Show in agent tree
+              {parentChatThreadId !== null ? (
+                <MenuItem onClick={() => showInParentChat(parentChatThreadId)}>
+                  <MessageSquareShareIcon className="size-3.5" />
+                  Show in parent chat
                 </MenuItem>
               ) : null}
               {canDetach ? (
@@ -487,7 +497,10 @@ export function ThreadRelationshipsPanel(props: {
                 workflowGroup?.workflow.status === "running" &&
                 agent?.origin === "provider_native" &&
                 providerDriver === "claudeAgent";
-              const trailingVisibilityClass = (workflowGroup ? canStopWorkflow : canStop)
+              const canOpenBeside = isSubagent && !isParent && node?.missing === false;
+              const trailingVisibilityClass = (
+                workflowGroup ? canStopWorkflow : canStop || canOpenBeside
+              )
                 ? "group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:opacity-0 [@media(hover:none)]:opacity-0"
                 : "";
               const project = projects.find((project) => project.id === node?.thread?.projectId);
@@ -670,30 +683,52 @@ export function ThreadRelationshipsPanel(props: {
                   ) : (
                     relationshipLink
                   )}
-                  {canStop && agent ? (
-                    <div className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100">
-                      <Tooltip>
-                        <TooltipTrigger
-                          render={
-                            <ThreadDetailsControl
-                              size="icon-xs"
-                              variant="ghost"
-                              part="icon"
-                              tone="destructive"
-                              aria-label={`Stop subagent ${threadTitle}`}
-                              disabled={stoppingId !== null}
-                              onClick={() => void stopSubagent(threadId, agent)}
-                            />
-                          }
-                        >
-                          {stoppingId === threadId ? (
-                            <LoaderCircleIcon aria-hidden className="size-3 animate-spin" />
-                          ) : (
-                            <SquareIcon aria-hidden className="size-3 fill-current" />
-                          )}
-                        </TooltipTrigger>
-                        <TooltipPopup side="left">Stop subagent</TooltipPopup>
-                      </Tooltip>
+                  {canOpenBeside || (canStop && agent) ? (
+                    <div className="pointer-events-none absolute right-1 top-1/2 flex -translate-y-1/2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100">
+                      {canOpenBeside ? (
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <ThreadDetailsControl
+                                size="icon-xs"
+                                variant="ghost"
+                                part="icon"
+                                aria-label={`Open ${threadTitle} beside the chat`}
+                                onClick={() =>
+                                  useRightPanelStore.getState().openThread(ref, threadId)
+                                }
+                              />
+                            }
+                          >
+                            <PanelRightIcon aria-hidden className="size-3" />
+                          </TooltipTrigger>
+                          <TooltipPopup side="left">Open beside the chat</TooltipPopup>
+                        </Tooltip>
+                      ) : null}
+                      {canStop && agent ? (
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <ThreadDetailsControl
+                                size="icon-xs"
+                                variant="ghost"
+                                part="icon"
+                                tone="destructive"
+                                aria-label={`Stop subagent ${threadTitle}`}
+                                disabled={stoppingId !== null}
+                                onClick={() => void stopSubagent(threadId, agent)}
+                              />
+                            }
+                          >
+                            {stoppingId === threadId ? (
+                              <LoaderCircleIcon aria-hidden className="size-3 animate-spin" />
+                            ) : (
+                              <SquareIcon aria-hidden className="size-3 fill-current" />
+                            )}
+                          </TooltipTrigger>
+                          <TooltipPopup side="left">Stop subagent</TooltipPopup>
+                        </Tooltip>
+                      ) : null}
                     </div>
                   ) : null}
                 </li>

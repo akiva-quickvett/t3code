@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import {
   legacyProjectCwdPreferenceKey,
-  markAgentTreeRevealScrolled,
   markThreadUnread,
   markThreadVisited,
   parsePersistedState,
@@ -14,13 +13,10 @@ import {
   resolveProjectExpanded,
   setDefaultAdvertisedEndpointKey,
   setProjectExpanded,
-  setAgentTreeExpanded,
   setSelectedMetaThreadKey,
-  setSidebarAgentTreeEnabled,
   setSidebarProjectScopeKey,
   setSidebarView,
   setThreadChangedFilesExpanded,
-  showAgentTree,
   toggleSidebarView,
   type UiState,
 } from "./uiStateStore";
@@ -31,10 +27,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectOrder: [],
     sidebarProjectScopeKey: null,
     sidebarView: "chat",
-    sidebarAgentTreeEnabled: false,
     selectedMetaThreadKey: null,
-    agentTreeExpandedKeys: {},
-    agentTreeReveal: null,
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
     defaultAdvertisedEndpointKey: null,
@@ -170,52 +163,6 @@ describe("uiStateStore pure functions", () => {
   });
 });
 
-describe("agent tree state", () => {
-  it("shows the tree with the thread's ancestors expanded and a fresh reveal request", () => {
-    const first = showAgentTree(makeUiState(), "environment:cell", [
-      "environment:broker",
-      "environment:slice",
-    ]);
-    expect(first.sidebarAgentTreeEnabled).toBe(true);
-    expect(first.agentTreeExpandedKeys).toEqual({
-      "environment:broker": true,
-      "environment:slice": true,
-    });
-    expect(first.agentTreeReveal).toEqual({
-      threadKey: "environment:cell",
-      request: 1,
-      scrolled: false,
-    });
-
-    // A sidebar that mounts later, such as the mobile sheet, must not scroll again.
-    const scrolled = markAgentTreeRevealScrolled(first);
-    expect(scrolled.agentTreeReveal?.scrolled).toBe(true);
-    expect(markAgentTreeRevealScrolled(scrolled)).toBe(scrolled);
-
-    // Showing the same thread again must still scroll to it, so the request moves.
-    const again = showAgentTree(scrolled, "environment:cell", []);
-    expect(again.agentTreeReveal).toEqual({
-      threadKey: "environment:cell",
-      request: 2,
-      scrolled: false,
-    });
-    expect(again.agentTreeExpandedKeys).toEqual(first.agentTreeExpandedKeys);
-  });
-
-  it("collapses a thread and turns tree mode off without losing expansion", () => {
-    const expanded = setAgentTreeExpanded(makeUiState(), "environment:slice", true);
-    expect(setAgentTreeExpanded(expanded, "environment:slice", true)).toBe(expanded);
-    expect(
-      setAgentTreeExpanded(expanded, "environment:slice", false).agentTreeExpandedKeys,
-    ).toEqual({});
-
-    const flat = setSidebarAgentTreeEnabled(setSidebarView(expanded, "orchestration"), false);
-    expect(flat.sidebarView).toBe("chat");
-    expect(flat.sidebarAgentTreeEnabled).toBe(false);
-    expect(flat.agentTreeExpandedKeys).toEqual({ "environment:slice": true });
-  });
-});
-
 describe("sidebar view", () => {
   it("reads a legacy agent-tree flag as the orchestration view", () => {
     expect(parsePersistedState({ sidebarAgentTreeEnabled: true }).sidebarView).toBe(
@@ -228,30 +175,21 @@ describe("sidebar view", () => {
   it("prefers a stored view over the legacy flag and ignores unknown views", () => {
     const parsed = parsePersistedState({ sidebarView: "chat", sidebarAgentTreeEnabled: true });
     expect(parsed.sidebarView).toBe("chat");
-    expect(parsed.sidebarAgentTreeEnabled).toBe(false);
     expect(
       parsePersistedState({ sidebarView: "grid", sidebarAgentTreeEnabled: true }).sidebarView,
     ).toBe("orchestration");
   });
 
-  it("toggles between the views and keeps the legacy alias in step", () => {
+  it("toggles between the views", () => {
     const orchestration = toggleSidebarView(makeUiState());
     expect(orchestration.sidebarView).toBe("orchestration");
-    expect(orchestration.sidebarAgentTreeEnabled).toBe(true);
     const chat = toggleSidebarView(orchestration);
     expect(chat.sidebarView).toBe("chat");
-    expect(chat.sidebarAgentTreeEnabled).toBe(false);
     expect(setSidebarView(chat, "chat")).toBe(chat);
   });
 
-  it("maps the legacy setter onto the view", () => {
-    const state = setSidebarAgentTreeEnabled(makeUiState(), true);
-    expect(state.sidebarView).toBe("orchestration");
-    expect(setSidebarAgentTreeEnabled(state, true)).toBe(state);
-  });
-
   it("keeps the view when a thread is opened", () => {
-    const state = makeUiState({ sidebarView: "orchestration", sidebarAgentTreeEnabled: true });
+    const state = makeUiState({ sidebarView: "orchestration" });
     const visited = markThreadVisited(state, "environment:thread", "2026-02-25T12:30:00.000Z");
     expect(visited.sidebarView).toBe("orchestration");
   });
@@ -309,10 +247,7 @@ describe("parsePersistedState", () => {
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKey: null,
       sidebarView: "chat",
-      sidebarAgentTreeEnabled: false,
       selectedMetaThreadKey: null,
-      agentTreeExpandedKeys: {},
-      agentTreeReveal: null,
       pullRequestMergeMethod: "merge",
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
@@ -477,21 +412,6 @@ describe("uiStateStore persistence", () => {
     const restored = parsePersistedState(persisted);
     expect(restored.sidebarView).toBe("orchestration");
     expect(restored.selectedMetaThreadKey).toBe("no-meta");
-  });
-
-  it("keeps tree mode across reloads but starts every tree collapsed", () => {
-    const state = showAgentTree(makeUiState(), "environment:cell", [
-      "environment:broker",
-      "environment:slice",
-    ]);
-    persistState(state);
-
-    const restored = parsePersistedState(
-      JSON.parse(localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}") as PersistedUiState,
-    );
-    expect(restored.sidebarAgentTreeEnabled).toBe(true);
-    expect(restored.agentTreeExpandedKeys).toEqual({});
-    expect(restored.agentTreeReveal).toBeNull();
   });
 
   it("drops the temporary expanded-only migration fallback when rewriting state", () => {

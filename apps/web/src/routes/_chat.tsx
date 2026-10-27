@@ -1,5 +1,4 @@
 import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
 import {
   mergeOrchestrationOrders,
   nextNeedsYouTarget,
@@ -37,20 +36,17 @@ import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 import { readNavigationParentRef } from "../state/agentTree";
-import {
-  orchestrationTree,
-  readEnvironmentSupportsOrchestrationMetas,
-} from "../state/orchestrationTree";
-import { environmentCatalog } from "../connection/catalog";
+import { orchestrationTree } from "../state/orchestrationTree";
+import { readOrchestrationEnvironmentIds } from "../components/sidebar/orchestrationEnvironments";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 
 function readOrchestrationOrder() {
   return mergeOrchestrationOrders(
-    Array.from(enabledEnvironmentIds(appAtomRegistry.get(environmentCatalog.catalogValueAtom)))
-      .filter(readEnvironmentSupportsOrchestrationMetas)
-      .map((environmentId) => appAtomRegistry.get(orchestrationTree.orderAtom(environmentId))),
+    readOrchestrationEnvironmentIds().map((environmentId) =>
+      appAtomRegistry.get(orchestrationTree.orderAtom(environmentId)),
+    ),
   );
 }
 
@@ -129,14 +125,7 @@ function ChatRouteGlobalShortcuts() {
       }
 
       if (command === "sidebar.showAgentTree") {
-        const environmentId = routeThreadRef?.environmentId ?? primaryEnvironmentId;
-        if (
-          legacySidebarEnabled ||
-          environmentId === null ||
-          !readEnvironmentSupportsOrchestrationMetas(environmentId)
-        ) {
-          return;
-        }
+        if (legacySidebarEnabled || readOrchestrationEnvironmentIds().length === 0) return;
         event.preventDefault();
         event.stopPropagation();
         useUiStateStore.getState().toggleSidebarView();
