@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @effect-diagnostics nodeBuiltinImport:off
 
 /**
  * Writes the committed orchestration seed tree (F1) into a worktree's `.t3`
