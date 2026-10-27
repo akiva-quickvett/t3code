@@ -563,3 +563,60 @@ it.effect("refuses a supervisor that does not exist", () =>
     assert.isTrue(Exit.isFailure(yield* Effect.exit(orchestrator.getThreadProjection(childId))));
   }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("refuses to promote a supervised launch to a meta, and promotes its launcher", () =>
+  Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const launcherId = ThreadId.make("thread:meta-launcher");
+    const childId = ThreadId.make("thread:meta-supervised");
+    yield* createThread(launcherId);
+    yield* createThread(childId, launcherId);
+    const refused = yield* threads
+      .setMeta({
+        threadId: childId,
+        commandId: CommandId.make("promote:supervised"),
+        enabled: true,
+      })
+      .pipe(Effect.flip);
+    assert.equal(refused._tag, "OrchestratorDispatchError");
+    assert.include(String(refused.cause), "is a supervised launch");
+    assert.isNull((yield* threads.getThreadShell(childId))?.metaAt ?? null);
+
+    yield* threads.setMeta({
+      threadId: launcherId,
+      commandId: CommandId.make("promote:launcher"),
+      enabled: true,
+    });
+    assert.isNotNull((yield* threads.getThreadShell(launcherId))?.metaAt ?? null);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("refuses a meta agent's own settle mid-turn instead of deferring it", () =>
+  Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const metaId = ThreadId.make("thread:meta-self-settle");
+    yield* createThread(metaId);
+    yield* threads.setMeta({
+      threadId: metaId,
+      commandId: CommandId.make("promote:self-settle"),
+      enabled: true,
+    });
+    yield* send({ threadId: metaId, text: "relay the results" });
+    assert.isNotNull((yield* threads.getThreadShell(metaId))?.activeRunId ?? null);
+    for (const scope of [undefined, "tree"] as const) {
+      const refused = yield* threads
+        .settleThread({
+          threadId: metaId,
+          commandId: CommandId.make(`settle:self:${scope ?? "thread"}`),
+          byOwnAgent: true,
+          ...(scope === undefined ? {} : { scope }),
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused._tag, "OrchestratorDispatchError");
+      assert.include(String(refused.cause), "a meta cannot be settled");
+    }
+    const shell = yield* threads.getThreadShell(metaId);
+    assert.isUndefined(shell?.settleWhenIdle);
+    assert.notEqual(shell?.settledOverride, "settled");
+  }).pipe(Effect.provide(layerTest)),
+);

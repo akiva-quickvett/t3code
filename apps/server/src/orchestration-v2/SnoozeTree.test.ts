@@ -26,6 +26,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as SnoozeWhenIdleReactor from "./SnoozeWhenIdleReactor.ts";
+import { settleBlockedThreads } from "./settleBlocker.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { isThreadParked } from "./threadParking.ts";
@@ -709,6 +710,180 @@ it.layer(layerTest)("snooze trees", (it) => {
       });
       const after = yield* projections.getThreadParking({ worktreePath });
       assert.isTrue(after.every((thread) => isThreadParked(thread, nowMs)));
+    }),
+  );
+});
+
+/**
+ * Promote refuses a thread in an agent tree, so a meta below a root is set
+ * directly: tree rules must still leave it out.
+ */
+const markMeta = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const thread = yield* projections.getThread(threadId);
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make(`event:meta:${threadId}`),
+      type: "thread.metadata-updated",
+      threadId,
+      providerInstanceId: instanceId,
+      occurredAt: now,
+      payload: { ...thread, metaAt: now, autoSettleDisabledAt: now },
+    });
+  });
+
+const promote = (threadId: ThreadId) =>
+  Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+    orchestrator.dispatch({
+      type: "thread.meta.set",
+      commandId: CommandId.make(`promote:${threadId}`),
+      threadId,
+      enabled: true,
+    }),
+  );
+
+const settledOf = (threadId: ThreadId) =>
+  Effect.map(
+    Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+      orchestrator.getThreadProjection(threadId),
+    ),
+    ({ thread }) => ({
+      settled: thread.settledOverride === "settled",
+      settledByTree: thread.settledByTree ?? null,
+    }),
+  );
+
+it.layer(layerTest)("metas in trees", (it) => {
+  it.effect("a tree snooze on a meta snoozes the meta alone, at once", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const meta = ThreadId.make("thread:tree-meta");
+      const slice = ThreadId.make("thread:tree-meta-slice");
+      yield* createThread(meta);
+      yield* createThread(slice, { supervisorThreadId: meta });
+      yield* promote(meta);
+      yield* send(slice, "keep building");
+      const until = yield* later(2);
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze:tree-meta"),
+        threadId: meta,
+        snoozedUntil: until,
+        scope: "tree",
+      });
+      assert.equal(yield* snoozedUntil(meta), until);
+      assert.isNull(yield* snoozedUntil(slice));
+      assert.isNull(yield* snoozeWhenIdleOf(slice));
+    }),
+  );
+
+  it.effect("a tree wake on a meta wakes the meta alone", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const meta = ThreadId.make("thread:wake-meta");
+      const slice = ThreadId.make("thread:wake-meta-slice");
+      yield* createThread(meta);
+      yield* createThread(slice, { supervisorThreadId: meta });
+      yield* promote(meta);
+      const sliceUntil = yield* later(5);
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze:wake-meta-slice"),
+        threadId: slice,
+        snoozedUntil: sliceUntil,
+        scope: "thread",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze:wake-meta"),
+        threadId: meta,
+        snoozedUntil: yield* later(2),
+        scope: "tree",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("unsnooze:wake-meta"),
+        threadId: meta,
+        reason: "user",
+        scope: "tree",
+      });
+      assert.isNull(yield* snoozedUntil(meta));
+      assert.equal(yield* snoozedUntil(slice), sliceUntil);
+    }),
+  );
+
+  it.effect("a busy meta's snooze when idle waits for its own work, scoped to itself", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const meta = ThreadId.make("thread:busy-meta");
+      yield* createThread(meta);
+      yield* promote(meta);
+      yield* send(meta, "relay the results");
+      const until = yield* later(2);
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze:busy-meta"),
+        threadId: meta,
+        snoozedUntil: until,
+        scope: "tree",
+        whenIdle: true,
+      });
+      assert.isNull(yield* snoozedUntil(meta));
+      assert.deepInclude(yield* snoozeWhenIdleOf(meta), { snoozedUntil: until, scope: "thread" });
+    }),
+  );
+
+  it.effect("a tree snooze above a meta snoozes the rest of the tree and skips the meta", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const root = ThreadId.make("thread:snooze-root");
+      const meta = ThreadId.make("thread:snooze-root-meta");
+      const sibling = ThreadId.make("thread:snooze-root-sibling");
+      yield* createThread(root);
+      yield* createSubagent(meta, root);
+      yield* createSubagent(sibling, root);
+      yield* markMeta(meta);
+      const until = yield* later(3);
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze:root-over-meta"),
+        threadId: root,
+        snoozedUntil: until,
+        scope: "tree",
+      });
+      assert.equal(yield* snoozedUntil(root), until);
+      assert.equal(yield* snoozedUntil(sibling), until);
+      assert.isNull(yield* snoozedUntil(meta));
+    }),
+  );
+
+  it.effect("a tree settle above a running meta neither waits for it nor settles it", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const root = ThreadId.make("thread:settle-root");
+      const meta = ThreadId.make("thread:settle-root-meta");
+      const sibling = ThreadId.make("thread:settle-root-sibling");
+      yield* createThread(root);
+      yield* createSubagent(meta, root);
+      yield* createSubagent(sibling, root);
+      yield* markMeta(meta);
+      yield* send(meta, "keep relaying");
+      const tree = yield* projections.getThreadParking({ treeOf: root });
+      assert.isTrue(tree.find((thread) => thread.id === meta)?.busy);
+      assert.deepEqual(yield* settleBlockedThreads(projections, tree), []);
+
+      const result = yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("settle:root-over-meta"),
+        threadId: root,
+        scope: "tree",
+      });
+      assert.notProperty(result, "waitsForIdle");
+      assert.deepEqual(yield* settledOf(root), { settled: true, settledByTree: null });
+      assert.deepEqual(yield* settledOf(sibling), { settled: true, settledByTree: root });
+      assert.deepEqual(yield* settledOf(meta), { settled: false, settledByTree: null });
     }),
   );
 });

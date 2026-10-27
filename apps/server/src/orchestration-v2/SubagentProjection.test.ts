@@ -117,6 +117,29 @@ it("keeps a subagent child awake when its parent thread is snoozed", () => {
   });
 });
 
+it("does not make a meta's child a meta", () => {
+  const parentThread = {
+    ...makeParentThread(),
+    metaAt: childCreatedAt,
+    autoSettleDisabledAt: childCreatedAt,
+  };
+  const childThread = makeSubagentChildThread({
+    parentThread,
+    childThreadId,
+    parentNodeId: NodeId.make("node:meta-parent"),
+    activeProviderThreadId: null,
+    providerInstanceId: childProviderInstanceId,
+    modelSelection: childModelSelection,
+    title: "Meta's child",
+    now: childCreatedAt,
+    createdBy: "agent",
+    creationSource: "mcp",
+  });
+
+  assert.notProperty(childThread, "metaAt");
+  assert.deepEqual(childThread.autoSettleDisabledAt, childCreatedAt);
+});
+
 it("attributes native subagent prompts to their parent thread", () => {
   for (const role of ["user", "assistant"] as const) {
     const artifacts = makeSubagentConversationArtifacts({

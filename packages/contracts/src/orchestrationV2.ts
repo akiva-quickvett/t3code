@@ -2605,10 +2605,6 @@ export const OrchestrationV2StoredEventJson = Schema.Struct({
 });
 export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJson.Type;
 
-/**
- * Kept out of `OrchestrationV2Command` until the server decides it: the
- * union feeds exhaustive switches that would not compile without a handler.
- */
 export const OrchestrationV2ThreadMetaSetCommand = Schema.Struct({
   type: Schema.Literal("thread.meta.set"),
   commandId: CommandId,
@@ -2726,6 +2722,7 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     enabled: Schema.Boolean,
   }),
+  OrchestrationV2ThreadMetaSetCommand,
   Schema.Struct({
     type: Schema.Literal("thread.pin"),
     commandId: CommandId,

@@ -52,14 +52,15 @@ export const settleBlocker = (
 
 /**
  * The threads among these that a tree settle waits for. Only threads the
- * parking flag calls busy can have a blocker, so only theirs are read.
+ * parking flag calls busy can have a blocker, so only theirs are read. A meta
+ * never settles with a tree, so it never holds one up.
  */
 export const settleBlockedThreads = (
   projections: Pick<ProjectionStoreV2Shape, "getThreadRecords">,
   threads: ReadonlyArray<ProjectionThreadParking>,
 ) =>
   Effect.forEach(
-    threads.filter((thread) => thread.busy),
+    threads.filter((thread) => thread.busy && thread.metaAt === null),
     (thread) =>
       projections
         .getThreadRecords(thread.id, SETTLE_BLOCKER_FIELDS, SETTLE_BLOCKER_FILTER)

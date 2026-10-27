@@ -110,6 +110,8 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
           // The source's tree settle, or its wait, stays the source's.
           settledByTree: null,
           settleWhenIdle: null,
+          // Identity is never inherited: a fork of a meta is promoted by hand.
+          metaAt: null,
           snoozedUntil: null,
           snoozedAt: null,
           lastVisitedAt: null,
