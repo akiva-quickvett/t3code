@@ -13,7 +13,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-execution";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useRef, useState } from "react";
 
 import { useIncrementalTimelineEntries } from "../../hooks/useIncrementalTimelineEntries";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
@@ -72,18 +72,10 @@ export const ThreadTimelineHost = memo(function ThreadTimelineHost(props: {
       : { attempts: projection.attempts, nodes: projection.nodes, plans: projection.plans }),
   });
 
-  const { latestRun, activityRun, runtime, runlessWorkActive } = useMemo(
-    () =>
-      projection === null
-        ? { latestRun: null, activityRun: null, runtime: null, runlessWorkActive: false }
-        : {
-            latestRun: deriveLatestThreadRun(projection),
-            activityRun: deriveThreadActivityRun(projection),
-            runtime: deriveThreadRuntime(projection),
-            runlessWorkActive: deriveRunlessWorkStartedAt(projection) !== null,
-          },
-    [projection],
-  );
+  const latestRun = projection === null ? null : deriveLatestThreadRun(projection);
+  const activityRun = projection === null ? null : deriveThreadActivityRun(projection);
+  const runtime = projection === null ? null : deriveThreadRuntime(projection);
+  const runlessWorkActive = projection !== null && deriveRunlessWorkStartedAt(projection) !== null;
   const onOpenThread = useStableCallback((childThreadId: ThreadId) => {
     void navigate({
       to: "/$environmentId/$threadId",

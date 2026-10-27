@@ -8,7 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon, XIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { cn, newMessageId } from "../../lib/utils";
 import { useQuietThreadShell, useThreadProjection } from "../../state/entities";
@@ -38,10 +38,8 @@ export function ThreadPanel(props: {
   // The same projection atom the timeline reads, so the dot, the composer mode
   // and the timeline agree on whether the cell is running.
   const projection = useThreadProjection(threadRef)?.projection ?? null;
-  const running = useMemo(
-    () => projection !== null && (deriveThreadRuntime(projection)?.activeRunId ?? null) !== null,
-    [projection],
-  );
+  const running =
+    projection !== null && (deriveThreadRuntime(projection)?.activeRunId ?? null) !== null;
   const organ = shell?.lineage.organ;
 
   return (
