@@ -252,6 +252,30 @@ another session id than the thread's (possible for Cursor and Antigravity) is
 not included. An unknown or deleted thread fails with
 `thread_not_found`. It carries no account, credential, or hub details.
 
+### `t3_orchestration_tree`
+
+Read-only. Takes optional `metaThreadId` and returns the tree the Orchestration
+sidebar shows: `metas` (dot and unread count each), `trees` keyed by meta, and
+`noMeta`, with `stale: false`. The server builds it from active thread shells
+with the same classifier and dot function as the sidebar
+(`packages/shared/src/orchestrationTree.ts`); its shell-to-classifier mapping in
+`apps/server/src/mcp/orchestrationTree.ts` mirrors client-runtime's and must be
+kept in step with it. Pods carry organs, read only from each pod's `subagents`
+records, never full projections: one entry per organ id with its latest round,
+and each cell once, with the latest record's model and status. The payload's
+only row list is `slices`, so in `noMeta` an ad-hoc chat is an entry with no
+pods and a slice-less pod is an entry whose only pod is itself. With
+`metaThreadId`, only that meta's tree is returned and `noMeta` is empty; an id
+that is not a meta fails with `thread_not_found`.
+
+### `t3_orchestration_stats`
+
+Read-only. Returns the stats strip's `OrchestrationStatsSnapshot` from
+`OrchestrationStatsService.read`, which samples the host once when no client is
+subscribed and leaves no sampling running. Host `cpu`, `ram`, and `swap` are
+used fractions from 0 to 1; `load` is the 1-minute load average divided by the
+CPU count and can exceed 1.
+
 ### `delegate_task`
 
 Creates a T3-owned child thread and immediately dispatches the supplied task

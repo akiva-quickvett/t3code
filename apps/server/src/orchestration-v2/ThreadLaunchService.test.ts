@@ -78,6 +78,7 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as OrchestrationStatsService from "../orchestrationStats/OrchestrationStatsService.ts";
 
 const projectId = ProjectId.make("project:launch-test");
 const otherProjectId = ProjectId.make("project:launch-other");
@@ -3359,6 +3360,7 @@ it.effect.each(
       });
       const layerService = OrchestratorMcpService.layer.pipe(
         Layer.provide(OrganService.layer),
+        Layer.provide(Layer.mock(OrchestrationStatsService.OrchestrationStatsService)({})),
         Layer.provide(layerWithoutPods),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(harness.layer),
@@ -3583,6 +3585,7 @@ const withDelegatedWorktreeRepo = <A, E>(
     });
     const layerService = OrchestratorMcpService.layer.pipe(
       Layer.provide(OrganService.layer),
+      Layer.provide(Layer.mock(OrchestrationStatsService.OrchestrationStatsService)({})),
       Layer.provide(layerWithoutPods),
       Layer.provide(NodeCrypto.layer),
       Layer.provide(harness.layer),

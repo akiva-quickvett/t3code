@@ -73,6 +73,7 @@ const layerOrchestratorToolkitWithUsage = (
 ) =>
   McpHttpServer.layerOrchestratorToolkit.pipe(
     Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+    Layer.provide(Layer.mock(OrchestrationStatsService.OrchestrationStatsService)({})),
     Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
     Layer.provide(usage),
     Layer.provide(layerWithoutPods),
@@ -94,6 +95,7 @@ import {
 } from "@t3tools/shared/t3McpToolPresentation";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 import { layerWithoutPods } from "../../pod/testkit/layerWithoutPods.ts";
+import * as OrchestrationStatsService from "../../orchestrationStats/OrchestrationStatsService.ts";
 
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
