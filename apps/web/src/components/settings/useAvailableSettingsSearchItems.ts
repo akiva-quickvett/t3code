@@ -1,3 +1,7 @@
+import {
+  supportsOrchestrationMetas,
+  supportsOrganPresets,
+} from "@t3tools/client-runtime/state/organ-presets";
 import { AuthEnvironmentMaintainScope } from "@t3tools/contracts";
 
 import { usePrimaryCloudLinkState } from "~/cloud/primaryCloudLinkState";
@@ -49,6 +53,14 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
     environments.some(
       (environment) => environment.serverConfig?.environment.capabilities.chatChannels,
     ) === true;
+  const hasOrganPresets =
+    environments.some((environment) =>
+      supportsOrganPresets(environment.serverConfig?.environment.capabilities),
+    ) === true;
+  const hasOrchestrationMetas =
+    environments.some((environment) =>
+      supportsOrchestrationMetas(environment.serverConfig?.environment.capabilities),
+    ) === true;
   const hasThreadAutoSettlement =
     getThreadAutoSettlementSearchAvailability(environments).eligibleEnvironmentIds.length > 0;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -79,5 +91,7 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
     managedTunnelActive,
     hasPullRequestLabelRules,
     hasChatChannels,
+    hasOrganPresets,
+    hasOrchestrationMetas,
   });
 }

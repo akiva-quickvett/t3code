@@ -12,6 +12,7 @@ import {
   BlocksIcon,
   BotIcon,
   UserRoundCogIcon,
+  UsersRoundIcon,
   createLucideIcon,
   CalendarClockIcon,
   GitBranchIcon,
@@ -48,6 +49,8 @@ import {
   type SettingsSearchItem,
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
+import { useEnvironments } from "../../state/environments";
+import { supportsOrganPresets } from "@t3tools/client-runtime/state/organ-presets";
 import { validateSettingsScopeSearch } from "./settingsScope";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
@@ -84,6 +87,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/snap-shot": SnapShotIcon,
   "/settings/providers": BotIcon,
   "/settings/agents": UserRoundCogIcon,
+  "/settings/organs": UsersRoundIcon,
   "/settings/integrations": BlocksIcon,
   "/settings/scheduled-tasks": CalendarClockIcon,
   "/settings/source-control": GitBranchIcon,
@@ -114,8 +118,16 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const currentHash = useLocation({ select: (location) => location.hash });
   const currentSearch = useLocation({ select: (location) => location.search });
   const scopeSearch = validateSettingsScopeSearch(currentSearch);
+  const { environments } = useEnvironments();
+  // Stock servers lack organ presets; `=== true` keeps the flag a primitive for the compiler.
+  const hasOrganPresets =
+    environments.some((environment) =>
+      supportsOrganPresets(environment.serverConfig?.environment.capabilities),
+    ) === true;
   const navItems = SETTINGS_NAV_ITEMS.filter(
-    (item) => item.to !== "/settings/projects" || isSettingsOverviewVisible(scopeSearch),
+    (item) =>
+      (item.to !== "/settings/projects" || isSettingsOverviewVisible(scopeSearch)) &&
+      (item.to !== "/settings/organs" || hasOrganPresets),
   );
   const { isMobile, setOpenMobile, open, setOpen } = useSidebar();
   const searchInputRef = useRef<HTMLInputElement>(null);

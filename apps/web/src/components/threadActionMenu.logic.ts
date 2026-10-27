@@ -1,5 +1,6 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
+import type { MetaPromoteBlocker } from "@t3tools/client-runtime/state/organ-presets";
 import { agentTreeDescendants } from "@t3tools/client-runtime/state/thread-relationships";
 import {
   type SnoozePreset,
@@ -22,6 +23,8 @@ export type ThreadActionMenuId =
   | "auto-settle"
   | "auto-settle:enabled"
   | "auto-settle:disabled"
+  | "promote-meta"
+  | "demote-meta"
   | "snooze"
   | `snooze:${string}`
   | "snooze-thread"
@@ -106,7 +109,12 @@ export interface ThreadActionMenuState {
     readonly rolePresets: boolean;
     /** The environment reports thread usage and this connection may read usage. */
     readonly threadUsage: boolean;
+    /** The environment takes `thread.meta.set`; absent on stock servers. */
+    readonly metas?: boolean;
   };
+  readonly isMeta?: boolean;
+  /** Why the server would refuse a promote, or null when it would accept one. */
+  readonly metaPromoteBlocker?: MetaPromoteBlocker | null;
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
   /** Present when the server snoozes agent trees; absent keeps the single-thread menu. */
   readonly snoozeTree?: ThreadSnoozeTreeMenuState;
@@ -279,6 +287,30 @@ function settleTreeMenuItems(
 }
 
 /**
+ * A delegated child is a row under its parent, never a meta, so it gets
+ * neither entry. A supervised or archived thread shows promote disabled with
+ * the server's reason.
+ */
+function metaMenuItems(
+  state: ThreadActionMenuState,
+): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
+  if (state.supports.metas !== true) return [];
+  if (state.isMeta === true) return [{ id: "demote-meta", label: "Demote meta", icon: "crown" }];
+  const blocker = state.metaPromoteBlocker ?? null;
+  if (blocker === "delegated-child") return [];
+  return [
+    blocker === null
+      ? { id: "promote-meta", label: "Promote to meta", icon: "crown" }
+      : {
+          id: "promote-meta",
+          label: `Promote to meta (${blocker === "archived" ? "unarchive first" : "supervised launch"})`,
+          icon: "crown",
+          disabled: true,
+        },
+  ];
+}
+
+/**
  * Local navigation, read markers, and copying remain available to read-only
  * clients; opening a pod service has its own browser permission.
  */
@@ -331,6 +363,7 @@ export function buildThreadActionMenuItems(
       : []),
     ...(state.supports.settlement ? settleTreeMenuItems(state) : []),
     ...(state.supports.snooze ? snoozeMenuItems(state) : []),
+    ...metaMenuItems(state),
     { id: "rename", label: "Rename thread", icon: "pencil", separatorBefore: true },
     ...(state.supports.titleRegeneration
       ? [
