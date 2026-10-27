@@ -191,6 +191,10 @@
       "types": "./src/state/orchestration.ts",
       "default": "./src/state/orchestration.ts"
     },
+    "./state/orchestration-stats": {
+      "types": "./src/state/orchestrationStats.ts",
+      "default": "./src/state/orchestrationStats.ts"
+    },
     "./state/orchestration-tree": {
       "types": "./src/state/orchestrationTree.ts",
       "default": "./src/state/orchestrationTree.ts"

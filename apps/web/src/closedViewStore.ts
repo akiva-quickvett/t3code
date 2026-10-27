@@ -13,11 +13,21 @@ import { resolveStorage } from "./lib/storage";
 import { randomUUID } from "./lib/utils";
 import { type RightPanelSurface } from "./rightPanelStore";
 
+type RestorableSurface = Exclude<RightPanelSurface, { kind: "terminal" | "thread" }>;
+
+/**
+ * Terminals reattach on their own, and a live cell is session-only: reopening
+ * one from history would load a transcript the user did not click.
+ */
+export const isRestorableClosedSurface = (
+  surface: RightPanelSurface,
+): surface is RestorableSurface => surface.kind !== "terminal" && surface.kind !== "thread";
+
 export type ClosedView =
   | {
       kind: "panel-tab";
       threadRef: ScopedThreadRef;
-      surface: Exclude<RightPanelSurface, { kind: "terminal" }>;
+      surface: RestorableSurface;
     }
   | { kind: "browser"; threadRef: ScopedThreadRef; snapshot: PreviewSessionSnapshot };
 
@@ -57,9 +67,12 @@ const isClosedViewEntry = (entry: unknown): entry is ClosedViewEntry => {
   if (!view || typeof view.id !== "string" || !isThreadRef(view.threadRef)) return false;
   if (view.kind === "browser") return isSnapshot(view.snapshot);
   if (view.kind !== "panel-tab") return false;
-  const surface = view.surface;
+  const surface = view.surface as RightPanelSurface | undefined;
   if (!surface || typeof surface.id !== "string") return false;
   switch (surface.kind) {
+    case "terminal":
+    case "thread":
+      return false;
     case "diff":
     case "files":
     case "pull-requests":
