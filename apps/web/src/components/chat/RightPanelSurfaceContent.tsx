@@ -22,6 +22,7 @@ import { PullRequestDetailPanel } from "../pullRequest/PullRequestDetailPanel";
 import { PullRequestDetailGhost } from "../pullRequest/PullRequestGhosts";
 import { PullRequestsUnavailableState } from "../pullRequest/PullRequestsUnavailableState";
 import { ThreadPullRequestsPanel } from "../pullRequest/ThreadPullRequestsPanel";
+import { ThreadPanel } from "./ThreadPanel";
 
 const PreviewPanel = lazy(() =>
   import("../preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
@@ -162,6 +163,17 @@ export function RightPanelSurfaceContent(props: {
     }
     case "pull-requests":
       return <ThreadPullRequestsPanel threadRef={threadRef} />;
+    case "thread":
+      return (
+        <ThreadPanel
+          // A fresh mount per cell, so cell A's draft, live-follow and scroll
+          // state never carry over to cell B (a draft must not reach the wrong cell).
+          key={surface.threadId}
+          environmentId={props.environmentId}
+          threadId={surface.threadId}
+          onClose={() => props.onCloseSurface(surface)}
+        />
+      );
     case "device":
       return (
         <Suspense fallback={null}>
