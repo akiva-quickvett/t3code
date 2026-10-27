@@ -9,7 +9,7 @@ import { environmentServerConfigsAtom } from "./server";
 import { environmentShell } from "./shell";
 import { environmentThreadShells } from "./threads";
 
-const environmentConnectedAtom = Atom.family((environmentId: EnvironmentId) =>
+export const environmentConnectedAtom = Atom.family((environmentId: EnvironmentId) =>
   Atom.make((get) =>
     Option.exists(
       AsyncResult.value(get(environmentCatalog.stateAtom(environmentId))),
