@@ -99,7 +99,7 @@ vi.mock("../../hooks/useThreadRouteTarget", async () => {
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => h.navigate }));
 // Both have their own tests; this one is about the tree.
 vi.mock("./MetaTabs", () => ({ MetaTabs: () => null }));
-vi.mock("./StatsStrip", () => ({ StatsStrip: () => null }));
+vi.mock("./StatsStrip", () => ({ StatsStrip: () => null, sliceBurn: () => null }));
 
 const environmentId = EnvironmentId.make("environment-seed");
 const refOf = (threadId: ThreadId) => ({ environmentId, threadId });

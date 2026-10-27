@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
+import { formatUsdPerHour } from "@t3tools/client-runtime/state/orchestration-stats";
 import type { OrchestrationRootRollup } from "@t3tools/client-runtime/state/orchestration-tree";
 import type { EnvironmentShellStatus } from "@t3tools/client-runtime/state/shell";
 import { orchestrationThreadInput } from "@t3tools/client-runtime/state/orchestration-tree";
@@ -16,15 +17,17 @@ import {
   MessageSquareIcon,
   TicketIcon,
 } from "lucide-react";
-import { memo, type MouseEvent, useEffect, useEffectEvent, useState } from "react";
+import { cloneElement, memo, type MouseEvent, useEffect, useEffectEvent, useState } from "react";
 
 import { useThreadActionMenu } from "../../hooks/useThreadActionMenu";
 import { cn } from "../../lib/utils";
 import { useProject, useQuietThreadShell } from "../../state/entities";
 import { orchestrationTree } from "../../state/orchestrationTree";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { OrchestrationDot } from "./OrchestrationDot";
 import { isEnvironmentStale, useEnvironmentConnection } from "./StaleBanner";
+import { sliceBurn } from "./StatsStrip";
 
 export type TreeRowKind = "slice" | "pod" | "ad-hoc" | "branch";
 
@@ -134,7 +137,7 @@ export const TreeRow = memo(function TreeRow(props: TreeRowProps) {
     setMenuAt({ x: event.clientX, y: event.clientY });
   };
 
-  return (
+  const row = (
     <div
       role="treeitem"
       aria-selected={selected}
@@ -150,7 +153,10 @@ export const TreeRow = memo(function TreeRow(props: TreeRowProps) {
           "bg-accent/60 before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-primary",
         stale && "opacity-45",
       )}
-    >
+    />
+  );
+  const content = (
+    <>
       <span className="flex w-5 shrink-0 items-center pl-2">
         {dot !== null && <OrchestrationDot dot={dot} />}
       </span>
@@ -206,9 +212,29 @@ export const TreeRow = memo(function TreeRow(props: TreeRowProps) {
           onStartRename={() => props.onRename(rowKey)}
         />
       )}
-    </div>
+    </>
+  );
+  if (kind !== "slice" || threadId === null) return cloneElement(row, undefined, content);
+  // A tooltip's popup mounts only while open, so the burn is read on hover and
+  // a stats push renders no row.
+  return (
+    <Tooltip>
+      <TooltipTrigger render={row}>{content}</TooltipTrigger>
+      <TooltipPopup side="right">
+        <SliceTooltipText environmentId={environmentId} threadId={threadId} title={title} />
+      </TooltipPopup>
+    </Tooltip>
   );
 });
+
+function SliceTooltipText(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly title: string;
+}) {
+  const burn = sliceBurn(props.environmentId, props.threadId);
+  return burn === null ? props.title : `${props.title} · burn ${formatUsdPerHour(burn.usdPerHour)}`;
+}
 
 function RowTag({ dim, children }: { readonly dim: boolean; readonly children: string }) {
   return (

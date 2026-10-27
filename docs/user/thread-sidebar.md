@@ -227,17 +227,38 @@ Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent
 thread asks for it.
 
-### Show the agent tree
+### Orchestration view
 
-On web and desktop, press the tree button at the top of the sidebar to nest each
-agent's subagents and supervised threads under it. When the server supports
-orchestration, **Switch to Orchestration view** in the command palette
-(`mod+alt+shift+b`) does the same. Subagent threads, which the sidebar normally
-hides, appear in the tree. Parents start collapsed; open one with its arrow.
-Press the tree button again, or run **Switch to Chat view**, to return to the
-usual list. A thread whose parent was archived or
-deleted shows at the top level. So does active work under a settled or snoozed
-parent, and a pinned thread, each in its own section.
+On web and desktop, when a connected server supports orchestration, switch the
+sidebar between **Chat** and **Orchestration** at its top, or with **Switch to
+Orchestration view** in the command palette (`mod+alt+shift+b`). Each device
+remembers its view. The Orchestration view lists slices and the pods they run,
+grouped by project and branch, each with a status dot. Click a row to open its
+chat. Collapsed rows still show the most urgent dot below them and how many
+threads need you.
+
+Each [meta](./agent-roles.md#metas) gets a tab, oldest first; selecting one shows
+only the work it supervises. **No meta** holds ad-hoc chats, pods without a slice,
+and slices no meta supervises. **+** promotes a thread to a meta.
+`mod+alt+shift+n` opens the next thread waiting on an approval, an answer, or a
+plan, in tab order, and selects its tab.
+
+Right-click a meta's tab for **Demote** and **Clear**. Clear compacts the meta's
+context, as sending `/compact` would; if the meta is busy, it runs after the
+current turn. It's unavailable when the meta's provider can't compact or there is
+nothing to clear yet.
+
+A dimmed row is snoozed, settled, or parked at a usage limit; its dot still shows
+its status. When an environment loses its connection, its rows dim under one
+"Reconnecting to …" row and keep their last dots until it reconnects.
+
+The strip at the bottom shows each environment's active and idle provider
+sessions, burn, and host headroom. Burn counts completed turns over the last 10
+minutes, so a long turn shows up when it ends. **≈** marks a dollar figure that
+includes a model with no known price, and burn reads "≈ warming" until the
+server has run for 10 minutes. Host reads ok, low, exhausted, or unknown; expand
+the strip for memory, swap, load, and CPU, and for each meta's burn. Hover a
+slice row to see its own burn.
 
 **Go to parent** in the command palette (`mod+alt+arrowup`) opens the thread
 it was delegated or forked from, or the thread supervising it.

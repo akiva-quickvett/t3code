@@ -29,6 +29,8 @@ export interface OrganCardProps {
   readonly onOpenCell: (threadId: ThreadId) => void;
   /** The row's ↗. */
   readonly onOpenChat: (threadId: ThreadId) => void;
+  /** The header's ↗, for a group with a chat of its own (a workflow's coordinator). */
+  readonly onOpenGroupChat?: (() => void) | undefined;
 }
 
 export const OrganCard = memo(function OrganCard({
@@ -37,6 +39,7 @@ export const OrganCard = memo(function OrganCard({
   onToggle,
   onOpenCell,
   onOpenChat,
+  onOpenGroupChat,
 }: OrganCardProps) {
   const cells = group.sections.flatMap((section) => section.cells);
   const avatars = organCardAvatars(cells);
@@ -48,47 +51,61 @@ export const OrganCard = memo(function OrganCard({
       className="overflow-hidden rounded-lg border border-border bg-card"
     >
       <Collapsible open={expanded} onOpenChange={onToggle}>
-        <CollapsibleTrigger
-          aria-label={`${group.label}, ${summary}`}
-          className="flex h-11 w-full min-w-0 items-center gap-2.5 px-3 text-left text-sm hover:bg-accent/50"
-        >
-          <ChevronRightIcon
-            aria-hidden
-            className={cn("size-3.5 shrink-0 text-muted-foreground", expanded && "rotate-90")}
-          />
-          <span className="flex shrink-0 items-center -space-x-1.5" aria-hidden>
-            {avatars.initials.map(({ key, initial }) => (
-              <span
-                key={key}
-                className="inline-flex size-5 items-center justify-center rounded-full bg-muted font-bold text-3xs text-foreground ring-2 ring-card"
-              >
-                {initial}
-              </span>
-            ))}
-            {avatars.overflow > 0 ? (
-              <span className="inline-flex size-5 items-center justify-center rounded-full bg-muted font-medium text-3xs text-muted-foreground ring-2 ring-card">
-                +{avatars.overflow}
+        <div className="flex items-center hover:bg-accent/50">
+          <CollapsibleTrigger
+            aria-label={`${group.label}, ${summary}`}
+            className="flex h-11 min-w-0 flex-1 items-center gap-2.5 px-3 text-left text-sm"
+          >
+            <ChevronRightIcon
+              aria-hidden
+              className={cn("size-3.5 shrink-0 text-muted-foreground", expanded && "rotate-90")}
+            />
+            <span className="flex shrink-0 items-center -space-x-1.5" aria-hidden>
+              {avatars.initials.map(({ key, initial }) => (
+                <span
+                  key={key}
+                  className="inline-flex size-5 items-center justify-center rounded-full bg-muted font-bold text-3xs text-foreground ring-2 ring-card"
+                >
+                  {initial}
+                </span>
+              ))}
+              {avatars.overflow > 0 ? (
+                <span className="inline-flex size-5 items-center justify-center rounded-full bg-muted font-medium text-3xs text-muted-foreground ring-2 ring-card">
+                  +{avatars.overflow}
+                </span>
+              ) : null}
+            </span>
+            <span className="shrink-0 truncate font-medium">{group.label}</span>
+            {group.round !== null && group.round > 1 ? (
+              <span className="shrink-0 rounded border border-border px-1 text-3xs text-muted-foreground tabular-nums">
+                r{group.round}
               </span>
             ) : null}
-          </span>
-          <span className="shrink-0 truncate font-medium">{group.label}</span>
-          {group.round !== null && group.round > 1 ? (
-            <span className="shrink-0 rounded border border-border px-1 text-3xs text-muted-foreground tabular-nums">
-              r{group.round}
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate text-xs text-muted-foreground",
+                active ? "text-info" : group.outcome?.status === "failed" && "text-destructive",
+              )}
+            >
+              {summary}
             </span>
+            <span className="shrink-0 text-2xs text-muted-foreground">
+              <AgentElapsed agent={group.timing} />
+            </span>
+          </CollapsibleTrigger>
+          {onOpenGroupChat ? (
+            <Button
+              variant="ghost"
+              size="icon-micro"
+              aria-label={`Open ${group.label} chat`}
+              title="Open full chat"
+              className="mr-2"
+              onClick={onOpenGroupChat}
+            >
+              <ArrowUpRightIcon />
+            </Button>
           ) : null}
-          <span
-            className={cn(
-              "min-w-0 flex-1 truncate text-xs text-muted-foreground",
-              active ? "text-info" : group.outcome?.status === "failed" && "text-destructive",
-            )}
-          >
-            {summary}
-          </span>
-          <span className="shrink-0 text-2xs text-muted-foreground">
-            <AgentElapsed agent={group.timing} />
-          </span>
-        </CollapsibleTrigger>
+        </div>
         {/* Virtualized timeline rows must settle before disclosure scroll anchoring resumes. */}
         <CollapsiblePanel animate={false}>
           {expanded ? (

@@ -110,6 +110,7 @@ import {
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
 import {
+  deriveOrganGroups,
   resolveWorkflowOpening,
   workflowOpeningParentThreadId,
 } from "@t3tools/client-runtime/state/subagentRuntime";
@@ -465,6 +466,10 @@ import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEn
 import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
 import { useAgentOpenedPreviews } from "./preview/useAgentOpenedPreviews";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { organDockBannerItem, useOrganDockOrgans } from "./chat/OrganDock";
+import { runningOrganCellThreadIds } from "./chat/OrganDock.logic";
+import { useOrganCellShells } from "./chat/PodSummaryCard";
+import { organName } from "./chat/PodSummaryCard.logic";
 import { ThreadStatusLine } from "./chat/ThreadStatusLine";
 import { formatRelativeTimeLabel, formatRelativeTimeUntilLabel } from "../timestampFormat";
 import { ComposerSurface } from "./chat/ComposerSurface";
@@ -972,6 +977,9 @@ function chatActionErrorMessage(error: unknown): string {
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 const EMPTY_HELD_TURN_DIFF_SUMMARIES: readonly never[] = [];
+const NO_SUBAGENTS: readonly never[] = [];
+const CELL_PANEL_WIDTH_STORAGE_KEY = "t3code:cell-panel-width";
+const CELL_PANEL_DEFAULT_WIDTH = 380;
 const noopHeldTurnDiff = (_turnId: RunId, _filePath?: string) => {};
 const noopHeldRevert = (_targetTurnCount: number) => {};
 const noopHeldAttachment = (_attachment: ChatFileAttachment) => {};
@@ -1599,10 +1607,6 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadRef?.environmentId ?? null,
   );
   const browserAvailable = isPreviewSupportedInRuntime() || activeEnvironmentServerBrowser;
-  const previewPanelInlineSize = usePreviewPanelInlineSize(undefined, {
-    container: workspaceLayoutElement,
-    widthStorageKey: `t3code:preview-panel-width:${activeThreadKey}`,
-  });
   const activeThreadShell = useQuietThreadShell(isServerThread ? activeThreadRef : null);
   const timelineThreadError =
     serverRuntime?.status === "failed" &&
@@ -1645,6 +1649,16 @@ export default function ChatView(props: ChatViewProps) {
     selectActiveRightPanel(state.byThreadKey, activeThreadRef),
   );
   const diffOpen = activeRightPanelKind === "diff";
+  // A cell beside the chat wants a narrow column; it keeps its own width so opening one never
+  // resizes the user's browser or diff panel.
+  const cellPanelActive = activeRightPanelKind === "thread";
+  const previewPanelInlineSize = usePreviewPanelInlineSize(undefined, {
+    container: workspaceLayoutElement,
+    widthStorageKey: cellPanelActive
+      ? CELL_PANEL_WIDTH_STORAGE_KEY
+      : `t3code:preview-panel-width:${activeThreadKey}`,
+    ...(cellPanelActive ? { defaultWidth: CELL_PANEL_DEFAULT_WIDTH } : {}),
+  });
   const explicitDiffOpenRef = useRef<ScopedThreadRef | null>(null);
   useLayoutEffect(() => {
     const explicitThreadRef = explicitDiffOpenRef.current;
@@ -5030,7 +5044,23 @@ export default function ChatView(props: ChatViewProps) {
   });
   // The interrupt path also accepts a completed run while its provider still
   // has background work.
-  const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
+  const activeSubagents = serverProjection?.subagents ?? NO_SUBAGENTS;
+  const organCellShells = useOrganCellShells(
+    activeSubagents.some((subagent) => subagent.organ !== undefined) ? activeThreadRef : null,
+  );
+  const organGroups = deriveOrganGroups(activeSubagents, (id) => organCellShells.get(id));
+  const dockOrgans = useOrganDockOrgans(organGroups, (group) => organName(group.presetId));
+  const runningOrganCells = runningOrganCellThreadIds(organGroups);
+  // The dock lists running organ cells itself; listed here too, this banner would cover it.
+  const activeBackgroundTasks =
+    !isWorking && activeThread
+      ? pendingBackgroundTasks.filter(
+          (task) =>
+            task.kind !== "subagent" ||
+            task.childThreadId === undefined ||
+            !runningOrganCells.has(task.childThreadId),
+        )
+      : [];
   const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
   const isStoppingBackgroundWork =
     stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
@@ -5064,6 +5094,10 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
   const onOpenRelatedThreadStable = useStableCallback(onOpenRelatedThread);
+  const onOpenCellStable = useStableCallback((threadId: ThreadId) => {
+    if (activeThreadRef) useRightPanelStore.getState().openThread(activeThreadRef, threadId);
+  });
+  const organDockItem = organDockBannerItem(dockOrgans, onOpenCellStable);
   const childThreadInputs = useChildThreadInputs(activeThreadRef);
   const childInputBannerItem = (() => {
     const first = childThreadInputs[0];
@@ -5468,6 +5502,7 @@ export default function ChatView(props: ChatViewProps) {
       childInputBannerItem,
       goalBannerItem,
       backgroundWorkBannerItem,
+      organDockItem,
     ].filter((item) => item !== null);
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
@@ -8052,6 +8087,8 @@ export default function ChatView(props: ChatViewProps) {
                   paintOnlyDisplayedTimeline ? noopHeldTurnDiff : onOpenTurnDiffStable
                 }
                 onOpenThread={onOpenRelatedThreadStable}
+                onOpenCell={onOpenCellStable}
+                organsDocked={!paintOnlyDisplayedTimeline}
                 parentThreadLink={paintOnlyDisplayedTimeline ? null : parentThreadLink}
                 workflowOpening={paintOnlyDisplayedTimeline ? null : workflowOpening}
                 onForkFromRun={paintOnlyDisplayedTimeline ? async () => {} : onForkFromRunStable}

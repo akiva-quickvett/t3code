@@ -26,9 +26,11 @@ import {
   COMPOSER_CONTEXT_KINDS,
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type AssistantCitation,
-  type EnvironmentId,
+  EnvironmentId,
   type MessageId,
+  type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
+  type OrganId,
   type RunAttemptId,
   type ScopedThreadRef,
   type ServerProviderSkill,
@@ -38,7 +40,9 @@ import {
 } from "@t3tools/contracts";
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
-import { environmentThreadDetails } from "../../state/threads";
+import { environmentThreadDetails, environmentThreadShells } from "../../state/threads";
+import type { EnvironmentThread } from "@t3tools/client-runtime/state/shell";
+import { Atom } from "effect/reactivity";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
@@ -60,7 +64,13 @@ import {
   subagentGroupSummary,
   summarizeSubagentStatuses,
 } from "@t3tools/client-runtime/state/subagent-display";
-import type { WorkflowOpening } from "@t3tools/client-runtime/state/subagentRuntime";
+import {
+  deriveOrganGroups,
+  deriveWorkflowGroups,
+  organIdsBySubagentId,
+  projectedSubagentsToRuntime,
+  type WorkflowOpening,
+} from "@t3tools/client-runtime/state/subagentRuntime";
 import { observeResize } from "~/lib/observeResize";
 
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
@@ -300,9 +310,18 @@ import {
 import { SecretRequestCard } from "./SecretRequestCard";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
 import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
+import { OrganCard } from "./OrganCard";
+import {
+  organCardFromOrgan,
+  organCardFromWorkflow,
+  organCardSummary,
+  organCardTiming,
+} from "./OrganCard.logic";
+import { PodSummaryCard, useOrganCellShells } from "./PodSummaryCard";
+import { organName } from "./PodSummaryCard.logic";
+import { pendingTimelineReveal, settleTimelineReveal } from "./timelineReveal";
 
 import { SkillChipIcon, SkillInlineText } from "./SkillInlineText";
-import * as DateTime from "effect/DateTime";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import { forwardWheelToTimeline } from "./timelineMinimapWheel";
 import {
@@ -333,6 +352,8 @@ interface TimelineRowSharedState {
   displayThreadKey?: string;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
+  onOpenCell: (threadId: ThreadId) => void;
+  organsDocked: boolean;
   workflowOpening: WorkflowOpening | null;
   onForkFromRun: (input: {
     readonly sourceThreadId: ThreadId;
@@ -472,6 +493,10 @@ interface MessagesTimelineProps {
   paintOnly?: boolean;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
+  /** Opens an organ cell beside the chat; hosts without a side panel open its chat instead. */
+  onOpenCell?: (threadId: ThreadId) => void;
+  /** The host docks running organs above its composer, so their turns show a placeholder. */
+  organsDocked?: boolean;
   parentThreadLink?: {
     readonly threadId: ThreadId;
     readonly title: string;
@@ -578,6 +603,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
   paintOnly = false,
   onOpenTurnDiff,
   onOpenThread,
+  onOpenCell = onOpenThread,
+  organsDocked = false,
   parentThreadLink = null,
   workflowOpening = null,
   onForkFromRun,
@@ -821,10 +848,35 @@ const ConversationTimeline = memo(function ConversationTimeline({
       );
     }
   }
+  // A revealed cell's row may sit in a folded turn; unfold it as find does.
+  const reveal = pendingTimelineReveal(listIdentityKey);
+  const revealEntry =
+    reveal === null || reveal.scrolled
+      ? undefined
+      : timelineEntries.find(
+          (entry) =>
+            entry.kind === "event" &&
+            entry.projectedItem.item.type === "subagent" &&
+            entry.projectedItem.item.childThreadId === reveal.childThreadId,
+        );
+  const revealRunId =
+    revealEntry?.kind === "event" ? (revealEntry.projectedItem.item.runId ?? undefined) : undefined;
+  const [expandedRevealRunId, setExpandedRevealRunId] = useState<RunId | undefined>();
+  if (expandedRevealRunId !== revealRunId) {
+    setExpandedRevealRunId(revealRunId);
+    if (revealRunId) {
+      setExpandedRunIds((previous) =>
+        previous.has(revealRunId) ? previous : new Set(previous).add(revealRunId),
+      );
+    }
+  }
+  const unfoldRunIds = [activeFindRunId, revealRunId].filter(
+    (runId): runId is RunId => runId !== undefined && !paintedExpandedRunIds.has(runId),
+  );
   const visibleExpandedRunIds =
-    !activeFindRunId || paintedExpandedRunIds.has(activeFindRunId)
+    unfoldRunIds.length === 0
       ? paintedExpandedRunIds
-      : new Set(paintedExpandedRunIds).add(activeFindRunId);
+      : new Set([...paintedExpandedRunIds, ...unfoldRunIds]);
 
   const activeFindAttemptId = activeFindMatch
     ? timelineEntries.find((entry) => entry.id === activeFindMatch.entryId)?.attempt?.id
@@ -843,6 +895,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       ? new Set(paintedExpandedAttemptIds).add(activeFindAttemptId)
       : paintedExpandedAttemptIds;
 
+  const organIdBySubagentId = useOrganIdBySubagentId(useThreadSubagents(citationThreadRef));
   const rawRows = useIncrementalTimelineRows(`${listIdentityKey}\0${workspaceRoot ?? ""}`, {
     timelineEntries,
     latestRun,
@@ -856,8 +909,20 @@ const ConversationTimeline = memo(function ConversationTimeline({
     turnDiffSummaries,
     supportsConversationRollback,
     worktreeSetup,
+    organIdBySubagentId,
   });
   const rows = useStableRows(rawRows, listIdentityKey);
+  // After the position restore, so restoring to the end can't scroll the revealed row away.
+  useLayoutEffect(() => {
+    const pending = pendingTimelineReveal(listIdentityKey);
+    if (restoringThreadPosition || pending === null || pending.scrolled) return;
+    const index = rows.findIndex((row) => rowHoldsChild(row, pending.childThreadId));
+    if (index < 0) return;
+    pending.scrolled = true;
+    settleTimelineReveal(pending);
+    onManualNavigation();
+    void listRef.current?.scrollToIndex({ index, animated: false, viewPosition: 0 });
+  }, [listIdentityKey, listRef, onManualNavigation, restoringThreadPosition, rows]);
   // Run status/timestamps churn on every stream event; the shared row context
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
@@ -1249,6 +1314,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
     openPullRequest,
     onOpenTurnDiff,
     onOpenThread,
+    onOpenCell,
+    organsDocked,
     workflowOpening,
     onForkFromRun,
     onRollbackCheckpoint,
@@ -2949,8 +3016,12 @@ function v2EventPresentation(item: OrchestrationV2TurnItem): {
 function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event" }> }) {
   const ctx = use(TimelineRowCtx);
   const { item, visibility, sourceThreadId } = row.projectedItem;
-  if (item.type === "subagent" && (row.subagents?.length ?? 1) > 1) {
-    return <V2SubagentGroup key={row.id} row={row} />;
+  if (item.type === "subagent") {
+    return row.organId === undefined ? (
+      <V2SubagentRow key={row.id} row={row} />
+    ) : (
+      <TimelineOrganRow key={row.id} row={row} organId={row.organId} />
+    );
   }
   if (item.type === "secret_request") {
     return (
@@ -3133,48 +3204,13 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
   );
 }
 
-function subagentGroupTiming(
-  agents: ReadonlyArray<{
-    status: OrchestrationV2TurnItem["status"];
-    startedAt: DateTime.Utc | null;
-    completedAt: DateTime.Utc | null;
-  }>,
-) {
-  let startMs: number | null = null;
-  let endMs: number | null = null;
-  let endUnknown = false;
-  for (const agent of agents) {
-    if (agent.startedAt) {
-      const ms = DateTime.toEpochMillis(agent.startedAt);
-      startMs = startMs === null ? ms : Math.min(startMs, ms);
-    }
-    if (agent.completedAt) {
-      const ms = DateTime.toEpochMillis(agent.completedAt);
-      endMs = endMs === null ? ms : Math.max(endMs, ms);
-    } else {
-      endUnknown = true;
-    }
-  }
-  const live = agents.some(
-    ({ status }) => status === "pending" || status === "running" || status === "waiting",
-  );
-  return {
-    status: live ? ("running" as const) : ("completed" as const),
-    startedAt: startMs === null ? null : new Date(startMs).toISOString(),
-    completedAt: live || endUnknown || endMs === null ? null : new Date(endMs).toISOString(),
-  };
-}
-
 const V2SubagentGroup = memo(function V2SubagentGroup({
   row,
 }: {
   row: Extract<TimelineRow, { kind: "event" }>;
 }) {
   const ctx = use(TimelineRowCtx);
-  const groupId = `subagent-group:${row.id}`;
-  const [expanded, setExpanded] = useState(() =>
-    ctx.workGroupViewState.expandedEntries.has(groupId),
-  );
+  const [expanded, toggleExpanded] = useTimelineGroupExpansion(row, `subagent-group:${row.id}`);
   const members = (row.subagents ?? [row.projectedItem]).flatMap(({ item }) =>
     item.type === "subagent" ? [item] : [],
   );
@@ -3196,12 +3232,6 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
   const summary = subagentGroupSummary(agents);
   const label = `${members.length} ${members.length === 1 ? "subagent" : "subagents"}`;
   const statusSummary = summarizeSubagentStatuses(agents.map(({ status }) => status));
-  const toggleExpanded = (open: boolean) => {
-    ctx.onToggleWorkEntry(row.id, expanded);
-    if (open) ctx.workGroupViewState.expandedEntries.add(groupId);
-    else ctx.workGroupViewState.expandedEntries.delete(groupId);
-    setExpanded(open);
-  };
   return (
     <WorkLogBlock continues={row.continuesWorkLog}>
       <Collapsible open={expanded} onOpenChange={toggleExpanded} data-subagent-group>
@@ -3243,7 +3273,7 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
             </span>
           </span>
           <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-            <SubagentElapsed agent={subagentGroupTiming(agents)} />
+            <SubagentElapsed agent={organCardTiming(agents)} />
           </span>
           <ChevronDownIcon
             aria-hidden
@@ -3275,6 +3305,237 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
     </WorkLogBlock>
   );
 });
+
+type TimelineEventRow = Extract<TimelineRow, { kind: "event" }>;
+
+const NO_THREAD_SUBAGENTS: ReadonlyArray<OrchestrationV2Subagent> = [];
+const NO_THREAD = Atom.make<EnvironmentThread | null>(null);
+
+/** The records change only when a subagent does, unlike the projection, which every token replaces. */
+function useThreadSubagents(ref: ScopedThreadRef | null) {
+  return useAtomValue(
+    ref === null ? NO_THREAD : environmentThreadDetails.threadAtom(ref),
+    (thread) => thread?.projection.subagents ?? NO_THREAD_SUBAGENTS,
+  );
+}
+
+function sameOrganIds(
+  left: ReadonlyMap<string, OrganId> | undefined,
+  right: ReadonlyMap<string, OrganId> | undefined,
+) {
+  if (left === undefined || right === undefined) return left === right;
+  if (left.size !== right.size) return false;
+  for (const [subagentId, organId] of right) {
+    if (left.get(subagentId) !== organId) return false;
+  }
+  return true;
+}
+
+/** Kept by content: a new map on every record update would derive every row instead of patching. */
+function useOrganIdBySubagentId(subagents: ReadonlyArray<OrchestrationV2Subagent>) {
+  const next = organIdsBySubagentId(subagents);
+  const [kept, setKept] = useState(next);
+  if (sameOrganIds(kept, next)) return kept;
+  setKept(next);
+  return next;
+}
+
+function rowHoldsChild(row: TimelineRow, childThreadId: ThreadId) {
+  return (
+    row.kind === "event" &&
+    (row.subagents ?? [row.projectedItem]).some(
+      ({ item }) => item.type === "subagent" && item.childThreadId === childThreadId,
+    )
+  );
+}
+
+function revealTargeting(threadKey: string, row: TimelineRow) {
+  const reveal = pendingTimelineReveal(threadKey);
+  return reveal !== null && rowHoldsChild(row, reveal.childThreadId) ? reveal : null;
+}
+
+function useTimelineGroupExpansion(row: TimelineEventRow, key: string) {
+  const ctx = use(TimelineRowCtx);
+  const { expandedEntries } = ctx.workGroupViewState;
+  const [expanded, setExpanded] = useState(
+    () => expandedEntries.has(key) || revealTargeting(ctx.routeThreadKey, row) !== null,
+  );
+  useEffect(() => {
+    const reveal = revealTargeting(ctx.routeThreadKey, row);
+    if (reveal === null) return;
+    expandedEntries.add(key);
+    reveal.expanded = true;
+    settleTimelineReveal(reveal);
+  }, [ctx.routeThreadKey, expandedEntries, key, row]);
+  const toggle = (open: boolean) => {
+    ctx.onToggleWorkEntry(row.id, expanded);
+    if (open) expandedEntries.add(key);
+    else expandedEntries.delete(key);
+    setExpanded(open);
+  };
+  return [expanded, toggle] as const;
+}
+
+const TimelineOrganRow = memo(function TimelineOrganRow({
+  row,
+  organId,
+}: {
+  row: TimelineEventRow;
+  organId: OrganId;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const parentRef = scopeThreadRef(ctx.activeThreadEnvironmentId, row.projectedItem.item.threadId);
+  const subagents = useThreadSubagents(parentRef);
+  const cellShells = useOrganCellShells(parentRef);
+  const [expanded, toggleExpanded] = useTimelineGroupExpansion(row, row.id);
+  const organ = deriveOrganGroups(subagents, (id) => cellShells.get(id)).find(
+    (group) => group.organId === organId,
+  );
+  if (organ === undefined) return <V2SubagentGroup row={row} />;
+  const group = organCardFromOrgan(organ, {
+    label: organName(organ.presetId),
+    records: subagents.filter((subagent) => subagent.organ?.id === organId),
+  });
+  if (ctx.organsDocked && organ.running) {
+    const summary = organCardSummary(group.sections.flatMap((section) => section.cells));
+    return (
+      <WorkLogBlock continues={row.continuesWorkLog}>
+        <div
+          data-organ-docked={organId}
+          className="flex h-6 items-center gap-2 rounded-lg border border-dashed border-border px-3 text-xs text-muted-foreground"
+        >
+          <ChevronRightIcon aria-hidden className="size-3 shrink-0" />
+          <span className="min-w-0 truncate">
+            {group.label}
+            {group.round !== null && group.round > 1 ? ` · r${group.round}` : ""} · docked below
+            {summary === "" ? "" : ` · ${summary}`}
+          </span>
+        </div>
+      </WorkLogBlock>
+    );
+  }
+  return (
+    <WorkLogBlock continues={row.continuesWorkLog}>
+      <OrganCard
+        group={group}
+        expanded={expanded}
+        onToggle={() => toggleExpanded(!expanded)}
+        onOpenCell={ctx.onOpenCell}
+        onOpenChat={ctx.onOpenThread}
+      />
+    </WorkLogBlock>
+  );
+});
+
+// One string per row, so a pod streaming (a new shell every tick) re-renders nothing.
+const brokerChildThreadIdsAtom = Atom.family((key: string) => {
+  const [environmentId, ...childThreadIds] = key.split("\u0000");
+  return Atom.make((get) =>
+    childThreadIds
+      .filter(
+        (childThreadId) =>
+          get(
+            environmentThreadShells.threadShellAtom(
+              scopeThreadRef(EnvironmentId.make(environmentId!), ThreadId.make(childThreadId)),
+            ),
+          )?.rolePreset?.id === "broker",
+      )
+      .join("\u0000"),
+  ).pipe(Atom.withLabel(`timeline-broker-children:${key}`));
+});
+
+/** A slice delegates each pod as a subagent; its chat shows those as pod cards. */
+function V2SubagentRow({ row }: { row: TimelineEventRow }) {
+  const ctx = use(TimelineRowCtx);
+  const members = row.subagents ?? [row.projectedItem];
+  const childThreadIds = members.flatMap(({ item }) =>
+    item.type === "subagent" && item.childThreadId !== null ? [item.childThreadId] : [],
+  );
+  const brokerIds = useAtomValue(
+    brokerChildThreadIdsAtom([ctx.activeThreadEnvironmentId, ...childThreadIds].join("\u0000")),
+  ).split("\u0000");
+  const podIds = childThreadIds.filter((childThreadId) => brokerIds.includes(childThreadId));
+  if (podIds.length === 0) return <V2SubagentMembers row={row} />;
+  const rest = members.filter(
+    ({ item }) =>
+      item.type !== "subagent" ||
+      item.childThreadId === null ||
+      !podIds.includes(item.childThreadId),
+  );
+  return (
+    <>
+      {podIds.map((podId) => (
+        <WorkLogBlock key={podId}>
+          <PodSummaryCard environmentId={ctx.activeThreadEnvironmentId} threadId={podId} />
+        </WorkLogBlock>
+      ))}
+      {rest.length > 0 ? (
+        <V2SubagentMembers row={{ ...row, projectedItem: rest[0]!, subagents: rest }} />
+      ) : null}
+    </>
+  );
+}
+
+function V2SubagentMembers({ row }: { row: TimelineEventRow }) {
+  return (row.subagents?.length ?? 1) > 1 ? (
+    <V2SubagentGroup row={row} />
+  ) : (
+    <V2SingleSubagentRow row={row} />
+  );
+}
+
+function V2SingleSubagentRow({ row }: { row: TimelineEventRow }) {
+  const ctx = use(TimelineRowCtx);
+  const { item } = row.projectedItem;
+  const subagents = useThreadSubagents(
+    scopeThreadRef(ctx.activeThreadEnvironmentId, item.threadId),
+  );
+  const record =
+    item.type === "subagent"
+      ? subagents.find((subagent) => subagent.id === item.subagentId)
+      : undefined;
+  if (record?.workflow !== undefined) return <TimelineWorkflowCard row={row} record={record} />;
+  return (
+    <V2LifecycleRow
+      environmentId={ctx.activeThreadEnvironmentId}
+      item={item}
+      resourceSummary={row.resourceSummary}
+      createdAt={row.createdAt}
+      timestampFormat={ctx.timestampFormat}
+      runs={ctx.runs}
+      onOpenThread={ctx.onOpenThread}
+    />
+  );
+}
+
+/** A provider-native workflow in the organ card's shell: phases as sections, agents as cells. */
+function TimelineWorkflowCard({
+  row,
+  record,
+}: {
+  row: TimelineEventRow;
+  record: OrchestrationV2Subagent;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const [expanded, toggleExpanded] = useTimelineGroupExpansion(row, `subagent-group:${row.id}`);
+  const [workflow] = deriveWorkflowGroups(projectedSubagentsToRuntime([record]));
+  if (workflow === undefined) return null;
+  const { childThreadId } = record;
+  return (
+    <WorkLogBlock continues={row.continuesWorkLog}>
+      <OrganCard
+        group={organCardFromWorkflow(workflow)}
+        expanded={expanded}
+        onToggle={() => toggleExpanded(!expanded)}
+        onOpenCell={ctx.onOpenCell}
+        onOpenChat={ctx.onOpenThread}
+        {...(childThreadId === null
+          ? {}
+          : { onOpenGroupChat: () => ctx.onOpenThread(childThreadId) })}
+      />
+    </WorkLogBlock>
+  );
+}
 
 const WorkGroupSection = memo(function WorkGroupSection({
   anchorKey,
