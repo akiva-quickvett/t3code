@@ -1114,6 +1114,11 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:agent-roles:live",
       tag: WS_METHODS.agentRolesSubscribe,
     }),
+    // Merged by the server like agent roles, so the client never layers presets itself.
+    organPresetsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:organ-presets:live",
+      tag: WS_METHODS.organPresetsSubscribe,
+    }),
     chatChannelsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:chat-channels:live",
       tag: WS_METHODS.chatChannelsSubscribe,
@@ -1355,6 +1360,24 @@ export function createServerEnvironmentAtoms<R, E>(
     resetAgentRolePresets: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:agent-roles:reset",
       tag: WS_METHODS.agentRolesReset,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    saveOrganPreset: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:organ-presets:save",
+      tag: WS_METHODS.organPresetsSave,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    removeOrganPreset: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:organ-presets:remove",
+      tag: WS_METHODS.organPresetsRemove,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    resetOrganPresets: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:organ-presets:reset",
+      tag: WS_METHODS.organPresetsReset,
       scheduler: configScheduler,
       concurrency: configConcurrency,
     }),

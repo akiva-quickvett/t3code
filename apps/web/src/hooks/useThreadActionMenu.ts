@@ -47,6 +47,8 @@ import {
   useProjects,
 } from "../state/entities";
 import { readEnvironmentSupportsRolePresets } from "../state/agentRoles";
+import { readEnvironmentSupportsOrchestrationMetas } from "../state/orchestrationTree";
+import { metaPromoteBlocker } from "@t3tools/client-runtime/state/organ-presets";
 import { useStartTicketThread } from "./useStartTicketThread";
 import { usePrimaryEnvironmentId } from "../state/environments";
 import { useMountPodRuntime } from "../state/podRuntime";
@@ -103,6 +105,9 @@ export function useThreadActionMenu(input: {
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const setThreadMeta = useOrchestrationCommand(threadEnvironment.setMeta, {
+    reportFailure: false,
+  });
   const handleNewThread = useNewThreadHandler();
   const podServiceMenu = useThreadPodServiceMenu();
   // ThreadPodChip usually holds the stream open already; this covers the
@@ -148,6 +153,7 @@ export function useThreadActionMenu(input: {
         titleRegeneration: readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
         rolePresets: readEnvironmentSupportsRolePresets(threadRef.environmentId),
         threadUsage: canReadThreadUsage(threadRef.environmentId),
+        metas: readEnvironmentSupportsOrchestrationMetas(threadRef.environmentId),
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat);
@@ -172,6 +178,8 @@ export function useThreadActionMenu(input: {
         isRegeneratingTitle,
         isRunning: !threadRuntimeCanArchive(thread.runtime),
         supports,
+        isMeta: thread.metaAt != null,
+        metaPromoteBlocker: metaPromoteBlocker(thread),
         snoozePresets,
         ...(snoozeTree === undefined ? {} : { snoozeTree }),
         ...(settleTree === undefined ? {} : { settleTree }),
@@ -288,6 +296,18 @@ export function useThreadActionMenu(input: {
         case "auto-settle:disabled":
           await reportFailure("Failed to update auto-settle", () =>
             setThreadAutoSettle(threadRef, action === "auto-settle:enabled"),
+          );
+          return;
+        case "promote-meta":
+        case "demote-meta":
+          // The toast carries the server's refusal, e.g. "... is archived; unarchive it first."
+          await reportFailure(
+            action === "promote-meta" ? "Failed to promote thread" : "Failed to demote meta",
+            () =>
+              setThreadMeta({
+                environmentId: threadRef.environmentId,
+                input: { threadId: threadRef.threadId, enabled: action === "promote-meta" },
+              }),
           );
           return;
         case "rename":

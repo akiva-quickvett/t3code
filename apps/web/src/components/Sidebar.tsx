@@ -194,6 +194,8 @@ import { primaryServerKeybindingsAtom } from "../state/server";
 import { environmentProjects } from "../state/projects";
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
+import { readEnvironmentSupportsOrchestrationMetas } from "../state/orchestrationTree";
+import { metaPromoteBlocker } from "@t3tools/client-runtime/state/organ-presets";
 import { useEnvironmentQuery } from "../state/query";
 import { useThreadSearch } from "../state/queries";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
@@ -3031,6 +3033,9 @@ export default function Sidebar() {
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const setThreadMeta = useOrchestrationCommand(threadEnvironment.setMeta, {
+    reportFailure: false,
+  });
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({
@@ -4637,7 +4642,10 @@ export default function Sidebar() {
                 titleRegeneration: supportsTitleRegeneration,
                 rolePresets: supportsRolePresets,
                 threadUsage: canReadThreadUsage(threadRef.environmentId),
+                metas: readEnvironmentSupportsOrchestrationMetas(thread.environmentId),
               },
+              isMeta: thread.metaAt != null,
+              metaPromoteBlocker: metaPromoteBlocker(thread),
               snoozePresets,
               ...(snoozeTree === undefined ? {} : { snoozeTree }),
               ...(settleTree === undefined ? {} : { settleTree }),
@@ -4747,6 +4755,28 @@ export default function Sidebar() {
                 stackedThreadToast({
                   type: "error",
                   title: "Failed to update auto-settle",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
+          case "promote-meta":
+          case "demote-meta": {
+            const result = await setThreadMeta({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId, enabled: clicked.value === "promote-meta" },
+            });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              // Carries the server's refusal, e.g. "... is archived; unarchive it first."
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title:
+                    clicked.value === "promote-meta"
+                      ? "Failed to promote thread"
+                      : "Failed to demote meta",
                   description: error instanceof Error ? error.message : "An error occurred.",
                 }),
               );
