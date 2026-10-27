@@ -26,18 +26,25 @@ export interface ComposerBannerStackItem {
 export type ComposerBannerStackContent = Pick<
   ComposerBannerStackItem,
   "id" | "variant" | "priority"
-> & { readonly content: ReactNode };
+> & {
+  readonly content: ReactNode;
+  /** The organ dock: its rows scroll in `ComposerBannerDockScroll`; it yields the front slot to urgent items. */
+  readonly layout?: "dock";
+};
 
 type ComposerBannerStackEntry = ComposerBannerStackItem | ComposerBannerStackContent;
 
 function bannerPriority(item: ComposerBannerStackEntry) {
+  if ("layout" in item && item.layout === "dock") {
+    return 2;
+  }
   if (item.priority === "activity") {
     return 0;
   }
   if (item.priority === "urgent" || item.variant === "error" || item.variant === "warning") {
     return 1;
   }
-  return 2;
+  return 3;
 }
 
 interface ComposerBannerStackProps {
@@ -246,6 +253,20 @@ export function ComposerBannerStack({ className, items, attachedAbove }: Compose
         </div>
       </ComposerBanner.Attachment>
     </>
+  );
+}
+
+/**
+ * The dock entry's scroll region. The dock's 28px header sits above it, outside the scroll,
+ * so header plus rows stay within 360px, as the mockup caps the dock box (the banner's own
+ * padding sits outside it). `--available-height` only exists inside popovers, so the cap here
+ * is the viewport term alone. No fade: it would cover the first row under the header.
+ */
+export function ComposerBannerDockScroll({ children }: { readonly children: ReactNode }) {
+  return (
+    <ComposerBanner.Scroll scrollFade={false} className="max-h-[calc(min(360px,40dvh)-1.75rem)]">
+      {children}
+    </ComposerBanner.Scroll>
   );
 }
 
