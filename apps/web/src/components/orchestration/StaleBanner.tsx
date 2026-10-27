@@ -1,21 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
-import * as Option from "effect/Option";
-import { AsyncResult, Atom } from "effect/reactivity";
 import { WifiOffIcon } from "lucide-react";
 
-import { environmentCatalog } from "../../connection/catalog";
 import { useEnvironment } from "../../state/environments";
+import { environmentConnectedAtom } from "../../state/orchestrationTree";
 import { environmentShell } from "../../state/shell";
-
-const environmentConnectedAtom = Atom.family((environmentId: EnvironmentId) =>
-  Atom.make((get) =>
-    Option.exists(
-      AsyncResult.value(get(environmentCatalog.stateAtom(environmentId))),
-      (connection) => connection.phase === "connected",
-    ),
-  ).pipe(Atom.withLabel(`web-orchestration-row-connected:${environmentId}`)),
-);
 
 /** The two inputs `resolveOrchestrationDot` reads for staleness; both are primitives. */
 export function useEnvironmentConnection(environmentId: EnvironmentId) {

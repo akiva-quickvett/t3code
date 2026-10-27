@@ -30,7 +30,8 @@ export type TreeRowKind = "slice" | "pod" | "ad-hoc" | "branch";
 
 /**
  * Every prop is a primitive or a stable callback, so a container re-render
- * with an equal row model commits nothing here.
+ * with an equal row model commits nothing here. Pointer-only by design: the
+ * tree container owns keyboard navigation and roving focus.
  */
 export interface TreeRowProps {
   /** The row's key in the container's flat row model; callbacks receive it. */
@@ -122,7 +123,11 @@ export const TreeRow = memo(function TreeRow(props: TreeRowProps) {
   const dot = collapsed && rollup !== null ? rollup.dot : (own?.dot ?? null);
   const needsYouCount = collapsed ? (rollup?.needsYouCount ?? 0) : 0;
   const KindIcon = KIND_ICONS[kind];
+  const title = shell?.title ?? props.label;
   const [menuAt, setMenuAt] = useState<MenuRequest | null>(null);
+  // The menu needs the shell's project; a request must not outlive the shell
+  // and replay when it comes back.
+  if (shell === null && menuAt !== null) setMenuAt(null);
 
   const openMenu = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
@@ -173,9 +178,7 @@ export const TreeRow = memo(function TreeRow(props: TreeRowProps) {
       >
         <KindIcon className="size-3" aria-hidden />
       </span>
-      <span className={cn("min-w-0 flex-1 truncate", dim && "opacity-55")}>
-        {shell?.title ?? props.label}
-      </span>
+      <span className={cn("min-w-0 flex-1 truncate", dim && "opacity-55")}>{title}</span>
       {props.repoTag !== null && <RowTag dim={dim}>{props.repoTag}</RowTag>}
       {props.noSlice && <RowTag dim={dim}>no slice</RowTag>}
       <span className="flex w-7 shrink-0 items-center justify-end group-hover/tree-row:invisible">
@@ -188,7 +191,7 @@ export const TreeRow = memo(function TreeRow(props: TreeRowProps) {
           </span>
         )}
       </span>
-      {threadRef !== null && (
+      {threadRef !== null && shell !== null && (
         <span className="absolute top-1 right-2 hidden group-hover/tree-row:flex">
           <Button variant="ghost" size="icon-tiny" aria-label="Thread actions" onClick={openMenu}>
             <EllipsisIcon />

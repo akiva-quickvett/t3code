@@ -64,12 +64,21 @@ vi.mock("../../state/entities", async () => {
     useProject: () => null,
   };
 });
-vi.mock("../../state/orchestrationTree", () => ({
-  orchestrationTree: { rollupAtom: (_environmentId: string, key: string) => h.rollupAtom(key) },
-}));
-vi.mock("../../connection/catalog", () => ({
-  environmentCatalog: { stateAtom: h.connectionAtom },
-}));
+vi.mock("../../state/orchestrationTree", async () => {
+  const { Atom, AsyncResult } = await import("effect/reactivity");
+  const Option = await import("effect/Option");
+  return {
+    orchestrationTree: { rollupAtom: (_environmentId: string, key: string) => h.rollupAtom(key) },
+    environmentConnectedAtom: Atom.family((environmentId: string) =>
+      Atom.make((get) =>
+        Option.exists(
+          AsyncResult.value(get(h.connectionAtom(environmentId))),
+          (connection) => connection.phase === "connected",
+        ),
+      ),
+    ),
+  };
+});
 vi.mock("../../state/shell", () => ({
   environmentShell: { statusAtom: h.shellStatusAtom },
 }));
@@ -185,6 +194,8 @@ function render(rows: ReadonlyArray<TreeRowProps>) {
 }
 
 const rowElement = (id: string) => container.querySelector<HTMLElement>(`[data-row-key="${id}"]`)!;
+const menuButton = (id: string) =>
+  rowElement(id).querySelector<HTMLButtonElement>('[aria-label="Thread actions"]');
 const rowDot = (id: string) => rowElement(id).querySelector("[data-dot]")?.getAttribute("data-dot");
 
 beforeEach(() => {
@@ -287,14 +298,32 @@ describe("TreeRow", () => {
     expect(getComputedStyle(rowElement("a").querySelector(".truncate")!).opacity).toBe("0.55");
   });
 
-  it("opens the shared thread action menu for its own thread", async () => {
+  it("mounts the shared thread action menu only on its own row's first click", async () => {
     setThreads([thread("a"), thread("b")]);
     await render([rowProps("a"), rowProps("b")]);
+    await render([rowProps("a"), rowProps("b")]);
     expect(h.menuThreadRefs).toEqual([]);
-    await act(() =>
-      rowElement("b").querySelector<HTMLButtonElement>('[aria-label="Thread actions"]')!.click(),
-    );
-    expect(h.menuThreadRefs.at(-1)).toEqual({ environmentId, threadId: "b" });
+    await act(() => menuButton("b")!.click());
+    expect(new Set(h.menuThreadRefs.map((ref) => ref.threadId))).toEqual(new Set(["b"]));
+    expect(h.openMenu).toHaveBeenCalledTimes(1);
+    await act(() => menuButton("b")!.click());
+    expect(h.openMenu).toHaveBeenCalledTimes(2);
+  });
+
+  it("never opens the menu by itself when the shell arrives or returns", async () => {
+    await render([rowProps("a")]);
+    expect(menuButton("a")).toBeNull();
+
+    await act(() => setThreads([thread("a")]));
+    expect(menuButton("a")).not.toBeNull();
+    expect(h.menuThreadRefs).toEqual([]);
+    expect(h.openMenu).not.toHaveBeenCalled();
+
+    await act(() => menuButton("a")!.click());
+    expect(h.openMenu).toHaveBeenCalledTimes(1);
+    await act(() => setThreads([]));
+    expect(menuButton("a")).toBeNull();
+    await act(() => setThreads([thread("a")]));
     expect(h.openMenu).toHaveBeenCalledTimes(1);
   });
 });

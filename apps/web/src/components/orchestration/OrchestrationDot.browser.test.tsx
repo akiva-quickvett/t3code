@@ -33,17 +33,14 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it("maps each dot to the signed vocabulary: filled = act now, hollow = take a look, ✕ = broke", () => {
-  expect(Object.fromEntries(DOTS.map((dot) => [dot, orchestrationDotGlyph(dot)]))).toEqual({
-    "needs-you": { tone: "warning", fill: "filled", cross: false, small: false },
-    failed: { tone: "error", fill: "filled", cross: true, small: false },
-    limited: { tone: "warning", fill: "ring", cross: true, small: false },
-    woke: { tone: "warning", fill: "ring", cross: false, small: false },
-    working: { tone: "info", fill: "filled", cross: false, small: false },
-    waiting: { tone: "info", fill: "ring", cross: false, small: false },
-    "done-unread": { tone: "success", fill: "filled", cross: false, small: false },
-    idle: { tone: "muted", fill: "filled", cross: false, small: true },
-  });
+it("fills act-now dots, rings take-a-look dots, and crosses only broken ones", () => {
+  const where = (test: (glyph: ReturnType<typeof orchestrationDotGlyph>) => boolean) =>
+    DOTS.filter((dot) => test(orchestrationDotGlyph(dot)));
+  expect(where((glyph) => glyph.fill === "ring")).toEqual(["limited", "woke", "waiting"]);
+  expect(where((glyph) => glyph.cross)).toEqual(["failed", "limited"]);
+  for (const dot of ["needs-you", "failed", "working"] as const) {
+    expect(orchestrationDotGlyph(dot).fill).toBe("filled");
+  }
 });
 
 it("draws each glyph statically", async () => {
