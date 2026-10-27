@@ -22,6 +22,7 @@ import { MoreHorizontalIcon, PlusIcon, RotateCcwIcon, UsersRoundIcon, XIcon } fr
 import { useState } from "react";
 
 import { confirmDestructive } from "../../confirmDialog";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { useQuietThreadShell, useServerConfigs } from "../../state/entities";
 import { orchestrationTree } from "../../state/orchestrationTree";
 import { useEnvironmentQuery } from "../../state/query";
@@ -335,6 +336,7 @@ function CellTargetEditor(props: {
           projectId={props.projectId}
           instanceId={cell.target.providerInstanceId ?? ""}
           driverKind={cell.target.driverKind ?? ""}
+          fallbackToDriverInstance
           model={cell.target.model}
           onChange={(pick) =>
             props.onChange({ ...cell, target: pickedCellTarget(cell.target, pick) })
@@ -621,27 +623,32 @@ function MetaRow(props: {
   );
 }
 
-/** Mounted only while open, so the full thread list is read only then. */
+/**
+ * Reads the thread list once when it opens, so streaming ticks neither
+ * re-sort it nor move rows under the cursor; the search filters that snapshot.
+ */
 function PromotePickerDialog(props: {
   readonly environmentId: EnvironmentId;
   readonly canOperate: boolean;
   readonly onPick: (threadId: ThreadId) => void;
   readonly onClose: () => void;
 }) {
-  const threads = useAtomValue(environmentThreadShells.environmentThreadsAtom(props.environmentId));
-  const [search, setSearch] = useState("");
   // A delegated child is never a meta, as in the thread menu. Promotable threads
   // come first, most recently active first, so the disabled ones explain themselves below.
-  const candidates = threads
-    .filter((thread) => thread.metaAt == null)
-    .map((thread) => ({ thread, blocker: metaPromoteBlocker(thread) }))
-    .filter(({ blocker }) => blocker !== "delegated-child")
-    .toSorted(
-      (left, right) =>
-        Number(left.blocker !== null) - Number(right.blocker !== null) ||
-        DateTime.toEpochMillis(right.thread.updatedAt) -
-          DateTime.toEpochMillis(left.thread.updatedAt),
-    );
+  const [candidates] = useState(() =>
+    appAtomRegistry
+      .get(environmentThreadShells.environmentThreadsAtom(props.environmentId))
+      .filter((thread) => thread.metaAt == null)
+      .map((thread) => ({ thread, blocker: metaPromoteBlocker(thread) }))
+      .filter(({ blocker }) => blocker !== "delegated-child")
+      .toSorted(
+        (left, right) =>
+          Number(left.blocker !== null) - Number(right.blocker !== null) ||
+          DateTime.toEpochMillis(right.thread.updatedAt) -
+            DateTime.toEpochMillis(left.thread.updatedAt),
+      ),
+  );
+  const [search, setSearch] = useState("");
   const needle = search.trim().toLowerCase();
   const rows = (
     needle === ""

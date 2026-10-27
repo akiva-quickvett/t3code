@@ -84,17 +84,19 @@ export function OptionalSelect<Value extends string>(props: {
   );
 }
 
-/**
- * Picks a preset's provider instance and model from the environment's
- * instances. Without an instance, an unpinned target shows on its driver's
- * first available instance, or on none when the driver has none here.
- */
+/** Picks a preset's provider instance and model from the environment's instances. */
 export function PresetModelPicker(props: {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId | null;
   readonly instanceId: string;
   readonly driverKind: string;
   readonly model: string;
+  /**
+   * Without an instance, show an unpinned target on its driver's first
+   * available instance. Roles leave this off: their instance comes from the
+   * server's resolution, which is stricter than the client's availability.
+   */
+  readonly fallbackToDriverInstance?: boolean;
   readonly onChange: (next: {
     readonly instanceId: ProviderInstanceId;
     readonly driverKind: string;
@@ -112,9 +114,12 @@ export function PresetModelPicker(props: {
       props.projectId,
     ),
   );
+  // An unpinned default with no usable instance has none yet; the picker shows nothing chosen.
   const activeInstanceId = (props.instanceId ||
-    instanceEntries.find((entry) => entry.isAvailable && entry.driverKind === props.driverKind)
-      ?.instanceId ||
+    (props.fallbackToDriverInstance === true
+      ? instanceEntries.find((entry) => entry.isAvailable && entry.driverKind === props.driverKind)
+          ?.instanceId
+      : undefined) ||
     "") as ProviderInstanceId;
   const modelOptionsByInstance = getCustomModelOptionsByInstance(
     settings,
