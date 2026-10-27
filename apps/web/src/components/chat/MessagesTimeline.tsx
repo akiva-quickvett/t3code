@@ -916,11 +916,13 @@ const ConversationTimeline = memo(function ConversationTimeline({
   });
   const rows = useStableRows(rawRows, listIdentityKey);
   // After the position restore, so restoring to the end can't scroll the revealed row away.
-  // Resolved on the first settled pass either way, so a cell outside the loaded rows costs no
-  // scans on later renders.
+  // Resolved on the first settled pass of live rows either way, so a cell outside the loaded rows
+  // costs no scans on later renders. While the detail loads, the rows may be a remembered snapshot
+  // from before the cell started.
   useLayoutEffect(() => {
     const pending = pendingTimelineReveal(listIdentityKey);
-    if (pending === null || restoringThreadPosition || rows.length === 0) return;
+    if (pending === null || restoringThreadPosition || citationHistoryLoading || rows.length === 0)
+      return;
     clearTimelineReveal(pending);
     const index = rows.findIndex((row) => rowHoldsChild(row, pending.childThreadId));
     const row = rows[index];
@@ -932,6 +934,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     onManualNavigation();
     void listRef.current?.scrollToIndex({ index, animated: false, viewPosition: 0 });
   }, [
+    citationHistoryLoading,
     listIdentityKey,
     listRef,
     onManualNavigation,

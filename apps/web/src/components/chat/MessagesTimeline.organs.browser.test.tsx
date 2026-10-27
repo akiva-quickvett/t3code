@@ -312,3 +312,24 @@ it("drops a reveal whose cell is in no loaded row, and one that targets a lone s
   await render(<MessagesTimeline {...lone} />);
   await vi.waitFor(() => expect(pendingTimelineReveal(lone.routeThreadKey)).toBeNull());
 });
+
+it("waits for the live timeline before resolving a reveal against a remembered snapshot", async () => {
+  const onManualNavigation = vi.fn();
+  await setSubagents(CELLS.map((cell) => record(cell, "completed")));
+  const props = timelineProps({ onManualNavigation });
+  revealSubagentInTimeline(props.routeThreadKey, ThreadId.make("cell-b"));
+  // The snapshot painted while the detail loads predates the organ.
+  await render(
+    <MessagesTimeline
+      {...props}
+      citationHistoryLoading
+      timelineEntries={entries("completed").slice(0, 1)}
+    />,
+  );
+  expect(pendingTimelineReveal(props.routeThreadKey)).not.toBeNull();
+
+  await render(<MessagesTimeline {...props} timelineEntries={entries("completed")} />);
+  await vi.waitFor(() => expect(cellRows()).toHaveLength(2));
+  expect(onManualNavigation).toHaveBeenCalled();
+  expect(pendingTimelineReveal(props.routeThreadKey)).toBeNull();
+});
