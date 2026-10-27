@@ -17,6 +17,7 @@ import {
   type ThreadId,
   type UsageThreadTree,
   type UsageThreadTreeInput,
+  type UsageTokenTotals,
   UsageDay,
   UsageReadError,
   USAGE_LIMITS_MIN_REFRESH_INTERVAL_MS,
@@ -57,7 +58,12 @@ import {
   UsageAggregator,
   type AttributedUsageBucket,
 } from "./usageAggregation.ts";
-import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
+import {
+  createOverrideRateTable,
+  parseRateTable,
+  priceUsage,
+  type RateTable,
+} from "./usagePricing.ts";
 import {
   listTranscriptFiles,
   readDirectoryVolumeId,
@@ -201,6 +207,8 @@ export class UsageService extends Context.Service<
     readonly readThreadTree: (
       input: UsageThreadTreeInput,
     ) => Effect.Effect<UsageThreadTree, UsageReadError>;
+    /** List price of one usage at the live rates and price overrides; null when unpriced. */
+    readonly priceTokens: (model: string, totals: UsageTokenTotals) => Effect.Effect<number | null>;
   }
 >()("t3/usage/UsageService") {}
 
@@ -228,6 +236,7 @@ export const layerTest = Layer.succeed(
       }),
     refreshRates: Effect.succeed(EMPTY_PRICING),
     readLimitsForAgent: () => Effect.succeed({ instances: [] }),
+    priceTokens: () => Effect.succeed(null),
     readThreadTree: (input) =>
       Effect.fail(
         new UsageReadError({
@@ -985,11 +994,29 @@ export const make = Effect.gen(function* () {
     return summarizeUsageThreadTree(scope, summary.buckets, sinceDay);
   });
 
+  const priceTokens = Effect.fn("UsageService.priceTokens")(function* (
+    model: string,
+    totals: UsageTokenTotals,
+  ) {
+    yield* ensureRates(false);
+    const overrides = yield* readSettings.pipe(
+      Effect.map((settings) => createOverrideRateTable(settings.usagePriceOverrides)),
+      Effect.orElseSucceed(() => undefined),
+    );
+    const priced = priceUsage(
+      rates,
+      { model, totals, speed: "standard", reportedCostUsd: null },
+      overrides,
+    );
+    return priced.costSource === "unpriced" ? null : priced.costUsd;
+  });
+
   return {
     readSummary,
     refreshRates,
     readLimitsForAgent,
     readThreadTree,
+    priceTokens,
     awaitPersisted,
   } as const;
 });

@@ -95,6 +95,7 @@ import * as ProviderAdapterRegistry from "./orchestration-v2/ProviderAdapterRegi
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as AgentRolePresetService from "./agentRoles/AgentRolePresetService.ts";
 import * as OrganPresetService from "./organs/OrganPresetService.ts";
+import * as OrchestrationStatsService from "./orchestrationStats/OrchestrationStatsService.ts";
 import * as ChatChannelService from "./chat/ChatChannelService.ts";
 import * as WhatsAppCloudAdapter from "./chat/WhatsAppCloudAdapter.ts";
 import * as ProviderUsageLimitsIngestion from "./provider/ProviderUsageLimitsIngestion.ts";
@@ -629,6 +630,7 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   AgentRolePresetService.layer,
   OrganPresetService.layer,
+  OrchestrationStatsService.layer,
   ChatChannelService.layer.pipe(Layer.provide(WhatsAppCloudAdapter.layer)),
   AgentAwarenessRelay.layer,
   HeldHooksWaker.layer,

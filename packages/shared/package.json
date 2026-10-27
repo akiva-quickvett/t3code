@@ -343,6 +343,10 @@
       "types": "./src/orchestrationTree.ts",
       "import": "./src/orchestrationTree.ts"
     },
+    "./hostHeadroom": {
+      "types": "./src/hostHeadroom.ts",
+      "import": "./src/hostHeadroom.ts"
+    },
     "./testing/orchestrationSeedTree": {
       "types": "./src/testing/orchestrationSeedTree.ts",
       "import": "./src/testing/orchestrationSeedTree.ts"

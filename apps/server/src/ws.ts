@@ -103,6 +103,7 @@ import {
   OrganPresetRpcGroup,
   PodRuntimeRpcGroup,
   UsageRpcGroup,
+  OrchestrationStatsRpcGroup,
   ServerSettings as ServerSettingsSchema,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
@@ -129,6 +130,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as AgentRolePresetService from "./agentRoles/AgentRolePresetService.ts";
 import * as OrganPresetService from "./organs/OrganPresetService.ts";
+import * as OrchestrationStatsService from "./orchestrationStats/OrchestrationStatsService.ts";
 import * as ChatChannelService from "./chat/ChatChannelService.ts";
 import * as PodRuntimeService from "./pod/PodRuntimeService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
@@ -571,7 +573,7 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-// Chat channel, organ preset, pod and usage RPCs have their own handler layers; see ChatChannelRpcGroup.
+// Chat channel, organ preset, pod, usage and stats RPCs have their own handler layers; see ChatChannelRpcGroup.
 const ServerCoreWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.chatChannelsSubscribe,
   WS_METHODS.chatChannelsMutate,
@@ -591,6 +593,7 @@ const ServerCoreWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.organPresetsSave,
   WS_METHODS.organPresetsRemove,
   WS_METHODS.organPresetsReset,
+  WS_METHODS.orchestrationSubscribeStats,
 );
 const ServerChatChannelRpcGroup = ChatChannelRpcGroup.middleware(RpcInstrumentation);
 
@@ -607,6 +610,7 @@ const layerChatChannelRpc = ServerChatChannelRpcGroup.toLayer(
 const ServerPodRuntimeRpcGroup = PodRuntimeRpcGroup.middleware(RpcInstrumentation);
 const ServerUsageRpcGroup = UsageRpcGroup.middleware(RpcInstrumentation);
 const ServerOrganPresetRpcGroup = OrganPresetRpcGroup.middleware(RpcInstrumentation);
+const ServerOrchestrationStatsRpcGroup = OrchestrationStatsRpcGroup.middleware(RpcInstrumentation);
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
@@ -3172,6 +3176,15 @@ const layerUsageRpc = ServerUsageRpcGroup.toLayer(
   }),
 );
 
+const layerOrchestrationStatsRpc = ServerOrchestrationStatsRpcGroup.toLayer(
+  Effect.gen(function* () {
+    const orchestrationStats = yield* OrchestrationStatsService.OrchestrationStatsService;
+    return ServerOrchestrationStatsRpcGroup.of({
+      [WS_METHODS.orchestrationSubscribeStats]: (_input) => orchestrationStats.subscribe,
+    });
+  }),
+);
+
 const layerOrganPresetRpc = ServerOrganPresetRpcGroup.toLayer(
   Effect.gen(function* () {
     const organPresets = yield* OrganPresetService.OrganPresetService;
@@ -3274,6 +3287,7 @@ export const layer = Layer.unwrap(
               layerChatChannelRpc,
               layerPodRuntimeRpc,
               layerUsageRpc,
+              layerOrchestrationStatsRpc,
               layerOrganPresetRpc,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
