@@ -14,6 +14,9 @@ import {
   OrchestratorMcpFailure,
   OrchestratorMcpListScheduledTasksInput,
   OrchestratorMcpListScheduledTasksResult,
+  OrchestratorMcpOrchestrationStatsResult,
+  OrchestratorMcpOrchestrationTreeInput,
+  OrchestratorMcpOrchestrationTreeResult,
   OrchestratorMcpScheduleTaskInput,
   OrchestratorMcpScheduleTaskResult,
   OrchestratorMcpStartOrganInput,
@@ -94,6 +97,33 @@ const UsageThreadTreeTool = Tool.make("t3_usage_thread_tree", {
   dependencies: [McpInvocationContext.McpInvocationContext, UsageService.UsageService],
 })
   .annotate(Tool.Title, "Read thread tree usage")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const OrchestrationTreeTool = Tool.make("t3_orchestration_tree", {
+  description:
+    "Read the orchestration tree the sidebar's Orchestration view shows: metas (each with its status dot and unread count), then each meta's tree of projects, branches, slices and pods, and the noMeta group for work under no meta. A pod lists its organs, each with its preset, goal, latest round and cells (role, model, task status, dot); cells are listed by round, once each with their latest status. Dots are needs-you, failed, limited, woke, working, waiting, done-unread and idle, worst first; a slice's or pod's dot rolls up everything under it. repoTag names a pod's project when it differs from its slice's. Every row is in a slices list: in noMeta, an ad-hoc chat is an entry with no pods, and a pod with no slice is an entry whose only pod is itself (pods[0].threadId equals the entry's threadId). metaThreadId returns only that meta's tree, with noMeta empty; an id that is not a meta fails. Archived threads are left out. stale is always false.",
+  parameters: OrchestratorMcpOrchestrationTreeInput,
+  success: OrchestratorMcpOrchestrationTreeResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Read the orchestration tree")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const OrchestrationStatsTool = Tool.make("t3_orchestration_stats", {
+  description:
+    "Read the orchestration stats strip: active agents (running turns, live and idle provider sessions), token burn per minute and cost per hour over the last 10 minutes (overall, per meta and per slice; state warming for the first 10 minutes after a server start, approximate when some usage was unpriced or partial), and host headroom with a verdict (ok, low, exhausted, unknown). host cpu, ram and swap are the used fraction from 0 to 1, not percentages; load is the 1-minute load average divided by the CPU count, so 1 is fully loaded and it can exceed 1. Each is null when the host does not report it. Samples the host now when no client is watching the strip.",
+  success: OrchestratorMcpOrchestrationStatsResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Read orchestration stats")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
@@ -323,6 +353,8 @@ export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
   UsageLimitsTool,
   UsageThreadTreeTool,
+  OrchestrationTreeTool,
+  OrchestrationStatsTool,
   DelegateTaskTool,
   StartOrganTool,
   TaskStatusTool,

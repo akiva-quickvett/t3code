@@ -54,9 +54,29 @@ import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import * as OrganService from "../organs/OrganService.ts";
 import { DEFAULT_ORGAN_PRESETS } from "../organs/defaultOrganPresets.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as OrchestrationStatsService from "../orchestrationStats/OrchestrationStatsService.ts";
+import {
+  OrchestrationStatsSnapshot,
+  type OrchestrationV2Subagent,
+  type OrchestratorMcpOrchestrationTreeResult,
+} from "@t3tools/contracts";
+import {
+  SEED_AD_HOC_CHAT_ID,
+  SEED_CROSS_REPO_POD_ID,
+  SEED_SLICELESS_POD_ID,
+  orchestrationSeedTree,
+  seedCellId,
+  seedExpectedDots,
+  seedMetaId,
+  seedPodId,
+  seedSliceId,
+} from "@t3tools/shared/testing/orchestrationSeedTree";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(OrganService.layer),
+  Layer.provide(Layer.mock(OrchestrationStatsService.OrchestrationStatsService)({})),
   Layer.provide(layerWithoutPods),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
@@ -3483,5 +3503,267 @@ describe("OrchestratorMcpService organs", () => {
       assert.equal(unknown.code, "invalid_request");
       assert.lengthOf(yield* parentSubagents, 2);
     }).pipe(Effect.provide(layerOrgans())),
+  );
+});
+
+const decodeStatsSnapshot = Schema.decodeUnknownEffect(OrchestrationStatsSnapshot);
+
+describe("OrchestratorMcpService orchestration read tools", () => {
+  const seed = orchestrationSeedTree;
+  const scope: McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment:mcp-tree"),
+    requestNamespace: "provider-session:mcp-tree",
+    thread: undefined,
+    client: undefined,
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 1,
+  };
+  const statsSnapshot: OrchestrationStatsSnapshot = {
+    activeAgents: { runningTurns: 2, liveSessions: 3, idleSessions: 1 },
+    burn: {
+      state: "ready",
+      tokensPerMinute: 4800,
+      usdPerHour: 1.2,
+      approximate: true,
+      perMeta: { [seedMetaId(1)]: { tokensPerMinute: 4800, usdPerHour: 1.2 } },
+      perSlice: {},
+    },
+    host: { verdict: "low", cpu: 0.5, ram: 0.9, swap: 0.1, load: 1.6 },
+  };
+
+  const layerReadTools = (input: {
+    readonly subagentsByThreadId?: Readonly<Record<string, ReadonlyArray<OrchestrationV2Subagent>>>;
+    readonly recordReads?: Array<readonly [ThreadId, ReadonlyArray<string>]>;
+    readonly statsReads?: Ref.Ref<number>;
+  }) =>
+    OrchestratorMcpService.layer.pipe(
+      Layer.provide(OrganService.layer),
+      Layer.provide(layerWithoutPods),
+      Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+      Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+      Layer.provide(
+        Layer.mock(OrchestrationStatsService.OrchestrationStatsService)({
+          read:
+            input.statsReads === undefined
+              ? Effect.succeed(statsSnapshot)
+              : Ref.update(input.statsReads, (count) => count + 1).pipe(Effect.as(statsSnapshot)),
+        }),
+      ),
+      Layer.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getShellSnapshot: () =>
+              Effect.succeed({
+                schemaVersion: 1,
+                snapshotSequence: 0,
+                threads: seed.threads,
+                archivedThreads: [],
+              }),
+            getThreadRecords: (threadId, fields) => {
+              input.recordReads?.push([threadId, fields]);
+              return Effect.succeed({
+                subagents: (input.subagentsByThreadId ?? seed.subagentsByThreadId)[threadId] ?? [],
+              } as never);
+            },
+          }),
+          ServerSettings.layerTest(),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+            list: () => Effect.succeed([]),
+          }),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ),
+      ),
+    );
+
+  // After the seed's scheduled wakes, before its far-future snoozes end.
+  const readTree = (metaThreadId?: ThreadId) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2027-01-01T00:00:00.000Z"));
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      return yield* service.orchestrationTree(
+        scope,
+        metaThreadId === undefined ? {} : { metaThreadId },
+      );
+    });
+
+  type Tree = OrchestratorMcpOrchestrationTreeResult["noMeta"];
+  const slicesOf = (tree: Tree) =>
+    tree.projects.flatMap((project) =>
+      project.branches.flatMap((branch) =>
+        branch.slices.map((slice) => ({ ...slice, projectId: project.projectId })),
+      ),
+    );
+  const podsOf = (tree: Tree) => slicesOf(tree).flatMap((slice) => slice.pods);
+
+  it.effect("builds the seed tree as the shared classifier places it", () =>
+    Effect.gen(function* () {
+      const result = yield* readTree();
+      assert.isFalse(result.stale);
+      assert.deepEqual(
+        result.metas.map(({ threadId, dot, unread }) => ({ threadId, dot, unread })),
+        [
+          { threadId: seedMetaId(1), dot: "needs-you", unread: 3 },
+          { threadId: seedMetaId(2), dot: "needs-you", unread: 3 },
+        ],
+      );
+      assert.deepEqual(
+        slicesOf(result.trees[seedMetaId(1)]!).map((slice) => slice.threadId),
+        [seedSliceId(1), seedSliceId(2), seedSliceId(3)],
+      );
+      // Grouped by project, then branch.
+      assert.deepEqual(
+        slicesOf(result.trees[seedMetaId(2)]!).map((slice) => [slice.projectId, slice.threadId]),
+        [
+          ["seed-project-server", seedSliceId(4)],
+          ["seed-project-server", seedSliceId(6)],
+          ["seed-project-web", seedSliceId(5)],
+        ],
+      );
+      const firstSlice = slicesOf(result.trees[seedMetaId(1)]!)[0]!;
+      assert.equal(firstSlice.projectId, "seed-project-web");
+      assert.equal(firstSlice.dot, "needs-you");
+      assert.deepEqual(
+        firstSlice.pods.map((pod) => [pod.threadId, pod.repoTag ?? null]),
+        [
+          [seedPodId(1), null],
+          [seedPodId(2), null],
+          [SEED_CROSS_REPO_POD_ID, "seed-project-server"],
+        ],
+      );
+
+      // No meta: the slice-less pod wraps itself; the ad-hoc chat has no pods.
+      const noMeta = slicesOf(result.noMeta);
+      assert.deepEqual(
+        noMeta.map((entry) => [entry.threadId, entry.pods.map((pod) => pod.threadId)]),
+        [
+          [SEED_SLICELESS_POD_ID, [SEED_SLICELESS_POD_ID]],
+          [SEED_AD_HOC_CHAT_ID, []],
+        ],
+      );
+      assert.equal(noMeta[1]!.dot, "done-unread");
+
+      const pods = [...Object.values(result.trees), result.noMeta].flatMap(podsOf);
+      assert.lengthOf(pods, 15);
+      for (const pod of pods) {
+        const cells = pod.organs.flatMap((organ) => organ.cells);
+        for (const cell of cells) {
+          assert.equal(cell.dot, seedExpectedDots[cell.threadId]!.dot, cell.threadId);
+        }
+        if (cells.length === 0) {
+          assert.equal(pod.dot, seedExpectedDots[pod.threadId]!.dot, pod.threadId);
+        }
+      }
+      const reviewOrgan = pods.find((pod) => pod.threadId === seedPodId(1))!.organs;
+      assert.deepEqual(
+        reviewOrgan.map(({ presetId, round, cells }) => ({
+          presetId,
+          round,
+          cells: cells.map(({ role, model, status }) => [role, model, status]),
+        })),
+        [
+          {
+            presetId: "review-t3-council",
+            round: 1,
+            cells: [
+              ["review-t3", "claude-opus-5-5", "running"],
+              ["review-t3", "claude-opus-5-5", "running"],
+              ["review-t3-grok", "claude-opus-5-5", "running"],
+            ],
+          },
+        ],
+      );
+    }).pipe(Effect.provide(layerReadTools({}))),
+  );
+
+  it.effect("lists a cell once with its latest record and the organ once across rounds", () => {
+    const pod = seedPodId(12);
+    const records = seed.subagentsByThreadId[pod]!;
+    const later = DateTime.add(records.at(-1)!.updatedAt, { hours: 1 });
+    const [first, second, third, fourth] = records;
+    const subagentsByThreadId = {
+      ...seed.subagentsByThreadId,
+      [pod]: [
+        first!,
+        second!,
+        third!,
+        { ...fourth!, organ: { ...fourth!.organ!, round: 2 } },
+        // A follow-up to the first cell copies its organ.
+        {
+          ...first!,
+          id: NodeId.make("seed-task-follow-up"),
+          model: "claude-sonnet-5-5",
+          status: "completed" as const,
+          updatedAt: later,
+        },
+      ],
+    };
+    return Effect.gen(function* () {
+      const result = yield* readTree();
+      const organs = podsOf(result.trees[seedMetaId(2)]!).find(
+        (entry) => entry.threadId === pod,
+      )!.organs;
+      assert.lengthOf(organs, 1);
+      assert.equal(organs[0]!.round, 2);
+      assert.deepEqual(
+        organs[0]!.cells.map(({ threadId, model, status }) => [threadId, model, status]),
+        [
+          [seedCellId(12, 1), "claude-sonnet-5-5", "completed"],
+          [seedCellId(12, 2), "claude-opus-5-5", "running"],
+          [seedCellId(12, 3), "claude-opus-5-5", "waiting"],
+          [seedCellId(12, 4), "claude-opus-5-5", "completed"],
+        ],
+      );
+    }).pipe(Effect.provide(layerReadTools({ subagentsByThreadId })));
+  });
+
+  it.effect("reads one meta's tree, failing for an id that is not a meta", () => {
+    const recordReads: Array<readonly [ThreadId, ReadonlyArray<string>]> = [];
+    return Effect.gen(function* () {
+      const result = yield* readTree(seedMetaId(2));
+      assert.deepEqual(Object.keys(result.trees), [seedMetaId(2)]);
+      assert.deepEqual(result.noMeta, { projects: [] });
+      assert.lengthOf(result.metas, 2);
+      assert.deepEqual(
+        recordReads.map(([threadId]) => threadId).sort(),
+        [9, 10, 11, 12, 13, 14].map(seedPodId).sort(),
+      );
+
+      for (const id of [
+        seedSliceId(1),
+        ThreadId.make("thread:unknown"),
+        ThreadId.make("constructor"),
+      ]) {
+        const error = yield* readTree(id).pipe(Effect.flip);
+        assert.equal(error.code, "thread_not_found");
+      }
+    }).pipe(Effect.provide(layerReadTools({ recordReads })));
+  });
+
+  it.effect("reads only the pods' subagent records", () => {
+    const recordReads: Array<readonly [ThreadId, ReadonlyArray<string>]> = [];
+    return Effect.gen(function* () {
+      yield* readTree();
+      assert.deepEqual(
+        recordReads.map(([threadId]) => threadId).sort(),
+        Array.from({ length: 15 }, (_, index) => seedPodId(index + 1)).sort(),
+      );
+      for (const [, fields] of recordReads) assert.deepEqual(fields, ["subagents"]);
+    }).pipe(Effect.provide(layerReadTools({ recordReads })));
+  });
+
+  it.effect("returns the stats service snapshot", () =>
+    Effect.gen(function* () {
+      const statsReads = yield* Ref.make(0);
+      const result = yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.orchestrationStats(scope);
+      }).pipe(Effect.provide(layerReadTools({ statsReads })));
+      assert.deepEqual(yield* decodeStatsSnapshot(result), statsSnapshot);
+      assert.equal(yield* Ref.get(statsReads), 1);
+    }),
   );
 });
