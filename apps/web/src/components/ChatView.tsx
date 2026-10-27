@@ -8089,6 +8089,7 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenThread={onOpenRelatedThreadStable}
                 onOpenCell={onOpenCellStable}
                 organsDocked={!paintOnlyDisplayedTimeline}
+                timelineSettled={threadSyncPhase === null}
                 parentThreadLink={paintOnlyDisplayedTimeline ? null : parentThreadLink}
                 workflowOpening={paintOnlyDisplayedTimeline ? null : workflowOpening}
                 onForkFromRun={paintOnlyDisplayedTimeline ? async () => {} : onForkFromRunStable}

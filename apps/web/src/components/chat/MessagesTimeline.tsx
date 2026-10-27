@@ -500,6 +500,8 @@ interface MessagesTimelineProps {
   onOpenCell?: (threadId: ThreadId) => void;
   /** The host docks running organs above its composer, so their turns show a placeholder. */
   organsDocked?: boolean;
+  /** False while the entries may be a cached or remembered copy older than the live thread. */
+  timelineSettled?: boolean;
   parentThreadLink?: {
     readonly threadId: ThreadId;
     readonly title: string;
@@ -608,6 +610,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   onOpenThread,
   onOpenCell = onOpenThread,
   organsDocked = false,
+  timelineSettled = true,
   parentThreadLink = null,
   workflowOpening = null,
   onForkFromRun,
@@ -916,17 +919,18 @@ const ConversationTimeline = memo(function ConversationTimeline({
   });
   const rows = useStableRows(rawRows, listIdentityKey);
   // After the position restore, so restoring to the end can't scroll the revealed row away.
-  // Resolved on the first settled pass of live rows either way, so a cell outside the loaded rows
-  // costs no scans on later renders. While the detail loads, the rows may be a remembered snapshot
-  // from before the cell started.
+  // A miss is final only once the timeline is settled: a cached or remembered copy usually
+  // predates the cell. Clearing then means a cell outside the loaded rows costs no later scans.
   useLayoutEffect(() => {
     const pending = pendingTimelineReveal(listIdentityKey);
-    if (pending === null || restoringThreadPosition || citationHistoryLoading || rows.length === 0)
-      return;
-    clearTimelineReveal(pending);
+    if (pending === null || restoringThreadPosition || rows.length === 0) return;
     const index = rows.findIndex((row) => rowHoldsChild(row, pending.childThreadId));
     const row = rows[index];
-    if (row?.kind !== "event") return;
+    if (row?.kind !== "event") {
+      if (timelineSettled) clearTimelineReveal(pending);
+      return;
+    }
+    clearTimelineReveal(pending);
     // Rows that mount after the scroll read this; rows already mounted read the pending reveal.
     workGroupViewState.expandedEntries.add(
       row.organId === undefined ? `subagent-group:${row.id}` : row.id,
@@ -934,12 +938,12 @@ const ConversationTimeline = memo(function ConversationTimeline({
     onManualNavigation();
     void listRef.current?.scrollToIndex({ index, animated: false, viewPosition: 0 });
   }, [
-    citationHistoryLoading,
     listIdentityKey,
     listRef,
     onManualNavigation,
     restoringThreadPosition,
     rows,
+    timelineSettled,
     workGroupViewState,
   ]);
   // Run status/timestamps churn on every stream event; the shared row context

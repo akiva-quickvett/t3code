@@ -313,20 +313,25 @@ it("drops a reveal whose cell is in no loaded row, and one that targets a lone s
   await vi.waitFor(() => expect(pendingTimelineReveal(lone.routeThreadKey)).toBeNull());
 });
 
-it("waits for the live timeline before resolving a reveal against a remembered snapshot", async () => {
+it.each([
+  { copy: "remembered snapshot while loading", flags: { citationHistoryLoading: true } },
+  { copy: "cached detail while syncing", flags: {} },
+])("keeps a reveal pending over a $copy until live rows hold the cell", async ({ flags }) => {
   const onManualNavigation = vi.fn();
   await setSubagents(CELLS.map((cell) => record(cell, "completed")));
   const props = timelineProps({ onManualNavigation });
   revealSubagentInTimeline(props.routeThreadKey, ThreadId.make("cell-b"));
-  // The snapshot painted while the detail loads predates the organ.
+  // The copy painted before the thread is live predates the organ.
   await render(
     <MessagesTimeline
       {...props}
-      citationHistoryLoading
+      {...flags}
+      timelineSettled={false}
       timelineEntries={entries("completed").slice(0, 1)}
     />,
   );
   expect(pendingTimelineReveal(props.routeThreadKey)).not.toBeNull();
+  expect(onManualNavigation).not.toHaveBeenCalled();
 
   await render(<MessagesTimeline {...props} timelineEntries={entries("completed")} />);
   await vi.waitFor(() => expect(cellRows()).toHaveLength(2));
