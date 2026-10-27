@@ -203,6 +203,10 @@
       "types": "./src/state/orchestrationV2Projection.ts",
       "default": "./src/state/orchestrationV2Projection.ts"
     },
+    "./state/organ-presets": {
+      "types": "./src/state/organPresets.ts",
+      "default": "./src/state/organPresets.ts"
+    },
     "./state/presentation": {
       "types": "./src/state/presentation.ts",
       "default": "./src/state/presentation.ts"

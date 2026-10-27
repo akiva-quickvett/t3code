@@ -22,6 +22,7 @@ export type SettingsPath =
   | "/settings/snap-shot"
   | "/settings/providers"
   | "/settings/agents"
+  | "/settings/organs"
   | "/settings/integrations"
   | "/settings/scheduled-tasks"
   | "/settings/source-control"
@@ -60,6 +61,8 @@ export interface SettingsSearchItem {
   readonly requiresThreadAutoSettlement?: boolean;
   readonly requiresPullRequestLabelRules?: boolean;
   readonly requiresChatChannels?: boolean;
+  readonly requiresOrganPresets?: boolean;
+  readonly requiresOrchestrationMetas?: boolean;
 }
 
 export interface SettingsSearchAvailability {
@@ -74,6 +77,8 @@ export interface SettingsSearchAvailability {
   readonly managedTunnelActive?: boolean;
   readonly hasPullRequestLabelRules?: boolean;
   readonly hasChatChannels?: boolean;
+  readonly hasOrganPresets?: boolean;
+  readonly hasOrchestrationMetas?: boolean;
 }
 
 export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
@@ -85,6 +90,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/snap-shot": "SnapShots",
   "/settings/providers": "Providers",
   "/settings/agents": "Agents",
+  "/settings/organs": "Organs",
   "/settings/integrations": "Integrations",
   "/settings/scheduled-tasks": "Scheduled Tasks",
   "/settings/source-control": "Source Control",
@@ -656,6 +662,24 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "organ-presets",
+    title: "Organs",
+    to: "/settings/organs",
+    searchTerms: [
+      "organ organs preset presets cells council review design scouts research goal template",
+    ],
+    requiresOrganPresets: true,
+  },
+  {
+    id: "metas",
+    title: "Metas",
+    to: "/settings/organs",
+    searchTerms: ["meta metas promote demote orchestration"],
+    // The Metas list lives on the Organs page and shows only where both are supported.
+    requiresOrganPresets: true,
+    requiresOrchestrationMetas: true,
+  },
+  {
     id: "usage-providers",
     title: "Usage providers",
     to: "/settings/providers",
@@ -1056,6 +1080,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/keybindings": null,
   "/settings/providers": null,
   "/settings/agents": "project-defaults",
+  "/settings/organs": "project-defaults",
   "/settings/integrations": null,
   "/settings/source-control": "environment-defaults",
   "/settings/storage": "project-defaults",
@@ -1176,7 +1201,9 @@ export function filterAvailableSettingsSearchItems(
       (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement) &&
       (!item.managedTunnelOnly || availability.managedTunnelActive === true) &&
       (!item.requiresPullRequestLabelRules || availability.hasPullRequestLabelRules === true) &&
-      (!item.requiresChatChannels || availability.hasChatChannels === true),
+      (!item.requiresChatChannels || availability.hasChatChannels === true) &&
+      (!item.requiresOrganPresets || availability.hasOrganPresets === true) &&
+      (!item.requiresOrchestrationMetas || availability.hasOrchestrationMetas === true),
   );
 }
 

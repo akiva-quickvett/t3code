@@ -215,8 +215,9 @@ Returns:
 - the organ presets in effect for the caller's project; and
 - feature flags for polling, cancellation, batch thread creation,
   `t3_usage_limits`, `t3_usage_thread_tree` (`usageThreadTree`), and supervised
-  wakes (`supervisedWakes`), the last two missing on older servers, and
-  `organs` for `start_organ` and `delegate_task.organ`.
+  wakes (`supervisedWakes`), the last two missing on older servers,
+  `organs` for `start_organ` and `delegate_task.organ`, and `metas` for metas
+  and `t3_thread_compact`.
 
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
@@ -551,6 +552,12 @@ wakes early when it has a pending request, fails, or completes after the snooze.
 state and whether its threads' snooze stopped it. `t3_thread_organize` snoozes
 and wakes the whole agent tree unless `scope` is `thread`, as the sidebar's
 Snooze does; it is the same `thread.snooze` command with `scope: "tree"`.
+Its `promote_meta` and `demote_meta` actions dispatch `thread.meta.set` through
+`ThreadManagementService.setMeta`. Only a thread with no parent in the agent tree
+(a fork qualifies), not supervised and not archived, can be promoted. The server
+refuses to settle, archive or delete a meta, and an agent's own settle of its
+meta fails at once instead of waiting for the turn to end. Tree snoozes and
+settles leave metas out, and a tree snooze or wake on a meta covers the meta alone.
 
 ### `t3_thread_update`
 
@@ -581,6 +588,19 @@ The target runtime and interaction modes may not be broader than the caller's.
 Stable command and message IDs are derived from `clientRequestId` for
 idempotent retries, so a retried follow-up records one task and one wake. A send to the
 caller's delegated or supervised child that starts a turn returns that turn's `taskId`.
+
+### `t3_thread_compact`
+
+Queues `/compact` on the thread (omit `threadId` for the caller's) behind any
+active run, never steering it, and returns `{ queued: true, commandId }`. The
+provider's own compaction runs on the same thread and session, so the transcript
+stays. It is refused when the thread has no user message other than `/compact`,
+or when its provider does not advertise the `compact` slash command.
+
+The dispatch has agent origin, so supervised wakes held by a user Stop stay held
+until the user's next message. A `/compact` the user sends from a client is a
+user message and releases them onto the compaction run, which wakes once it ends. If a user Stop
+held the thread's queue, the compaction waits in that held queue too.
 
 ### `t3_thread_wait`
 

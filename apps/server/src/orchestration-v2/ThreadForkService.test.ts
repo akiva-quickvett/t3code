@@ -172,6 +172,18 @@ it.effect("keeps a fork awake when its source thread is snoozed", () =>
   }),
 );
 
+it.effect("does not make a fork of a meta a meta", () =>
+  Effect.gen(function* () {
+    const sourceRun = makeSourceRun("completed");
+    const sourceProjection = makeSourceProjection(sourceRun);
+    const result = yield* planFork(sourceRun, {
+      ...sourceProjection,
+      thread: { ...sourceProjection.thread, metaAt: forkCreatedAt },
+    });
+    assert.isNull(result.targetThread.metaAt);
+  }),
+);
+
 it.effect("forks from a usage-limited failed run", () =>
   Effect.gen(function* () {
     const result = yield* planFork(makeSourceRun("failed"));

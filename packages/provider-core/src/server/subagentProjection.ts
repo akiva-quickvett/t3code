@@ -55,7 +55,8 @@ export function makeSubagentChildThread(input: {
   readonly creationSource: OrchestrationV2CreationSource;
 }): OrchestrationV2AppThread {
   // A role belongs to the thread it was given to; a child gets its own or none.
-  const { rolePreset: _parentRole, ...parentThread } = input.parentThread;
+  // Identity is never inherited, so a meta's child is no meta.
+  const { rolePreset: _parentRole, metaAt: _parentMeta, ...parentThread } = input.parentThread;
   return {
     ...parentThread,
     createdBy: input.createdBy,

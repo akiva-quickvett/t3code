@@ -131,6 +131,33 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       return { sequence: result.sequence, targetThreadId };
     }),
   ),
+  t3_thread_compact: writesThread((input) =>
+    Effect.gen(function* () {
+      const { threads, projection } = yield* readThread(input.threadId);
+      const commandId = yield* newCommandId();
+      yield* threads
+        .compact({
+          projectId: projection.thread.projectId,
+          threadId: projection.thread.id,
+          commandId,
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            error._tag === "ThreadManagementCompactionUnavailableError"
+              ? new OrchestratorMcpFailure({ code: "invalid_request", message: error.message })
+              : error._tag === "ThreadManagementThreadNotFoundError"
+                ? new OrchestratorMcpFailure({
+                    code: "thread_not_found",
+                    message: "The thread was not found.",
+                  })
+                : error._tag === "ThreadManagementProjectionLoadError"
+                  ? unavailable()
+                  : dispatchFailure(error),
+          ),
+        );
+      return { queued: true as const, commandId };
+    }),
+  ),
   t3_thread_merge_back: McpToolAccess.writesThreads(
     (input) => [input.targetThreadId, input.sourceThreadId],
     (input) =>
@@ -299,6 +326,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
             ...(input.scope === undefined ? {} : { scope: input.scope }),
           })
           .pipe(Effect.mapError(dispatchFailure));
+      }
+      if (input.action === "promote_meta" || input.action === "demote_meta") {
+        const result = yield* threads
+          .setMeta({ ...common, enabled: input.action === "promote_meta" })
+          .pipe(Effect.mapError(dispatchFailure));
+        return { sequence: result.sequence };
       }
       let command: OrchestrationV2Command;
       switch (input.action) {

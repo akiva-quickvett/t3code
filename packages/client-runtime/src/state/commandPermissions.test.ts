@@ -26,6 +26,8 @@ import { Atom, AtomRegistry, AsyncResult } from "effect/reactivity";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { createCommandPermissions } from "./commandPermissions.ts";
 import { createEnvironmentRpcCommand } from "./runtime.ts";
+import { createServerEnvironmentAtoms } from "./server.ts";
+import * as Persistence from "../platform/persistence.ts";
 
 vi.mock("./session.ts", () => ({
   createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
@@ -142,6 +144,41 @@ describe("command permissions", () => {
         expect(registry.get(change.permissionAtom(other))).toBe(false);
       }),
     ),
+  );
+
+  it.effect.each(["saveOrganPreset", "removeOrganPreset", "resetOrganPresets"] as const)(
+    "offers %s only with the destination settings grant",
+    (command) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const registry = yield* setup;
+          const server = createServerEnvironmentAtoms(
+            Atom.runtime(
+              Layer.mergeAll(
+                Layer.succeed(EnvironmentRegistry, {
+                  run: (_id: EnvironmentId, effect: Effect.Effect<unknown>) => effect,
+                } as unknown as EnvironmentRegistry["Service"]),
+                Layer.succeed(
+                  Persistence.EnvironmentCacheStore,
+                  {} as Persistence.EnvironmentCacheStore["Service"],
+                ),
+              ),
+            ),
+            { initialConfigValueAtom: () => Atom.make(null) },
+          );
+          registry.set(sessions(env), AsyncResult.success(grant(true)));
+          expect(registry.get(server[command].permissionAtom(env))).toBe(false);
+          registry.set(
+            sessions(env),
+            AsyncResult.success({
+              ...grant(false),
+              scopes: [AuthSettingsWriteScope],
+              permissions: [AuthSettingsWriteScope],
+            }),
+          );
+          expect(registry.get(server[command].permissionAtom(env))).toBe(true);
+        }),
+      ),
   );
 
   it.effect("requires the destination terminal grant, not operate alone, to open a pod shell", () =>

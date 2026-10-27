@@ -40,3 +40,25 @@ top of the environment's.
 **Context window** (200k or 1M) applies to Claude only; other providers ignore it. A role whose
 provider or model isn't available here says so in the list, and starting a thread with it keeps your
 current model.
+
+## Organs
+
+An organ is a group of role threads started together on one goal, such as a review council or a
+set of scouts. An organ preset names its cells: a role, how many threads of it (1 to 8), and
+optionally a model that replaces the role's own. T3 Code ships presets for implementation, a tier 3
+review council, scouts, research, and design.
+
+Edit presets in **Settings → Organs**, which layers environment and project edits the same way as
+roles. **Remove override** returns an edited preset to the one below it. Every cell's role must exist
+in the same scope; a role you later remove or rename leaves the preset showing a warning, and the
+organ won't start until you fix it. The starting thread's role decides who may start an organ: its
+**Child roles** limit which cell roles it can start, so a role override that drops one blocks the
+organ even when the preset is unchanged.
+
+## Metas
+
+A meta is a top-level thread you keep open to run other work, such as an orchestrator. Promote a
+thread with **Promote to meta** in a thread's menu, or from **Metas** in
+**Settings → Organs**; demote it the same way. Only a thread with no parent, not supervised, and not
+archived can be promoted. A meta doesn't auto-settle, and can't be settled, archived, or deleted
+until you demote it.

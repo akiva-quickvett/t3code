@@ -52,6 +52,14 @@ describe("resolveT3McpToolPresentation", () => {
     });
   });
 
+  it("pretty prints thread compaction", () => {
+    expect(T3_MCP_TOOL_NAMES.has("t3_thread_compact")).toBe(true);
+    expect(resolveT3McpToolPresentation("mcp__t3-code__t3_thread_compact")).toEqual({
+      displayName: "Compact a thread",
+      logo: "t3-code",
+    });
+  });
+
   it("pretty prints bare T3 MCP toolkit names", () => {
     expect(resolveT3McpToolPresentation("list_scheduled_tasks")).toEqual({
       displayName: "List scheduled tasks",

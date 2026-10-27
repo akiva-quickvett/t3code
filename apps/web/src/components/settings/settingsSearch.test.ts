@@ -282,6 +282,46 @@ describe("searchSettings", () => {
     ]);
   });
 
+  it.each([
+    ["organ", "organ-presets"],
+    ["preset", "organ-presets"],
+    ["council", "organ-presets"],
+    ["review", "organ-presets"],
+    ["design", "organ-presets"],
+    ["scouts", "organ-presets"],
+    ["research", "organ-presets"],
+    ["meta", "metas"],
+    ["promote", "metas"],
+    ["demote", "metas"],
+  ])("finds the Organs page for %s", (query, id) => {
+    expect(searchSettings(query)).toContainEqual(
+      expect.objectContaining({ id, to: "/settings/organs" }),
+    );
+  });
+
+  it("offers the Organs page only where an environment has organ presets", () => {
+    const availability = {
+      hasCloudPublicConfig: false,
+      hasProviderSettingsEnvironment: false,
+      hasMacProviderSettingsEnvironment: false,
+      canManageLocalBackend: false,
+      isWslSettingsRowVisible: false,
+      hasThreadAutoSettlement: false,
+    };
+    const organIds = (hasOrganPresets: boolean, hasOrchestrationMetas: boolean) =>
+      filterAvailableSettingsSearchItems({
+        ...availability,
+        hasEnvironment: true,
+        hasOrganPresets,
+        hasOrchestrationMetas,
+      })
+        .filter((item) => item.to === "/settings/organs")
+        .map((item) => item.id);
+    expect(organIds(false, true)).toEqual([]);
+    expect(organIds(true, false)).toEqual(["organ-presets"]);
+    expect(organIds(true, true)).toEqual(["organ-presets", "metas"]);
+  });
+
   it("finds keybinding commands by label, command id, and default key", () => {
     expect(searchSettings("toggle sidebar")[0]?.id).toBe("keybinding-sidebar.toggle");
     expect(searchSettings("sidebar.toggle")[0]?.id).toBe("keybinding-sidebar.toggle");
