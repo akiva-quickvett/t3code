@@ -50,7 +50,7 @@ type ProviderTurnEvent = Extract<
 
 const WINDOW_MINUTES = 10;
 const WINDOW_MS = WINDOW_MINUTES * 60_000;
-const HOST_INTERVAL = "15 seconds";
+const HOST_INTERVAL_MS = 15_000;
 const BURN_INTERVAL = "60 seconds";
 
 const TERMINAL_TURN_STATUSES: ReadonlySet<string> = new Set([
@@ -102,13 +102,11 @@ const burnRate = (tokens: number, usd: number): OrchestrationBurnRate => ({
 });
 
 /** Burn values are already rounded, so equal significant fields mean nothing to push. */
-const significant = (snapshot: OrchestrationStatsSnapshot) =>
-  JSON.stringify([
-    snapshot.activeAgents,
-    snapshot.burn,
-    snapshot.host.verdict,
-    hostResourceVerdicts(snapshot.host),
-  ]);
+const significant = (snapshot: OrchestrationStatsSnapshot) => {
+  // The snapshot has no previous CPU sample, so its CPU verdict reaches clients only through `verdict`.
+  const { cpu: _cpu, ...resources } = hostResourceVerdicts(snapshot.host);
+  return JSON.stringify([snapshot.activeAgents, snapshot.burn, snapshot.host.verdict, resources]);
+};
 
 /** `inputTokens` includes cache reads and writes; `outputTokens` includes reasoning. */
 function turnTotals(usage: NonNullable<ProviderTurnEvent["payload"]["turnTokenUsage"]>) {
@@ -212,6 +210,8 @@ const make = Effect.gen(function* () {
   const publishLock = yield* Semaphore.make(1);
   let previousHost: HostResourcesSnapshot | null = null;
   let lastHost: HostResourcesSnapshot | null = null;
+  // A resubscribed event stream starts at the latest sequence, so turns ending in between are lost.
+  let streamRetriedAtMs: number | null = null;
 
   const update = (next: (current: OrchestrationStatsSnapshot) => OrchestrationStatsSnapshot) =>
     publishLock.withPermits(1)(
@@ -284,7 +284,11 @@ const make = Effect.gen(function* () {
     const counts = yield* providerSessions.sessionCounts;
     // Reads inside HostResources' cache window return the same sample.
     if (lastHost === null || host.sampledAt !== lastHost.sampledAt) {
-      previousHost = lastHost;
+      // CPU pairs only consecutive samples, not ones either side of an unsampled gap.
+      previousHost =
+        lastHost !== null && host.sampledAt - lastHost.sampledAt <= 2 * HOST_INTERVAL_MS
+          ? lastHost
+          : null;
       lastHost = host;
     }
     const verdict = hostHeadroom(host, previousHost);
@@ -292,7 +296,7 @@ const make = Effect.gen(function* () {
     yield* update((current) => ({
       ...current,
       activeAgents: {
-        runningTurns: counts.busy,
+        runningTurns: counts.running,
         liveSessions: counts.live,
         idleSessions: Math.max(0, counts.live - counts.busy),
       },
@@ -310,7 +314,7 @@ const make = Effect.gen(function* () {
     const attribute = shells === null ? null : burnAttribution(shells);
     let tokens = 0;
     let usd = 0;
-    let approximate = false;
+    let approximate = streamRetriedAtMs !== null && nowMs - streamRetriedAtMs < WINDOW_MS;
     const perMeta = new Map<ThreadId, { tokens: number; usd: number }>();
     const perSlice = new Map<ThreadId, { tokens: number; usd: number }>();
     const add = (
@@ -356,7 +360,7 @@ const make = Effect.gen(function* () {
   const sampleAll = Effect.andThen(sampleHost, sampleBurn);
   const sampling = Effect.all(
     [
-      Effect.sleep(HOST_INTERVAL).pipe(Effect.andThen(sampleHost), Effect.forever),
+      Effect.sleep(HOST_INTERVAL_MS).pipe(Effect.andThen(sampleHost), Effect.forever),
       Effect.sleep(BURN_INTERVAL).pipe(Effect.andThen(sampleBurn), Effect.forever),
     ],
     { concurrency: "unbounded", discard: true },
@@ -380,9 +384,6 @@ const make = Effect.gen(function* () {
       const running = sampler;
       sampler = null;
       yield* Fiber.interrupt(running);
-      // CPU needs two consecutive samples; samples on either side of a gap are not.
-      previousHost = null;
-      lastHost = null;
     }),
   );
 
@@ -390,6 +391,12 @@ const make = Effect.gen(function* () {
     Stream.runForEach(orchestrator.streamDomainEvents, (event) =>
       event.type === "provider-turn.updated" ? onProviderTurn(event) : Effect.void,
     ).pipe(
+      Effect.tapError((error) =>
+        Effect.gen(function* () {
+          streamRetriedAtMs = yield* Clock.currentTimeMillis;
+          yield* Effect.logWarning("orchestration stats event stream failed; retrying", { error });
+        }),
+      ),
       Effect.retry(Schedule.spaced("5 seconds")),
       Effect.catchCause((cause) =>
         Effect.logWarning("orchestration stats event stream failed", { cause }),

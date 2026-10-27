@@ -6,6 +6,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -35,7 +36,7 @@ interface Fixture {
   shells: ReadonlyArray<unknown>;
   modelByThread: Map<string, string>;
   host: Omit<HostResourcesSnapshot, "sampledAt">;
-  counts: { live: number; busy: number };
+  counts: { live: number; busy: number; running: number };
   hostReads: number;
 }
 
@@ -53,7 +54,7 @@ const makeFixture = (): Fixture => ({
     swapTotalBytes: 100,
     loadAverage1m: 1,
   },
-  counts: { live: 0, busy: 0 },
+  counts: { live: 0, busy: 0, running: 0 },
   hostReads: 0,
 });
 
@@ -113,7 +114,10 @@ const statsServiceLayer = (fixture: Fixture, events: Queue.Queue<Fed>) =>
             Effect.succeed(model === "known" ? totals.outputTokens / 1000 : null),
         }),
         Layer.mock(HostResources.HostResources)({
-          read: Effect.sync(() => ({ ...fixture.host, sampledAt: ++fixture.hostReads })),
+          read: Effect.gen(function* () {
+            fixture.hostReads += 1;
+            return { ...fixture.host, sampledAt: yield* Clock.currentTimeMillis };
+          }),
         }),
       ),
     ),
@@ -281,7 +285,7 @@ describe("OrchestrationStatsService", () => {
           const first = yield* Stream.toPull(stats.subscribe);
           yield* first;
           expect(fixture.hostReads).toBe(1);
-          fixture.counts = { live: 2, busy: 1 };
+          fixture.counts = { live: 2, busy: 1, running: 1 };
           yield* TestClock.adjust("15 seconds");
           expect(fixture.hostReads).toBe(2);
 
@@ -373,7 +377,10 @@ describe("OrchestrationStatsService", () => {
         fixture,
         turn({ id: "a", threadId: "t", atMs: 0, inputTokens: 500, outputTokens: 500 }),
       );
-      expect((yield* stats.read).burn.tokensPerMinute).toBe(100);
+      // Turns that ended while the stream was down are missing.
+      expect((yield* stats.read).burn).toMatchObject({ tokensPerMinute: 100, approximate: true });
+      yield* TestClock.adjust("10 minutes");
+      expect((yield* stats.read).burn).toMatchObject({ tokensPerMinute: 0, approximate: false });
     }).pipe(Effect.provide(statsLayer(fixture)));
   });
 
@@ -412,6 +419,27 @@ describe("OrchestrationStatsService", () => {
       expect(yield* greet).toBe("ok");
       yield* TestClock.adjust("2 minutes");
       expect(yield* greet).toBe("ok");
+
+      // Reads without a subscriber pair consecutive samples and nothing older.
+      yield* TestClock.adjust("2 minutes");
+      expect((yield* stats.read).host.verdict).toBe("ok");
+      yield* TestClock.adjust("15 seconds");
+      expect((yield* stats.read).host.verdict).toBe("low");
+      yield* TestClock.adjust("2 minutes");
+      expect((yield* stats.read).host.verdict).toBe("ok");
+    }).pipe(Effect.provide(statsLayer(fixture)));
+  });
+
+  it.effect("counts every running turn, including two in one session", () => {
+    const fixture = makeFixture();
+    fixture.counts = { live: 1, busy: 1, running: 2 };
+    return Effect.gen(function* () {
+      const stats = yield* OrchestrationStatsService.OrchestrationStatsService;
+      expect((yield* stats.read).activeAgents).toEqual({
+        runningTurns: 2,
+        liveSessions: 1,
+        idleSessions: 0,
+      });
     }).pipe(Effect.provide(statsLayer(fixture)));
   });
 });
