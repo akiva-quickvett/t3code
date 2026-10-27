@@ -2950,7 +2950,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         snoozeWhenIdle = {
           snoozedUntil: DateTime.formatIso(parsedSnoozedUntil.value),
           requestedAt: DateTime.formatIso(now),
-          // A meta snoozes alone even if a tree snooze reached its lock.
+          // A meta snoozes alone; backs up dispatchTreeCascade when a promote lands after its parking read.
           scope: isMeta(thread) ? "thread" : (command.scope ?? "thread"),
         };
       } else if (projection.runtimeRequests.some((request) => request.status === "pending")) {
@@ -3100,28 +3100,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           const snoozed = thread.snoozedUntil != null || thread.snoozeWhenIdle != null;
           // A pending tree settle must not fire on the new meta, and a later
           // tree unsettle must not treat it as one its tree settled.
-          return {
-            ...thread,
+          const writes = {
             metaAt: thread.metaAt ?? now,
             autoSettleDisabledAt: thread.autoSettleDisabledAt ?? now,
             rolePreset: thread.rolePreset ?? META_ROLE_PRESET,
             settleWhenIdle: null,
             settledByTree: null,
-            ...(settled ? { settledOverride: "active", settledAt: null, unsettledAt: now } : {}),
+            ...(settled
+              ? { settledOverride: "active" as const, settledAt: null, unsettledAt: now }
+              : {}),
             ...(snoozed
               ? { snoozedUntil: null, snoozedAt: null, snoozeWhenIdle: null, lastSnoozeWakeAt: now }
               : {}),
-            updatedAt:
-              isMeta(thread) &&
-              thread.autoSettleDisabledAt != null &&
-              thread.rolePreset != null &&
-              !settled &&
-              !snoozed &&
-              thread.settleWhenIdle == null &&
-              thread.settledByTree == null
-                ? thread.updatedAt
-                : now,
           };
+          const unchanged = Object.entries(writes).every(
+            ([field, value]) => value === (thread[field as keyof typeof writes] ?? null),
+          );
+          return { ...thread, ...writes, updatedAt: unchanged ? thread.updatedAt : now };
         }
         case "thread.pin": {
           const alreadyPinned = thread.pinnedAt != null;
@@ -11395,25 +11390,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       }
       case "thread.delete": {
-        // Not in planThreadDeletion: a project delete runs it for every
-        // thread and would fail part way.
-        if (
-          isMeta(
-            yield* projectionStore
-              .getThread(command.threadId)
-              .pipe(
-                Effect.mapError(
-                  (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-                ),
-              ),
-          )
-        ) {
-          return yield* new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause: `Thread ${command.threadId} is a meta; demote it first.`,
-          });
-        }
         const projection = yield* projectionStore
           .getThreadRecords(command.threadId, [
             "runs",
@@ -11428,6 +11404,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
             ),
           );
+        // Not in planThreadDeletion: a project delete runs it for every
+        // thread and would fail part way.
+        if (isMeta(projection.thread)) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Thread ${command.threadId} is a meta; demote it first.`,
+          });
+        }
         return yield* mapDispatchError(command)(
           planThreadDeletion({
             command,
@@ -11954,8 +11939,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ),
         );
       const root = tree.find((thread) => thread.id === command.threadId);
-      // A meta snoozes alone, as soon as asked; settling one is refused under its own lock.
-      if (command.type === "thread.snooze" && root !== undefined && root.metaAt !== null)
+      // A meta snoozes and wakes alone, as soon as asked; settling one is refused under its own lock.
+      if (
+        (command.type === "thread.snooze" || command.type === "thread.unsnooze") &&
+        root !== undefined &&
+        root.metaAt !== null
+      )
         return yield* dispatchWithReceipt({ ...command, scope: "thread" });
       const descendants = tree.filter((thread) => {
         if (thread.id === command.threadId || thread.archived) return false;

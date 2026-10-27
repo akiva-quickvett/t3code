@@ -556,7 +556,7 @@ Its `promote_meta` and `demote_meta` actions dispatch `thread.meta.set` through
 (a fork qualifies), not supervised and not archived, can be promoted. The server
 refuses to settle, archive or delete a meta, and an agent's own settle of its
 meta fails at once instead of waiting for the turn to end. Tree snoozes and
-settles leave metas out, and a tree snooze on a meta snoozes the meta alone.
+settles leave metas out, and a tree snooze or wake on a meta covers the meta alone.
 
 ### `t3_thread_update`
 

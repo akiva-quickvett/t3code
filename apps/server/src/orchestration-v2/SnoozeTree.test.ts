@@ -778,6 +778,41 @@ it.layer(layerTest)("metas in trees", (it) => {
     }),
   );
 
+  it.effect("a tree wake on a meta wakes the meta alone", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const meta = ThreadId.make("thread:wake-meta");
+      const slice = ThreadId.make("thread:wake-meta-slice");
+      yield* createThread(meta);
+      yield* createThread(slice, { supervisorThreadId: meta });
+      yield* promote(meta);
+      const sliceUntil = yield* later(5);
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze:wake-meta-slice"),
+        threadId: slice,
+        snoozedUntil: sliceUntil,
+        scope: "thread",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze:wake-meta"),
+        threadId: meta,
+        snoozedUntil: yield* later(2),
+        scope: "tree",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("unsnooze:wake-meta"),
+        threadId: meta,
+        reason: "user",
+        scope: "tree",
+      });
+      assert.isNull(yield* snoozedUntil(meta));
+      assert.equal(yield* snoozedUntil(slice), sliceUntil);
+    }),
+  );
+
   it.effect("a busy meta's snooze when idle waits for its own work, scoped to itself", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
