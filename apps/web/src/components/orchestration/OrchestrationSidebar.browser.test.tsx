@@ -357,6 +357,46 @@ describe("OrchestrationSidebar", () => {
     outside.remove();
   });
 
+  it("leaves focus on the page when a row it left is later removed", async () => {
+    await render();
+    const tree = treeElement();
+    await act(() => tree.focus());
+    await pressKey("ArrowDown");
+    await pressKey("ArrowDown");
+    await pressKey("ArrowDown");
+    expect(activeRowKey()).toBe(keyOf(seedPodId(1)));
+    // Like a click on plain chat text: focus goes to the body.
+    await act(async () => (document.activeElement as HTMLElement).blur());
+    expect(document.activeElement).toBe(document.body);
+
+    await act(() => clickChevron(keyOf(seedSliceId(1))));
+    expect(rowElement(keyOf(seedPodId(1)))).toBeUndefined();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("takes arrow keys while the tree itself holds focus after a press on its padding", async () => {
+    await render();
+    const tree = treeElement();
+    await userEvent.click(tree, { position: { x: 4, y: 1 } });
+    expect(document.activeElement).toBe(tree);
+    await pressKey("ArrowDown");
+    expect(activeRowKey()).toBe(rowElements()[0]!.dataset.rowKey);
+  });
+
+  it("scrolls a revealed row once, not again on a later render", async () => {
+    container.style.height = "200px";
+    await render();
+    const tree = treeElement();
+    expect(tree.scrollTop).toBe(0);
+    // Nothing above pod 8 is collapsed, so the reveal scrolls at once.
+    await act(() => registry.set(h.routeAtom, refOf(seedPodId(8))));
+    expect(tree.scrollTop).toBeGreaterThan(0);
+
+    tree.scrollTop = 0;
+    await act(() => clickChevron(keyOf(seedSliceId(2))));
+    expect(tree.scrollTop).toBe(0);
+  });
+
   it("reveals the routed row once its tab's shape arrives", async () => {
     setThreads([]);
     await render();

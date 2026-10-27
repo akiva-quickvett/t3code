@@ -189,8 +189,16 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
   // routes before the shells arrive).
   const revealedFor = useRef<string | null>(null);
   const expandPath = useEffectEvent((threadKey: string, path: ReadonlyArray<string>) => {
+    const keys = registry.get(collapsedKeysAtom);
+    const next = expandKeys(keys, path);
+    // Nothing to expand means no render follows, so a pending key would linger
+    // and scroll on some later, unrelated render.
+    if (next === keys) {
+      rowElement(treeRef.current, threadKey)?.scrollIntoView({ block: "nearest" });
+      return;
+    }
     pendingScrollKey.current = threadKey;
-    updateCollapsed((keys) => expandKeys(keys, path));
+    registry.set(collapsedKeysAtom, next);
   });
   useEffect(() => {
     if (routeKey === null || tabKey === null) return;
@@ -249,7 +257,8 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     // Keys typed into a row's menu or button are theirs.
     if (!(event.target instanceof HTMLElement)) return;
-    const focusedKey = event.target.dataset.rowKey;
+    // The tree itself holds focus after a press on its padding or scrollbar.
+    const focusedKey = event.target === event.currentTarget ? null : event.target.dataset.rowKey;
     if (focusedKey === undefined) return;
     const action = treeKeyAction(rows, focusedKey, event.key);
     if (action === null) return;
@@ -304,7 +313,18 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
   const onBlur = (event: FocusEvent<HTMLDivElement>) => {
     if (event.currentTarget.contains(event.relatedTarget)) return;
     setRowFocused(false);
-    if (event.relatedTarget !== null) focusedRowKey.current = null;
+    if (event.relatedTarget !== null) {
+      focusedRowKey.current = null;
+      return;
+    }
+    // Focus went nowhere: a removed row (reclaimed by the layout effect, which
+    // runs first) or a click on plain page text, which must not be pulled back.
+    const target = event.target;
+    queueMicrotask(() => {
+      if (target.isConnected && focusedRowKey.current === target.dataset.rowKey) {
+        focusedRowKey.current = null;
+      }
+    });
   };
 
   return (
@@ -347,11 +367,7 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
 }
 
 function rowElement(tree: HTMLElement | null, key: string): HTMLElement | null {
-  if (tree === null) return null;
-  for (const element of tree.querySelectorAll<HTMLElement>("[data-row-key]")) {
-    if (element.dataset.rowKey === key) return element;
-  }
-  return null;
+  return tree?.querySelector<HTMLElement>(`[data-row-key="${CSS.escape(key)}"]`) ?? null;
 }
 
 /** Spreads the row model into primitives, so each row's memo compares by value. */
