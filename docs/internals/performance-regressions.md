@@ -10,6 +10,9 @@ It exercises the real v2 projection and client reducers. This matters because th
 built-app benchmark fixtures seed v1 orchestration events; running those fixtures against a v2
 client can produce reassuring timings while missing the active transport path.
 
+`vp run test:perf:orchestration-sidebar` holds the Orchestration sidebar to a median commit under
+16 ms (max 32 ms) for one status change at 300 threads, and zero row commits while a thread streams.
+
 The v2 checks pin these invariants:
 
 - Client cold opens target 75 recent timeline rows and about 1 MiB of encoded data. Required
