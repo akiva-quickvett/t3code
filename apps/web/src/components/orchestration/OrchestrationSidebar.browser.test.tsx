@@ -383,6 +383,37 @@ describe("OrchestrationSidebar", () => {
     expect(activeRowKey()).toBe(rowElements()[0]!.dataset.rowKey);
   });
 
+  it("leaves focus on the page when a row is removed after focus left via the tree", async () => {
+    await render();
+    const tree = treeElement();
+    await act(() => tree.focus());
+    await pressKey("ArrowDown");
+    await pressKey("ArrowDown");
+    await pressKey("ArrowDown");
+    expect(activeRowKey()).toBe(keyOf(seedPodId(1)));
+    await userEvent.click(tree, { position: { x: 4, y: 1 } });
+    expect(document.activeElement).toBe(tree);
+    await act(async () => tree.blur());
+    expect(document.activeElement).toBe(document.body);
+
+    // Archived by data, not by the user's hand.
+    await act(() =>
+      replaceThread(seedPodId(1), (thread) => ({ ...thread, archivedAt: thread.updatedAt })),
+    );
+    expect(rowElement(keyOf(seedPodId(1)))).toBeUndefined();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("moves from a padding press to the routed row", async () => {
+    await render();
+    await act(() => registry.set(h.routeAtom, refOf(seedPodId(5))));
+    const tree = treeElement();
+    await userEvent.click(tree, { position: { x: 4, y: 1 } });
+    expect(document.activeElement).toBe(tree);
+    await pressKey("ArrowDown");
+    expect(activeRowKey()).toBe(keyOf(seedPodId(5)));
+  });
+
   it("scrolls a revealed row once, not again on a later render", async () => {
     container.style.height = "200px";
     await render();

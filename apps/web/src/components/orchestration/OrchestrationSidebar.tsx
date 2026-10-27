@@ -260,7 +260,12 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
     // The tree itself holds focus after a press on its padding or scrollbar.
     const focusedKey = event.target === event.currentTarget ? null : event.target.dataset.rowKey;
     if (focusedKey === undefined) return;
-    const action = treeKeyAction(rows, focusedKey, event.key);
+    const moved = treeKeyAction(rows, focusedKey, event.key);
+    // From the tree itself, a movement key lands on the routed row first.
+    const action =
+      focusedKey === null && moved !== null && currentKey !== null
+        ? ({ type: "focus", key: currentKey } as const)
+        : moved;
     if (action === null) return;
     event.preventDefault();
     switch (action.type) {
@@ -301,6 +306,8 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
       setRowFocused(true);
       return;
     }
+    // A focused tree holds no row, so a later blur must not leave one to reclaim.
+    focusedRowKey.current = null;
     // A press on the tree's padding or scrollbar keeps focus on the tree.
     if (pointerDown.current) {
       pointerDown.current = false;
