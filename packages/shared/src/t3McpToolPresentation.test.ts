@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { T3_MCP_TOOL_NAMES, resolveT3McpToolPresentation } from "./t3McpToolPresentation.ts";
+import {
+  T3_MCP_TOOL_NAMES,
+  resolveT3McpToolPresentation,
+  resolveT3McpToolSummaryAction,
+} from "./t3McpToolPresentation.ts";
 
 describe("resolveT3McpToolPresentation", () => {
   it("recognizes every T3 tool across provider prefixes and completion suffixes", () => {
@@ -58,6 +62,20 @@ describe("resolveT3McpToolPresentation", () => {
       displayName: "Compact a thread",
       logo: "t3-code",
     });
+    expect(resolveT3McpToolSummaryAction("t3_thread_compact")).toBe("thread-compact");
+  });
+
+  it("pretty prints the orchestration read tools", () => {
+    expect(resolveT3McpToolPresentation("mcp__t3-code__t3_orchestration_tree")).toEqual({
+      displayName: "Read the orchestration tree",
+      logo: "t3-code",
+    });
+    expect(resolveT3McpToolPresentation("t3-code.t3_orchestration_stats")).toEqual({
+      displayName: "Read orchestration stats",
+      logo: "t3-code",
+    });
+    expect(resolveT3McpToolSummaryAction("t3_orchestration_tree")).toBe("orchestration-tree");
+    expect(resolveT3McpToolSummaryAction("t3_orchestration_stats")).toBe("orchestration-stats");
   });
 
   it("pretty prints bare T3 MCP toolkit names", () => {

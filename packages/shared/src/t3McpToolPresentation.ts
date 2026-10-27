@@ -9,6 +9,8 @@ export type T3McpToolSummaryAction =
   | "capabilities"
   | "usage-limits"
   | "usage-thread-tree"
+  | "orchestration-tree"
+  | "orchestration-stats"
   | "delegate"
   | "task-status"
   | "task-cancel"
@@ -31,6 +33,7 @@ export type T3McpToolSummaryAction =
   | "thread-search"
   | "thread-transfers"
   | "thread-organize"
+  | "thread-compact"
   | "thread-update"
   | "queue-list"
   | "queue-read"
@@ -131,6 +134,14 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   ),
   t3_usage_limits: tool(["Read", "Reading", "Read", "usage limits"], "usage-limits"),
   t3_usage_thread_tree: tool(["Read", "Reading", "Read", "thread tree usage"], "usage-thread-tree"),
+  t3_orchestration_tree: tool(
+    ["Read", "Reading", "Read", "the orchestration tree"],
+    "orchestration-tree",
+  ),
+  t3_orchestration_stats: tool(
+    ["Read", "Reading", "Read", "orchestration stats"],
+    "orchestration-stats",
+  ),
   delegate_task: tool(["Delegate", "Delegating", "Delegated", "a child task"], "delegate"),
   start_organ: tool(["Start", "Starting", "Started", "an organ"], "delegate"),
   task_status: tool(["Get", "Getting", "Got", "delegated task status"], "task-status"),
@@ -312,10 +323,9 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_thread_search: tool(["Search", "Searching", "Searched", "thread content"], "thread-search"),
   t3_thread_transfers: tool(["Read", "Reading", "Read", "thread transfers"], "thread-transfers"),
   t3_thread_organize: tool(["Organize", "Organizing", "Organized", "a thread"], "thread-organize"),
-  // Shares organize's summary: client-runtime's summary switch has no compaction case yet.
   t3_thread_compact: tool(
     ["Compact", "Compacting", "Requested compaction of", "a thread"],
-    "thread-organize",
+    "thread-compact",
   ),
   t3_thread_update: tool(["Update", "Updating", "Updated", "T3 thread metadata"], "thread-update"),
   t3_worktree_list: tool(["List", "Listing", "Listed", "workspace branches"], "worktree-list"),

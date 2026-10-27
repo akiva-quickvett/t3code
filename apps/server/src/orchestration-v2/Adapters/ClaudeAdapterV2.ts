@@ -1331,6 +1331,8 @@ export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
   "mcp__t3-code__orchestrator_capabilities",
   "mcp__t3-code__t3_usage_limits",
   "mcp__t3-code__t3_usage_thread_tree",
+  "mcp__t3-code__t3_orchestration_tree",
+  "mcp__t3-code__t3_orchestration_stats",
   "mcp__t3-code__list_scheduled_tasks",
   "mcp__t3-code__t3_thread_list",
   "mcp__t3-code__t3_thread_wait",

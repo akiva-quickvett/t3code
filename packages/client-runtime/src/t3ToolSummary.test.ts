@@ -28,6 +28,16 @@ describe("summarizeT3ToolCalls", () => {
     ).toBe("Created 1 thread");
   });
 
+  it("counts compacted threads once each", () => {
+    expect(
+      summarizeT3ToolCalls("thread-compact", [
+        completed({ threadId: "thread-1" }),
+        completed({ threadId: "thread-1" }),
+        completed({ threadId: "thread-2" }),
+      ]).label,
+    ).toBe("Requested compaction of 2 threads");
+  });
+
   it("reports review guides by outcome, and a call where none started as a failure", () => {
     const guides = (...outcomes: ReadonlyArray<string>) => ({
       guides: outcomes.map((outcome, index) => ({ number: index + 1, outcome })),

@@ -231,6 +231,13 @@ export function summarizeT3ToolCalls(
     case "thread-organize":
       label = phrase("Organized", "organize", `threads ${times}`);
       break;
+    case "thread-compact":
+      label = phrase(
+        "Requested compaction of",
+        "compact",
+        quantity(countEntities(threadIds), "thread"),
+      );
+      break;
     case "thread-update":
       label = phrase("Updated", "update", quantity(countEntities(threadIds), "thread"));
       break;
@@ -450,6 +457,12 @@ export function summarizeT3ToolCalls(
       break;
     case "usage-thread-tree":
       label = phrase("Checked", "check", `thread tree usage ${times}`);
+      break;
+    case "orchestration-tree":
+      label = phrase("Checked", "check", `the orchestration tree ${times}`);
+      break;
+    case "orchestration-stats":
+      label = phrase("Checked", "check", `orchestration stats ${times}`);
       break;
   }
   return { label, failedCount };

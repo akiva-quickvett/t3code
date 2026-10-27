@@ -47,9 +47,11 @@ import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { layerWithoutPods } from "../pod/testkit/layerWithoutPods.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import * as OrganService from "../organs/OrganService.ts";
+import * as OrchestrationStatsService from "../orchestrationStats/OrchestrationStatsService.ts";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(OrganService.layer),
+  Layer.provide(Layer.mock(OrchestrationStatsService.OrchestrationStatsService)({})),
   Layer.provide(layerWithoutPods),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),

@@ -38,6 +38,9 @@ import {
   type OrchestratorMcpTaskCancelResult,
   type OrchestratorMcpUpdateScheduledTaskInput,
   type OrchestratorMcpListScheduledTasksInput,
+  type OrchestratorMcpOrchestrationStatsResult,
+  type OrchestratorMcpOrchestrationTreeInput,
+  type OrchestratorMcpOrchestrationTreeResult,
   type ProjectId,
   type OrchestratorMcpThreadDetail,
   type OrchestratorMcpThreadPullRequest,
@@ -109,6 +112,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as PodRuntimeService from "../pod/PodRuntimeService.ts";
 import { buildOrganPresetList } from "../organs/OrganPresetService.ts";
 import * as OrganService from "../organs/OrganService.ts";
+import * as OrchestrationStatsService from "../orchestrationStats/OrchestrationStatsService.ts";
 import {
   buildAgentRolePresetList,
   findAgentRolePresetIn,
@@ -122,6 +126,12 @@ import {
 } from "./McpInvocationContext.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import {
+  classifyShells,
+  orchestrationTreeResult,
+  podOrgans,
+  selectedPodIds,
+} from "./orchestrationTree.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -216,6 +226,14 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadInterruptInput,
   ) => Effect.Effect<OrchestratorMcpThreadInterruptResult, OrchestratorMcpFailure>;
+  /** Reads only pod threads' subagent records, never full projections. */
+  readonly orchestrationTree: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpOrchestrationTreeInput,
+  ) => Effect.Effect<OrchestratorMcpOrchestrationTreeResult, OrchestratorMcpFailure>;
+  readonly orchestrationStats: (
+    scope: McpInvocationScope,
+  ) => Effect.Effect<OrchestratorMcpOrchestrationStatsResult, OrchestratorMcpFailure>;
 }
 
 export class OrchestratorMcpService extends Context.Service<
@@ -1077,6 +1095,7 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const pods = yield* PodRuntimeService.PodRuntimeService;
   const organs = yield* OrganService.OrganService;
+  const orchestrationStats = yield* OrchestrationStatsService.OrchestrationStatsService;
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -3415,6 +3434,42 @@ const make = Effect.gen(function* () {
           status: result.type === "already_terminal" ? result.run.status : "interrupt_requested",
         } satisfies OrchestratorMcpThreadInterruptResult;
       }),
+    orchestrationTree: (scope, input) =>
+      Effect.gen(function* () {
+        yield* requireCapability(scope);
+        const { threads } = yield* threadManagement
+          .getShellSnapshot({ location: "active" })
+          .pipe(
+            Effect.mapError((error) =>
+              failure("orchestration_error", `Unable to read threads: ${errorMessage(error)}`),
+            ),
+          );
+        const classified = classifyShells(threads, yield* Clock.currentTimeMillis);
+        const { metaThreadId } = input;
+        if (
+          metaThreadId !== undefined &&
+          !Object.hasOwn(classified.classification.trees, metaThreadId)
+        ) {
+          return yield* failure("thread_not_found", `Thread ${metaThreadId} is not a meta.`);
+        }
+        const podIds = selectedPodIds(classified.classification, metaThreadId);
+        const organs = yield* Effect.forEach(
+          podIds,
+          (podId) =>
+            threadManagement.getThreadRecords(podId, ["subagents"]).pipe(
+              Effect.map(({ subagents }) => [podId, podOrgans(subagents, classified)] as const),
+              Effect.mapError(threadManagementFailure),
+            ),
+          { concurrency: 8 },
+        );
+        return orchestrationTreeResult({
+          classified,
+          metaThreadId,
+          organsByPodId: new Map(organs),
+        });
+      }),
+    orchestrationStats: (scope) =>
+      requireCapability(scope).pipe(Effect.andThen(orchestrationStats.read)),
   });
 });
 
@@ -3433,4 +3488,5 @@ export const layer: Layer.Layer<
   | ServerSettings.ServerSettingsService
   | PodRuntimeService.PodRuntimeService
   | OrganService.OrganService
+  | OrchestrationStatsService.OrchestrationStatsService
 > = Layer.effect(OrchestratorMcpService, make);

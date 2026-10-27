@@ -10,6 +10,7 @@ import {
   isProviderNativeSubagentThread,
   MessageId,
   type ModelSelection,
+  type OrchestrationStatsSnapshot,
   type OrchestrationV2DelegatedCompletionDelivery,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
@@ -17,6 +18,8 @@ import {
   type OrchestrationV2ThreadProjection,
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpOrchestrationStatsResult,
+  OrchestratorMcpOrchestrationTreeResult,
   OrchestratorMcpStartOrganResult,
   OrchestratorMcpTaskCancelResult,
   OrchestratorMcpThreadInterruptResult,
@@ -85,9 +88,28 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { delegatedTaskRun, hasPendingChildRuns } from "./OrchestratorMcpService.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { layerWithoutPods } from "../pod/testkit/layerWithoutPods.ts";
+import * as OrchestrationStatsService from "../orchestrationStats/OrchestrationStatsService.ts";
+
+const statsSnapshot: OrchestrationStatsSnapshot = {
+  activeAgents: { runningTurns: 1, liveSessions: 2, idleSessions: 1 },
+  burn: {
+    state: "warming",
+    tokensPerMinute: 1200,
+    usdPerHour: 0.5,
+    approximate: false,
+    perMeta: {},
+    perSlice: {},
+  },
+  host: { verdict: "ok", cpu: 0.25, ram: 0.5, swap: null, load: 0.4 },
+};
 
 const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+  Layer.provide(
+    Layer.mock(OrchestrationStatsService.OrchestrationStatsService)({
+      read: Effect.succeed(statsSnapshot),
+    }),
+  ),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
   Layer.provide(Layer.mock(UsageService.UsageService)({})),
   Layer.provide(layerWithoutPods),
@@ -117,6 +139,12 @@ const queuedFollowupResult = "Queued delegated follow-up completed.";
 const decodeCreateThreadsResult = Schema.decodeUnknownEffect(OrchestratorMcpCreateThreadsResult);
 const decodeDelegateTaskResult = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
 const decodeStartOrganResult = Schema.decodeUnknownEffect(OrchestratorMcpStartOrganResult);
+const decodeOrchestrationTreeResult = Schema.decodeUnknownEffect(
+  OrchestratorMcpOrchestrationTreeResult,
+);
+const decodeOrchestrationStatsResult = Schema.decodeUnknownEffect(
+  OrchestratorMcpOrchestrationStatsResult,
+);
 const decodeTaskCancelResult = Schema.decodeUnknownEffect(OrchestratorMcpTaskCancelResult);
 const decodeThreadInterruptResult = Schema.decodeUnknownEffect(
   OrchestratorMcpThreadInterruptResult,
@@ -4115,6 +4143,146 @@ describe("orchestrator MCP toolkit", () => {
           const child = yield* orchestrator.getThreadProjection(task.childThreadId);
           expect(child.thread.lineage.organ).toEqual(organ);
         }
+      }).pipe(Effect.provide(layerTest));
+    }),
+  );
+
+  it.effect("reads the orchestration tree and stats through their tools", () =>
+    Effect.gen(function* () {
+      const codexDriver = ProviderDriverKind.make("codex");
+      const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+        {
+          instanceId: codexInstanceId,
+          driver: codexDriver,
+          getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+          planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+          openSession: () => Effect.die("The effect worker does not run in this test."),
+        } as ProviderAdapter.ProviderAdapterV2["Service"],
+      ]);
+      const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+        { name: "orchestration-tree-toolkit" },
+        layerRegistry,
+        { runEffectWorker: false },
+      );
+      const layerOrchestration = Layer.merge(
+        layerOrchestrator,
+        ThreadManagementService.layer.pipe(
+          Layer.provide(layerOrchestrator),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(
+            CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+          ),
+        ),
+      );
+      const layerTest = layerOrchestratorToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(layerOrchestration),
+        Layer.provide(layerRegistry),
+        Layer.provide(
+          ProviderRegistryMock.layer([
+            makeProviderSnapshot({
+              instanceId: codexInstanceId,
+              driver: codexDriver,
+              model: codexModel,
+            }),
+          ]),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(layerUnusedScheduledTaskStub),
+        Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+        Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+        Layer.provide(NodeServices.layer),
+      );
+
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const server = yield* McpServer.McpServer;
+        const invoke = (name: string, args: Record<string, unknown>) =>
+          server.callTool({ name, arguments: args }).pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, {
+              environmentId: EnvironmentId.make("environment:mcp-tree"),
+              requestNamespace: "mcp-provider-session-tree",
+              thread: {
+                threadId: parentThreadId,
+                providerSessionId: "mcp-provider-session-tree",
+                providerInstanceId: codexInstanceId,
+              },
+              client: undefined,
+              capabilities: new Set(["orchestration"] as const),
+              issuedAt: 1,
+            }),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        // A broker with no slice: a No-meta pod.
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:mcp-tree-pod:create"),
+          threadId: parentThreadId,
+          projectId,
+          title: "MCP tree pod",
+          modelSelection: codexSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          rolePreset: { id: "broker", label: "Pod broker" },
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:mcp-tree-pod:start"),
+          threadId: parentThreadId,
+          messageId: MessageId.make("message:mcp-tree-pod:start"),
+          text: parentPrompt,
+          attachments: [],
+          modelSelection: codexSelection,
+          dispatchMode: { type: "start_immediately" },
+        });
+        const organCall = yield* invoke("start_organ", {
+          presetId: "scouts",
+          goal: "Map the tree read path.",
+          cells: [{ role: "scout", count: 2, target: { providerInstanceId: codexInstanceId } }],
+          clientRequestId: "organ-tree-1",
+        });
+        const organ = yield* decodeStartOrganResult(organCall.structuredContent).pipe(Effect.orDie);
+
+        for (const name of ["t3_orchestration_tree", "t3_orchestration_stats"]) {
+          const tool = server.tools.find(({ tool }) => tool.name === name);
+          expect(tool?.tool.annotations?.readOnlyHint, name).toBe(true);
+        }
+        const treeCall = yield* invoke("t3_orchestration_tree", {});
+        expect(treeCall.isError).toBe(false);
+        const tree = yield* decodeOrchestrationTreeResult(treeCall.structuredContent).pipe(
+          Effect.orDie,
+        );
+        expect(tree.metas).toEqual([]);
+        expect(tree.stale).toBe(false);
+        const entry = tree.noMeta.projects[0]?.branches[0]?.slices[0];
+        expect(entry?.threadId).toBe(parentThreadId);
+        expect(entry?.pods.map((pod) => pod.threadId)).toEqual([parentThreadId]);
+        const organs = entry?.pods[0]?.organs ?? [];
+        expect(organs.map(({ id, presetId, round }) => ({ id, presetId, round }))).toEqual([
+          { id: organ.organId, presetId: "scouts", round: 1 },
+        ]);
+        expect(organs[0]?.cells.map((cell) => cell.threadId)).toEqual(
+          organ.tasks.map((task) => task.childThreadId),
+        );
+        expect(organs[0]?.cells.map((cell) => cell.role)).toEqual(["scout", "scout"]);
+
+        const unknownCall = yield* invoke("t3_orchestration_tree", {
+          metaThreadId: parentThreadId,
+        });
+        expect(declaredFailure(unknownCall)?.code).toBe("thread_not_found");
+
+        const statsCall = yield* invoke("t3_orchestration_stats", {});
+        expect(statsCall.isError).toBe(false);
+        const stats = yield* decodeOrchestrationStatsResult(statsCall.structuredContent).pipe(
+          Effect.orDie,
+        );
+        expect(stats).toEqual(statsSnapshot);
       }).pipe(Effect.provide(layerTest));
     }),
   );
