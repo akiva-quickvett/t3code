@@ -208,9 +208,9 @@ already set (through the hub, Claude Code would otherwise fall back to a 5
 minute cache). Otherwise it leaves all three unset, so Claude Code uses its
 own login as before. The deploy log says which: `hub: on` or `hub: off (...)`
 with the reason. The choice holds until the next boot; a hub or tailnet outage
-after that shows up in agents as a 502 from the forwarder. Never set
-`ANTHROPIC_AUTH_TOKEN` on the service itself: Claude Code would send it to
-Anthropic. `TS_AUTHKEY` and `HUB_ACCESS_TOKEN` never reach the server or
+after that shows up in agents as a 502 from the forwarder. Do not set
+`ANTHROPIC_AUTH_TOKEN` on the service itself: the entrypoint ignores it and
+drops it from the server's environment. `TS_AUTHKEY` and `HUB_ACCESS_TOKEN` never reach the server or
 agents under their own names. Once the node has joined, the auth key can
 expire or be removed.
 

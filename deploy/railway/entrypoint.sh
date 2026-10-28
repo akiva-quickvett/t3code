@@ -53,13 +53,18 @@ keep() {
   done
 }
 
+# Agents use the hub only when its key is set and the node is on the tailnet
+# at boot; otherwise Claude Code keeps its own login. A bare
+# ANTHROPIC_AUTH_TOKEN would point Claude Code's own login at the wrong key.
+unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
+
 # Tailscale, so agents reach the CLIProxyAPI hub (README: Hub over Tailscale).
 # Userspace networking because Railway has no TUN device; the state on the
 # volume keeps the node's identity, so TS_AUTHKEY is only needed once.
 ts_join() {
   local state="" keyfile
   for _ in $(seq 30); do
-    state=$(tailscale status --json 2>/dev/null | jq -r '.BackendState // empty') || true
+    state=$(timeout 5 tailscale status --json 2>/dev/null | jq -r '.BackendState // empty') || true
     case "$state" in "" | NoState | Starting) sleep 1 ;; *) break ;; esac
   done
   if [ "$state" = NeedsLogin ] && [ -n "${TS_AUTHKEY:-}" ]; then
@@ -70,7 +75,7 @@ ts_join() {
       || echo "tailscale: up failed (expired or used auth key?)"
     rm -f "$keyfile"
   fi
-  echo "tailscale: $(tailscale status --json 2>/dev/null \
+  echo "tailscale: $(timeout 5 tailscale status --json 2>/dev/null \
     | jq -r '"\(.BackendState) \(.Self.DNSName // "")"' || echo unreachable)"
 }
 
@@ -88,13 +93,10 @@ else
   echo "tailscale: off (no TS_AUTHKEY and no saved state)"
 fi
 
-# Agents use the hub only when its key is set and the node is on the tailnet
-# at boot; otherwise Claude Code keeps its own login. A bare
-# ANTHROPIC_AUTH_TOKEN would point Claude Code's own login at the wrong key.
-unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
 if [ -z "${HUB_ACCESS_TOKEN:-}" ]; then
   echo "hub: off (no HUB_ACCESS_TOKEN)"
-elif ! tailscale status >/dev/null 2>&1; then
+# Running only: Starting also exits 0 but means the control plane is unreachable.
+elif ! timeout 10 tailscale status --json 2>/dev/null | jq -e '.BackendState == "Running"' >/dev/null; then
   echo "hub: off (tailscale is not up)"
 else
   export ANTHROPIC_AUTH_TOKEN=$HUB_ACCESS_TOKEN ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
@@ -102,13 +104,15 @@ else
   # Through the hub, Claude Code falls back to a 5 minute prompt cache; ask
   # for the subscription's 1 hour. Never overrides an explicit choice.
   settings=$home/.claude/settings.json
-  if [ ! -s "$settings" ]; then
-    echo '{"promptCacheTtl": "1h"}' > "$settings"
-  elif ! jq -e 'has("promptCacheTtl")' "$settings" >/dev/null 2>&1; then
-    jq '.promptCacheTtl = "1h"' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" \
-      || rm -f "$settings.tmp"
-  fi
-  chown "$user:$user" "$settings"
+  {
+    if [ ! -s "$settings" ]; then
+      echo '{"promptCacheTtl": "1h"}' > "$settings"
+    elif ! jq -e 'has("promptCacheTtl")' "$settings" >/dev/null 2>&1; then
+      jq '.promptCacheTtl = "1h"' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" \
+        || { rm -f "$settings.tmp"; false; }
+    fi
+    chown "$user:$user" "$settings"
+  } || echo "hub: settings.json not updated"
   echo "hub: on (${HUB_URL:-https://omarchy.tail43a582.ts.net:8317})"
 fi
 
