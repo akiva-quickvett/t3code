@@ -34,7 +34,6 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { deriveSubagentElapsedMs } from "@t3tools/shared/orchestrationTiming";
-import { groupBy } from "effect/Array";
 import * as DateTime from "effect/DateTime";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -69,6 +68,7 @@ import { AgentElapsed } from "./AgentElapsed";
 import { ThreadRelationshipIcon, threadRelationshipStatusLabel } from "./ThreadRelationshipIcon";
 import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
 import { revealSubagentInTimeline } from "./timelineReveal";
+import { threadLineageGroups } from "./ThreadRelationshipsControl.logic";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -127,9 +127,13 @@ function ThreadLineageGroup(props: {
   readonly label: string | null;
   readonly rows: ReadonlyArray<ThreadRelationshipWalkRow>;
   readonly expanded: boolean;
+  readonly alwaysShowCount: boolean;
   readonly children: (rows: ReadonlyArray<ThreadRelationshipWalkRow>) => ReactNode;
 }) {
-  const [expanded, setExpanded] = useState(props.expanded);
+  // The prop stays the default until the user toggles, so an organ group whose new round starts
+  // opens rather than hiding a running cell behind its header.
+  const [expandedOverride, setExpanded] = useState<boolean | null>(null);
+  const expanded = expandedOverride ?? props.expanded;
   const [visibleCount, setVisibleCount] = useState(THREAD_LINEAGE_INITIAL_COUNT);
   const { visibleRows, hiddenCount } = resolveThreadLineageWindow(props.rows, visibleCount);
   const failedCount = props.rows.filter(
@@ -148,7 +152,7 @@ function ThreadLineageGroup(props: {
           }
         >
           {props.label}
-          {!expanded && ` (${props.rows.length})`}
+          {(!expanded || props.alwaysShowCount) && ` (${props.rows.length})`}
         </CollapsibleSectionHeader>
       ) : null}
       {expanded ? (
@@ -297,24 +301,11 @@ export function ThreadRelationshipsPanel(props: {
       ? currentThread.lineage.parentThreadId
       : null;
 
-  const {
-    related = [],
-    active = [],
-    previous = [],
-  } = groupBy(relationshipRows, ({ edge }) => {
-    if (edge.kind !== "subagent" || isParentThreadRelationship(edge, props.threadId))
-      return "related";
-    return ["completed", "failed", "error", "cancelled", "interrupted", "idle"].includes(
-      edge.status ?? "",
-    )
-      ? "previous"
-      : "active";
-  });
-  const groups = [
-    { id: "related", label: null, rows: related, expanded: true },
-    { id: "active", label: null, rows: active, expanded: true },
-    { id: "previous", label: "Previous agents", rows: previous, expanded: false },
-  ];
+  const { active, groups } = threadLineageGroups(
+    relationshipRows,
+    props.threadId,
+    (threadId) => graph.nodes.get(threadId)?.thread?.lineage.organ,
+  );
   const runningCount =
     (projection?.subagents.filter(
       (agent) => agent.childThreadId === null && agent.status === "running",
