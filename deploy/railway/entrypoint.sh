@@ -20,8 +20,10 @@ mkdir -p "$home/.t3" "$home/.claude" "$home/.config" "$home/.local/bin" "$home/.
 chmod 700 "$home/.ssh"
 
 # Fresh volumes and anything a root shell created belong to root. Only touch
-# what is mis-owned so a large ~/work does not get rewritten on every boot.
-find "$home" -xdev \( ! -user "$user" -o ! -group "$user" \) -exec chown -h "$user:$user" {} +
+# what is mis-owned so a large ~/work does not get rewritten on every boot,
+# and skip node_modules trees, which only t3 writes, to keep boot fast.
+find "$home" -xdev -name node_modules -prune -o \
+  \( ! -user "$user" -o ! -group "$user" \) -exec chown -h "$user:$user" {} +
 
 # `t3 serve` prints a one-time admin pairing token at every start: bare, in
 # the pairing URL, URL-encoded in the app link, and as a QR code. Railway keeps
@@ -29,7 +31,7 @@ find "$home" -xdev \( ! -user "$user" -o ! -group "$user" \) -exec chown -h "$us
 # in an SSH session instead.
 redact() {
   LC_ALL=C.UTF-8 sed -u -E \
-    -e 's/(token(=|%3D))[^&%[:space:]]+/\1[redacted]/gI' \
+    -e 's/(token(=|%3D))[^&[:space:]]+/\1[redacted]/gI' \
     -e 's/^([[:space:]]*Token:[[:space:]]*).+/\1[redacted]/' \
     -e '/^[[:space:]]*[█▀▄][█▀▄[:space:]]*$/d'
 }

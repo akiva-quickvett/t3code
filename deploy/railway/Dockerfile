@@ -34,7 +34,7 @@ ARG CLAUDE_CODE_VERSION=latest
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates curl git gnupg jq less openssh-client procps python3 ripgrep \
+       ca-certificates curl git gnupg jq less openssh-client procps python3 ripgrep tini \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
@@ -74,4 +74,5 @@ ENV PATH=/home/t3/.local/bin:$PATH \
     DISABLE_AUTOUPDATER=1
 
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/t3-entrypoint"]
+# tini reaps the orphans agent and terminal shells leave behind.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/t3-entrypoint"]

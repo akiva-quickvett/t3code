@@ -1,0 +1,9 @@
+# Keeps local state out of `railway up` from a working checkout: .t3 holds
+# real user data and .env may hold a dev auth token.
+.git
+.repos
+.t3
+.plans
+.env*
+!.env.example
+**/node_modules

@@ -33,6 +33,8 @@ redeploys.
   configuration. Unpaired requests get 401.
 - `t3` on `PATH` always runs as the `t3` user, even from a root shell, so it
   never leaves root-owned files in `~/.t3`.
+- Never set `T3CODE_DEV_AUTH_TOKEN` on this service: `t3 serve` would print
+  that long-lived token at every start instead of a one-time one.
 
 Service settings (not in a config file): Dockerfile path
 `deploy/railway/Dockerfile` (also set as `RAILWAY_DOCKERFILE_PATH`), healthcheck
@@ -55,6 +57,10 @@ t3 pair
 ```
 https://t3code-qa-bot.up.railway.app/pair#token=<Token>
 ```
+
+`railway ssh` lands as root, and root's own home is not on the volume. For
+anything but `t3 pair`, run `su - t3` first, or files end up root-owned under
+`/home/t3` or lost in `/root` on the next deploy.
 
 Each new browser or device needs its own `t3 pair`. Revoke sessions with
 `t3 auth session list` and `t3 auth session revoke <id>`, or in
@@ -95,21 +101,19 @@ deploy. Install user tools under `~/.local` instead.
 
 ## Deploy and update
 
-The service tracks the branch `pod/ste-545-t3-hosted`, which is upstream
-T3 Code `main` plus this directory. To move to a newer upstream, merge or
-rebase `main` into it and deploy again.
+The service builds from GitHub `akiva-quickvett/t3code` on every push to its
+source branch (**Settings → Source**). That is `pod/ste-545-t3-hosted`, upstream
+T3 Code `main` plus this directory, until this directory lands on `main`; then
+switch the source branch to `main`. To move to a newer upstream, update the
+source branch and push.
 
-Until the Railway GitHub app can see `akiva-quickvett/t3code`, pushes do not
-deploy on their own. Deploy the committed tree by hand:
+To deploy an unpushed tree by hand, upload the committed files only:
 
 ```bash
 git archive HEAD | tar -x -C /path/to/empty-dir --exclude=.repos
 railway up /path/to/empty-dir --path-as-root \
   --project brave-warmth --environment "QA Bot" --service t3code
 ```
-
-Once the app has access, set the service's source branch in the dashboard
-(**Settings → Source**) and pushes deploy automatically.
 
 Claude Code installs at image build time. Railway caches that layer, so to pick
 up a new release set the service variable `CLAUDE_CODE_VERSION` to the version
