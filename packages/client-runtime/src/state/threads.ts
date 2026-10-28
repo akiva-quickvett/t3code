@@ -398,7 +398,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       history: patch(current.history),
     }));
 
-  const setDeleted = Effect.fn("EnvironmentThreadState.setDeleted")(function* () {
+  const setDeleted = Effect.fn("EnvironmentThreadState.setDeleted")(function* (options?: {
+    readonly retain?: boolean;
+  }) {
     yield* Ref.set(awaitingCompletion, false);
     yield* SubscriptionRef.set(state, {
       data: Option.none(),
@@ -406,7 +408,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       error: Option.none(),
       history: EMPTY_THREAD_HISTORY_META,
     });
-    yield* remember;
+    if (options?.retain !== false) yield* remember;
     if (resumeCache !== undefined && resumeCache.owner !== owner) return;
     yield* cache.removeThread(environmentId, threadId).pipe(
       Effect.catch((error) =>
@@ -831,7 +833,10 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
               break;
             }
             case "missing": {
-              yield* setDeleted();
+              // A 404 for an id we never loaded may be a thread that is about to be
+              // created (a draft's pre-picked id). This state stays parked, but once it
+              // is released the next mount asks again.
+              yield* setDeleted({ retain: false });
               return yield* Effect.never;
             }
             case "unavailable": {

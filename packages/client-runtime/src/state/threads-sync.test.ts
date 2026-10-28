@@ -1779,6 +1779,32 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
+  it.effect("loads a thread created after an earlier mount's HTTP miss", () =>
+    Effect.gen(function* () {
+      const resumeCache: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]> = {
+        snapshot: undefined,
+        owner: undefined,
+      };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const draft = yield* makeHarness({ httpSnapshot: { _tag: "missing" }, resumeCache });
+          yield* awaitThreadState(draft.observed, (value) => value.status === "deleted");
+        }),
+      );
+      const launched = yield* makeHarness({
+        httpSnapshot: {
+          _tag: "present",
+          snapshot: { snapshotSequence: 1, projection: BASE_PROJECTION },
+        },
+        resumeCache,
+      });
+
+      const state = yield* awaitThreadState(launched.observed, (value) => value.status === "live");
+      expect(Option.getOrThrow(state.data)).toEqual(BASE_PROJECTION);
+      expect(yield* Ref.get(launched.loaderCalls)).toBe(1);
+    }),
+  );
+
   it.effect("falls back to the socket when the HTTP snapshot is only unavailable", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({

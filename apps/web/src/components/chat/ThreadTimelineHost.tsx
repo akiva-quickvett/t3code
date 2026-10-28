@@ -104,6 +104,7 @@ export const ThreadTimelineHost = memo(function ThreadTimelineHost(props: {
         turnDiffSummaries={turnDiffSummaries}
         activeThreadEnvironmentId={environmentId}
         routeThreadKey={threadKey}
+        threadDetailRef={threadRef}
         onOpenTurnDiff={noop}
         onOpenThread={onOpenThread}
         onForkFromRun={noopAsync}

@@ -6,6 +6,7 @@ import {
   MessageId,
   type OrchestrationV2Subagent,
   type OrganId,
+  type ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
@@ -30,6 +31,7 @@ const h = await vi.hoisted(async () => {
     ),
     noShell: Atom.make(null),
     cellShells: new Map<string, unknown>(),
+    detailReads: new Set<string>(),
   };
 });
 
@@ -37,7 +39,13 @@ vi.mock(import("../../state/threads"), async (original) => {
   const actual = await original();
   return {
     ...actual,
-    environmentThreadDetails: { ...actual.environmentThreadDetails, threadAtom: () => h.thread },
+    environmentThreadDetails: {
+      ...actual.environmentThreadDetails,
+      threadAtom: (ref: ScopedThreadRef) => {
+        h.detailReads.add(scopedThreadKey(ref));
+        return h.thread;
+      },
+    },
     environmentThreadShells: {
       ...actual.environmentThreadShells,
       threadShellAtom: () => h.noShell,
@@ -150,6 +158,7 @@ function timelineProps(overrides: Partial<TimelineProps> = {}): TimelineProps {
     turnDiffSummaries: [],
     runs: [],
     routeThreadKey: scopedThreadKey(scopeThreadRef(ENVIRONMENT_ID, PARENT_ID)),
+    threadDetailRef: scopeThreadRef(ENVIRONMENT_ID, PARENT_ID),
     timelineEntries: [],
     onOpenTurnDiff: () => {},
     onOpenThread: () => {},
@@ -295,6 +304,21 @@ it("opens with the organ's card expanded after Show in parent chat", async () =>
   await vi.waitFor(() => expect(cellRows()).toHaveLength(2));
   expect(container.textContent).toContain("review cell-b");
   expect(onManualNavigation).toHaveBeenCalled();
+});
+
+it("loads no detail for a draft's thread until its shell exists", async () => {
+  const draft = timelineProps({
+    timelineEntries: entries("running").slice(0, 1),
+    threadDetailRef: null,
+  });
+  await render(<MessagesTimeline {...draft} />);
+  expect(container.querySelector('[data-message-id="message-user"]')).not.toBeNull();
+  expect(h.detailReads.has(draft.routeThreadKey)).toBe(false);
+
+  await render(
+    <MessagesTimeline {...draft} threadDetailRef={scopeThreadRef(ENVIRONMENT_ID, PARENT_ID)} />,
+  );
+  expect(h.detailReads.has(draft.routeThreadKey)).toBe(true);
 });
 
 it("drops a reveal whose cell is in no loaded row, and one that targets a lone subagent", async () => {

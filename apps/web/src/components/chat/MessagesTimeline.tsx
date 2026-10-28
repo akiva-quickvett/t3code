@@ -493,6 +493,11 @@ interface MessagesTimelineProps {
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   routeThreadKey: string;
   displayThreadKey?: string;
+  /**
+   * The thread whose detail the host loads. Null while a draft's pre-picked thread has no server
+   * shell: loading it then would park its detail as deleted.
+   */
+  threadDetailRef: ScopedThreadRef | null;
   paintOnly?: boolean;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
@@ -605,6 +610,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   turnDiffSummaries,
   routeThreadKey,
   displayThreadKey,
+  threadDetailRef,
   paintOnly = false,
   onOpenTurnDiff,
   onOpenThread,
@@ -901,7 +907,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       ? new Set(paintedExpandedAttemptIds).add(activeFindAttemptId)
       : paintedExpandedAttemptIds;
 
-  const organIdBySubagentId = useOrganIdBySubagentId(useThreadSubagents(citationThreadRef));
+  const organIdBySubagentId = useOrganIdBySubagentId(useThreadSubagents(threadDetailRef));
   const rawRows = useIncrementalTimelineRows(`${listIdentityKey}\0${workspaceRoot ?? ""}`, {
     timelineEntries,
     latestRun,
