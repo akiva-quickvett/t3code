@@ -11,8 +11,7 @@ FROM node:${NODE_VERSION}-bookworm AS build
 # VP_NODE_MANAGER=no keeps the image's Node instead of a vp-managed one.
 ENV CI=true \
     VP_NODE_MANAGER=no \
-    VP_BIN_DIR=/opt/vite-plus/bin \
-    VP_DATA_DIR=/opt/vite-plus \
+    VP_HOME=/opt/vite-plus \
     PATH=/opt/vite-plus/bin:$PATH
 RUN curl -fsSL https://vite.plus -o /tmp/vite-plus.sh \
     && bash /tmp/vite-plus.sh \
