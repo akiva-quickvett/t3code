@@ -37,6 +37,15 @@ import type { RunAttemptId } from "@t3tools/contracts";
 // Match the titlebar fade inset so draft promotion preserves the first row's position.
 export const CHAT_TIMELINE_ANCHOR_OFFSET = 24;
 
+// A smooth scroll across a long thread crawls for seconds: rows mount mid-flight,
+// grow past their estimates, and keep moving the target. Past this many
+// viewports a programmatic jump lands instantly instead.
+export const TIMELINE_SMOOTH_SCROLL_MAX_VIEWPORTS = 1.5;
+
+export function shouldAnimateTimelineScroll(distance: number, viewportHeight: number): boolean {
+  return Math.abs(distance) <= viewportHeight * TIMELINE_SMOOTH_SCROLL_MAX_VIEWPORTS;
+}
+
 export type TimelineScrollMode = "following-end" | "anchoring-new-turn" | "free-scrolling";
 
 export interface TimelineListMeasurementState {

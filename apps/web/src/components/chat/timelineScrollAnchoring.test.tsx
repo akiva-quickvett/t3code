@@ -6,6 +6,7 @@ import {
   getRowBottom,
   readTimelinePosition,
   rememberTimelinePosition,
+  shouldAnimateTimelineScroll,
   timelineContentOverflowsViewport,
 } from "./timelineScrollAnchoring";
 
@@ -57,6 +58,22 @@ describe("timelineContentOverflowsViewport", () => {
         inset,
       ),
     ).toBe(false);
+  });
+});
+
+describe("shouldAnimateTimelineScroll", () => {
+  it("glides across a short distance in either direction", () => {
+    expect(shouldAnimateTimelineScroll(900, 800)).toBe(true);
+    expect(shouldAnimateTimelineScroll(-1200, 800)).toBe(true);
+  });
+
+  it("jumps once the distance is more than one and a half viewports", () => {
+    expect(shouldAnimateTimelineScroll(1201, 800)).toBe(false);
+    expect(shouldAnimateTimelineScroll(-40_000, 800)).toBe(false);
+  });
+
+  it("jumps when the viewport is not measured yet", () => {
+    expect(shouldAnimateTimelineScroll(10, 0)).toBe(false);
   });
 });
 

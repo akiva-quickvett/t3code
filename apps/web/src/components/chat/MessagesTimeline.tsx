@@ -20,6 +20,8 @@ import {
 import {
   deriveTimelineMinimapItems,
   resolveTimelineMinimapPreview,
+  resolveTimelineMinimapTickIndex,
+  sampleTimelineMinimapItems,
   type TimelineMinimapItem,
 } from "./timelineMinimapItems";
 import {
@@ -198,6 +200,7 @@ import {
   readTimelinePosition,
   type RememberedTimelinePosition,
   rememberTimelinePosition,
+  shouldAnimateTimelineScroll,
   timelineContentOverflowsViewport,
 } from "./timelineScrollAnchoring";
 import { MessageCopyButton } from "./MessageCopyButton";
@@ -955,7 +958,26 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // Run status/timestamps churn on every stream event; the shared row context
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
+  // Every turn stays a prev/next target; only the drawn strips are sampled.
   const minimapItems = deriveTimelineMinimapItems(rows);
+  const minimapTicks = sampleTimelineMinimapItems(minimapItems);
+  const minimapSampled = minimapTicks.length < minimapItems.length;
+  // Preserve initialScrollAtEnd's measured target until the list is reused
+  // for another thread; scrollToEnd would replace it with an estimated offset.
+  const listOpenedOnRef = useRef<{
+    readonly list: LegendListRef;
+    identity: string | null;
+  } | null>(null);
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    const opened = listOpenedOnRef.current;
+    if (!list) return;
+    if (opened?.list !== list) {
+      listOpenedOnRef.current = { list, identity: listIdentityKey };
+    } else if (opened.identity !== listIdentityKey) {
+      opened.identity = null;
+    }
+  });
   const restoreRowIndex =
     restoringThreadPosition && rememberedPosition?.atEnd === false
       ? rows.findIndex((row) => row.id === rememberedPosition.rowId)
@@ -1013,7 +1035,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
               viewOffset: -position.offsetWithinRow,
             })
           : list.scrollToOffset({ offset: position.scrollOffset, animated: false })
-        : list.scrollToEnd({ animated: false });
+        : listOpenedOnRef.current?.identity === listIdentityKey
+          ? undefined
+          : list.scrollToEnd({ animated: false });
     void Promise.resolve(scrolling).then(() => {
       if (cancelled) return;
       if (position?.atEnd !== false || index < 0) {
@@ -1246,15 +1270,30 @@ const ConversationTimeline = memo(function ConversationTimeline({
       height: resolveTimelineRowHeight(state, item.rowIndex),
     }));
 
-    for (const [index, item] of minimapItems.entries()) {
-      const strip = minimapStripMap.get(item.id);
+    const nextCurrentIndex = resolveTimelineMinimapCurrentIndex({
+      scrollTop,
+      scrollBottom,
+      itemBounds,
+    });
+    // A sampled strip's own prompt is rarely on screen, so it lights for the
+    // turns it stands for instead.
+    const litTickIndex = minimapSampled
+      ? resolveTimelineMinimapTickIndex(
+          minimapTicks,
+          nextCurrentIndex === null ? null : minimapItems[nextCurrentIndex],
+        )
+      : null;
+
+    for (const [index, tick] of minimapTicks.entries()) {
+      const strip = minimapStripMap.get(tick.id);
       const bounds = itemBounds[index];
       const rowTop = bounds?.top ?? null;
       const rowHeight = bounds?.height ?? null;
-      const inView =
-        rowTop !== null &&
-        rowTop < scrollBottom &&
-        rowTop + Math.max(1, rowHeight ?? 1) > scrollTop;
+      const inView = minimapSampled
+        ? index === litTickIndex
+        : rowTop !== null &&
+          rowTop < scrollBottom &&
+          rowTop + Math.max(1, rowHeight ?? 1) > scrollTop;
 
       // Skip no-op attribute writes: this runs for every strip on every scroll
       // tick, and rewriting an unchanged attribute still dirties style state.
@@ -1263,11 +1302,6 @@ const ConversationTimeline = memo(function ConversationTimeline({
         strip.dataset.inView = next;
       }
     }
-    const nextCurrentIndex = resolveTimelineMinimapCurrentIndex({
-      scrollTop,
-      scrollBottom,
-      itemBounds,
-    });
     setMinimapCurrentIndex((current) =>
       current === nextCurrentIndex ? current : nextCurrentIndex,
     );
@@ -1597,6 +1631,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
           />
           <TimelineMinimap
             items={minimapItems}
+            ticks={minimapTicks}
             hasPersistentGutter={minimapHasPersistentGutter}
             hitStripWidth={minimapHitStripWidth}
             currentIndex={minimapCurrentIndex}
@@ -1604,9 +1639,15 @@ const ConversationTimeline = memo(function ConversationTimeline({
             onWheel={forwardMinimapWheel}
             onSelect={(item) => {
               onManualNavigation();
-              void listRef.current?.scrollToIndex({
+              const list = listRef.current;
+              const state = list?.getState();
+              const top = state?.positionAtIndex(item.rowIndex);
+              void list?.scrollToIndex({
                 index: item.rowIndex,
-                animated: true,
+                animated:
+                  state !== undefined &&
+                  top !== undefined &&
+                  shouldAnimateTimelineScroll(top - state.scroll, state.scrollLength),
                 viewOffset: 24,
               });
             }}
@@ -1706,6 +1747,7 @@ function TimelineMinimap({
   hitStripWidth,
   currentIndex,
   items,
+  ticks,
   stripMap,
   onWheel,
   onSelect,
@@ -1714,6 +1756,7 @@ function TimelineMinimap({
   hitStripWidth: number;
   currentIndex: number | null;
   items: ReadonlyArray<TimelineMinimapItem>;
+  ticks: ReadonlyArray<TimelineMinimapItem>;
   stripMap: Map<string, HTMLSpanElement>;
   onWheel: (event: WheelEvent) => void;
   onSelect: (item: TimelineMinimapItem) => void;
@@ -1734,22 +1777,22 @@ function TimelineMinimap({
   }, [passThrough]);
 
   const resolvedActiveIndex =
-    activeIndex !== null && activeIndex < items.length ? activeIndex : null;
+    activeIndex !== null && activeIndex < ticks.length ? activeIndex : null;
   const activeItem = resolveTimelineMinimapPreview(
-    resolvedActiveIndex === null ? null : (items[resolvedActiveIndex] ?? null),
+    resolvedActiveIndex === null ? null : (ticks[resolvedActiveIndex] ?? null),
   );
   const navigationInteractive =
     resolveTimelineMinimapNavigationInteractive(hitStripWidth) && !passThrough;
   const activeTopPercent =
     resolvedActiveIndex === null
       ? 0
-      : resolveTimelineMinimapTopPercent(resolvedActiveIndex, items.length);
+      : resolveTimelineMinimapTopPercent(resolvedActiveIndex, ticks.length);
   const activeTooltipTranslate =
     resolvedActiveIndex === null
       ? "-50%"
       : resolvedActiveIndex === 0
         ? "0%"
-        : resolvedActiveIndex === items.length - 1
+        : resolvedActiveIndex === ticks.length - 1
           ? "-100%"
           : "-50%";
   const resolvedCurrentIndex =
@@ -1757,11 +1800,15 @@ function TimelineMinimap({
   const previousItem =
     resolvedCurrentIndex === null ? null : (items[resolvedCurrentIndex - 1] ?? null);
   const nextItem = resolvedCurrentIndex === null ? null : (items[resolvedCurrentIndex + 1] ?? null);
+  const currentTickIndex = resolveTimelineMinimapTickIndex(
+    ticks,
+    resolvedCurrentIndex === null ? null : items[resolvedCurrentIndex],
+  );
 
   const resolveActiveIndexFromPointer = (event: MouseEvent<HTMLElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     return resolveTimelineMinimapIndexFromPointer({
-      itemCount: items.length,
+      itemCount: ticks.length,
       railTop: rect.top,
       railHeight: rect.height,
       pointerY: event.clientY,
@@ -1776,7 +1823,7 @@ function TimelineMinimap({
   const moveActiveIndex = (delta: number) => {
     setActiveIndex((current) => {
       const base = current ?? 0;
-      return Math.max(0, Math.min(items.length - 1, base + delta));
+      return Math.max(0, Math.min(ticks.length - 1, base + delta));
     });
   };
 
@@ -1813,7 +1860,7 @@ function TimelineMinimap({
             if (event.buttons !== 0 && !pressedOnStripRef.current) setPassThrough(true);
           }}
           style={{
-            height: resolveTimelineMinimapHeightStyle(items.length),
+            height: resolveTimelineMinimapHeightStyle(ticks.length),
             width: resolveTimelineMinimapInteractiveWidth(hitStripWidth, activeItem !== null),
           }}
         >
@@ -1834,13 +1881,13 @@ function TimelineMinimap({
                 return;
               }
               const nextIndex = resolveActiveIndexFromPointer(event);
-              const selectedItem = nextIndex === null ? null : (items[nextIndex] ?? null);
+              const selectedItem = nextIndex === null ? null : (ticks[nextIndex] ?? null);
               if (selectedItem) {
                 onSelect(selectedItem);
               }
               event.currentTarget.blur();
             }}
-            onFocus={() => setActiveIndex((current) => current ?? resolvedCurrentIndex ?? 0)}
+            onFocus={() => setActiveIndex((current) => current ?? currentTickIndex ?? 0)}
             onKeyDown={(event) => {
               if (event.key === "ArrowDown") {
                 event.preventDefault();
@@ -1853,7 +1900,7 @@ function TimelineMinimap({
                 setActiveIndex(0);
               } else if (event.key === "End") {
                 event.preventDefault();
-                setActiveIndex(items.length - 1);
+                setActiveIndex(ticks.length - 1);
               } else if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
                 if (activeItem) {
@@ -1875,8 +1922,8 @@ function TimelineMinimap({
             type="button"
           >
             <div className="absolute top-0 left-3 h-full w-px bg-border/15" />
-            {items.map((item, index) => {
-              const top = `${resolveTimelineMinimapTopPercent(index, items.length)}%`;
+            {ticks.map((item, index) => {
+              const top = `${resolveTimelineMinimapTopPercent(index, ticks.length)}%`;
               const activeDistance =
                 resolvedActiveIndex === null ? null : Math.abs(index - resolvedActiveIndex);
               return (

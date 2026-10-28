@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 import { MessageId } from "@t3tools/contracts";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
-import { deriveTimelineMinimapItems, resolveTimelineMinimapPreview } from "./timelineMinimapItems";
+import {
+  deriveTimelineMinimapItems,
+  resolveTimelineMinimapPreview,
+  resolveTimelineMinimapTickIndex,
+  sampleTimelineMinimapItems,
+  TIMELINE_MINIMAP_MAX_TICKS,
+} from "./timelineMinimapItems";
 import type { ChatMessage } from "../../types";
 
 function rows(
@@ -77,5 +83,53 @@ describe("timeline minimap previews", () => {
       assistantText: "First second",
     });
     expect(resolveTimelineMinimapPreview(first)?.assistantText).toBe("First");
+  });
+});
+
+describe("timeline minimap sampling", () => {
+  const turns = (count: number) =>
+    deriveTimelineMinimapItems(
+      rows(
+        Array.from({ length: count }, (_, index) => ["user", `Prompt ${index}`] as const).flatMap(
+          (prompt) => [prompt, ["assistant", "Answer"] as const],
+        ),
+      ),
+    );
+
+  it("keeps every turn while they fit the rail", () => {
+    const items = turns(TIMELINE_MINIMAP_MAX_TICKS);
+    expect(sampleTimelineMinimapItems(items)).toBe(items);
+  });
+
+  it("thins a long thread to the tick budget, keeping the first and latest turns", () => {
+    const items = turns(500);
+    const ticks = sampleTimelineMinimapItems(items);
+    expect(ticks).toHaveLength(TIMELINE_MINIMAP_MAX_TICKS);
+    expect(ticks[0]).toBe(items[0]);
+    expect(ticks.at(-1)).toBe(items.at(-1));
+    expect(new Set(ticks.map((item) => item.id)).size).toBe(ticks.length);
+    // Each tick still jumps to a real user row in order.
+    const rowIndexes = ticks.map((item) => item.rowIndex);
+    expect(rowIndexes).toEqual(rowIndexes.toSorted((a, b) => a - b));
+  });
+
+  it("lights the tick at or before the current turn", () => {
+    const items = turns(500);
+    const ticks = sampleTimelineMinimapItems(items);
+    const tickIndexOf = (turn: number) => resolveTimelineMinimapTickIndex(ticks, items[turn]);
+    const secondTickTurn = items.indexOf(ticks[1]!);
+
+    expect(tickIndexOf(0)).toBe(0);
+    expect(tickIndexOf(secondTickTurn - 1)).toBe(0);
+    expect(tickIndexOf(secondTickTurn)).toBe(1);
+    expect(tickIndexOf(items.length - 1)).toBe(ticks.length - 1);
+    expect(resolveTimelineMinimapTickIndex(ticks, null)).toBeNull();
+  });
+
+  it("maps each turn to its own tick when nothing is sampled", () => {
+    const items = turns(10);
+    expect(items.map((item) => resolveTimelineMinimapTickIndex(items, item))).toEqual(
+      items.map((_, index) => index),
+    );
   });
 });
