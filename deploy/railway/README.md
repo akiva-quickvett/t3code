@@ -19,7 +19,8 @@ redeploys.
 - [`Dockerfile`](Dockerfile) builds the server and web client from source with
   `vp` (Node and pnpm at the versions `package.json` pins), then copies the
   workspace into a slim runtime image with git, gh, ripgrep, curl, jq,
-  python3, openssh-client, pnpm and Claude Code. It copies `.env.example` to
+  openssh-client, pnpm, Claude Code, and Python 3.13 with pip, venv and uv
+  (both pinned in the Dockerfile). It copies `.env.example` to
   `.env` before building, so T3 Connect's public identifiers are baked in as in
   release builds.
 - [`entrypoint.sh`](entrypoint.sh) runs as root on every boot: it copies
@@ -99,7 +100,10 @@ Everything under `/home/t3`, which is the volume:
 - `~/work`: repositories and the server's working directory
 
 Anything outside `/home/t3` (apt packages, global npm packages) resets on every
-deploy. Install user tools under `~/.local` instead.
+deploy. Install user tools under `~/.local` instead. uv's cache and any Python
+versions `uv python install` adds go to `~/.cache/uv` and `~/.local/share/uv`,
+so they persist; the system `python3` refuses `pip install` outside a venv, so
+use `uv venv` or `python3 -m venv`.
 
 ## Deploy and update
 
