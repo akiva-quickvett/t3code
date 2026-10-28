@@ -23,12 +23,13 @@ chmod 700 "$home/.ssh"
 # what is mis-owned so a large ~/work does not get rewritten on every boot.
 find "$home" -xdev \( ! -user "$user" -o ! -group "$user" \) -exec chown -h "$user:$user" {} +
 
-# `t3 serve` prints a one-time admin pairing token, its URL and a QR code of
-# it at every start. Railway keeps stdout as deploy logs, so strip all three;
-# fresh links come from `t3 pair` in an SSH session instead.
+# `t3 serve` prints a one-time admin pairing token at every start: bare, in
+# the pairing URL, URL-encoded in the app link, and as a QR code. Railway keeps
+# stdout as deploy logs, so strip every form; fresh links come from `t3 pair`
+# in an SSH session instead.
 redact() {
   LC_ALL=C.UTF-8 sed -u -E \
-    -e 's/(token=)[^&[:space:]]+/\1[redacted]/g' \
+    -e 's/(token(=|%3D))[^&%[:space:]]+/\1[redacted]/gI' \
     -e 's/^([[:space:]]*Token:[[:space:]]*).+/\1[redacted]/' \
     -e '/^[[:space:]]*[█▀▄][█▀▄[:space:]]*$/d'
 }
