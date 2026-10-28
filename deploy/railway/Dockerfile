@@ -63,11 +63,12 @@ COPY deploy/railway/entrypoint.sh /usr/local/bin/t3-entrypoint
 # files in ~/.t3, so the CLI always drops to the t3 user.
 RUN printf '%s\n' '#!/bin/sh' \
       'if [ "$(id -u)" = 0 ]; then' \
-      '  exec setpriv --reuid=t3 --regid=t3 --init-groups env HOME=/home/t3 USER=t3 LOGNAME=t3 SHELL=/bin/bash "$0" "$@"' \
+      '  exec setpriv --reuid=t3 --regid=t3 --init-groups env -u RAILWAY_API_TOKEN HOME=/home/t3 USER=t3 LOGNAME=t3 SHELL=/bin/bash "$0" "$@"' \
       'fi' \
       'exec node /opt/t3code/apps/server/dist/bin.mjs "$@"' \
       > /usr/local/bin/t3 \
-    && chmod 755 /usr/local/bin/t3 /usr/local/bin/t3-entrypoint
+    && chmod 755 /usr/local/bin/t3 /usr/local/bin/t3-entrypoint \
+    && echo 'export DISABLE_AUTOUPDATER=1' > /etc/profile.d/t3.sh
 
 # Claude Code lives in the root-owned global prefix; update it by redeploying.
 ENV PATH=/home/t3/.local/bin:$PATH \

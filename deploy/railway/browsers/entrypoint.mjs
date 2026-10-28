@@ -10,17 +10,27 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 const token = Buffer.from(process.env.BROWSERS_TOKEN ?? "");
+delete process.env.BROWSERS_TOKEN;
 if (token.length < 16) {
   console.error("BROWSERS_TOKEN must be set to at least 16 characters");
   process.exit(1);
 }
-const port = Number(process.env.PORT ?? 3000);
-const cdpPort = Number(process.env.CDP_PORT ?? 9222);
-const maxSessions = Number(process.env.MAX_SESSIONS ?? 4);
-const idleMs = Number(process.env.IDLE_TIMEOUT_SECONDS ?? 300) * 1000;
+function positiveInt(name, fallback) {
+  const value = process.env[name] ?? String(fallback);
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    console.error(`${name} must be a positive integer`);
+    process.exit(1);
+  }
+  return Number(value);
+}
+const port = positiveInt("PORT", 3000);
+const cdpPort = positiveInt("CDP_PORT", 9222);
+const maxSessions = positiveInt("MAX_SESSIONS", 6);
+const idleMs = positiveInt("IDLE_TIMEOUT_SECONDS", 300) * 1000;
 const playwrightUpstream = port + 1;
 const cdpUpstream = cdpPort + 1;
 let sessions = 0;
+let cdpSessions = 0;
 
 const children = [];
 function start(command, args) {
@@ -49,7 +59,6 @@ start(fileURLToPath(new URL("node_modules/.bin/playwright", import.meta.url)), [
 start(chromium.executablePath(), [
   "--headless=new",
   `--remote-debugging-port=${cdpUpstream}`,
-  "--remote-allow-origins=*",
   "--no-sandbox",
   "--disable-gpu",
   "--disable-dev-shm-usage",
@@ -65,7 +74,7 @@ function refuse(socket, status) {
 // Pipes an upgraded WebSocket to a loopback upstream. Chrome only accepts a
 // loopback or IP Host, so the Host header is rewritten. Traffic in either
 // direction resets the idle timer.
-function forward(req, socket, head, upstreamPort, path) {
+function forward(req, socket, head, upstreamPort, path, onClose) {
   if (sessions >= maxSessions) return refuse(socket, "503 Service Unavailable");
   sessions++;
   let released = false;
@@ -78,6 +87,7 @@ function forward(req, socket, head, upstreamPort, path) {
     if (!released) {
       released = true;
       sessions--;
+      onClose?.();
     }
   };
   const touch = () => {
@@ -103,52 +113,103 @@ function forward(req, socket, head, upstreamPort, path) {
   touch();
 }
 
+// The token travels as ?token= because Playwright strips query strings from
+// the URLs it prints in errors and logs.
 function tokenMatches(url) {
-  const given = Buffer.from(new URL(url, "http://x").pathname.slice(1));
+  const given = Buffer.from(new URLSearchParams(url.split("?")[1] ?? "").get("token") ?? "");
   return given.length === token.length && timingSafeEqual(given, token);
 }
 
-const playwright = http.createServer((req, res) => {
+// Chrome's own DNS-rebinding guard: only an IP, localhost, or a Railway private
+// hostname, and no browser Origin (CDP libraries send none).
+function cdpAllowed(req) {
+  const host = req.headers.host ?? "";
+  const name = host.startsWith("[") ? host.slice(1, host.indexOf("]")) : host.replace(/:[0-9]+$/, "");
+  const nameAllowed = net.isIP(name) !== 0 || name === "localhost" || name.endsWith(".railway.internal");
+  return nameAllowed && req.headers.origin === undefined;
+}
+
+let ready = false;
+function upstreamsReady() {
+  if (ready) return Promise.resolve(true);
+  const probe = (upstreamPort) =>
+    new Promise((resolve) => {
+      const socket = net.connect(upstreamPort, "127.0.0.1", () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.on("error", () => resolve(false));
+    });
+  return Promise.all([probe(playwrightUpstream), probe(cdpUpstream)]).then((ok) => (ready = ok.every(Boolean)));
+}
+
+function cdpRequest(path, method = "GET") {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: "127.0.0.1", port: cdpUpstream, path, method, timeout: 10_000 },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 502, headers: res.headers, body: Buffer.concat(chunks) }));
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error("CDP upstream timed out")));
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+// Pages a CDP client opened in the shared browser's default context outlive
+// the client. Once no CDP client is left, replace them with one blank page.
+async function resetSharedBrowser() {
+  const targets = JSON.parse((await cdpRequest("/json/list")).body.toString());
+  const pages = targets.filter((target) => target.type === "page");
+  if (cdpSessions > 0) return;
+  await cdpRequest("/json/new?about:blank", "PUT");
+  for (const page of pages) {
+    if (cdpSessions > 0) return;
+    await cdpRequest(`/json/close/${page.id}`);
+  }
+}
+function cdpClosed() {
+  cdpSessions--;
+  if (cdpSessions === 0) resetSharedBrowser().catch((error) => console.error(`CDP reset failed: ${error.message}`));
+}
+
+const playwright = http.createServer(async (req, res) => {
   if (req.url === "/healthz") {
-    res.writeHead(200, { "content-type": "application/json" });
-    return res.end(JSON.stringify({ sessions, maxSessions }));
+    const ok = await upstreamsReady();
+    res.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ ok, sessions, maxSessions }));
   }
   res.writeHead(404).end();
 });
 playwright.on("upgrade", (req, socket, head) => {
+  socket.on("error", () => socket.destroy());
   if (!tokenMatches(req.url)) return refuse(socket, "401 Unauthorized");
   forward(req, socket, head, playwrightUpstream, "/pw");
 });
 
 // CDP clients read /json/version first and connect to the URL in it; Chrome
 // writes its own loopback address there, so swap in the Host the client used.
-const cdp = http.createServer((req, res) => {
-  const upstream = http.request(
-    {
-      host: "127.0.0.1",
-      port: cdpUpstream,
-      path: req.url,
-      method: req.method,
-      headers: { host: `127.0.0.1:${cdpUpstream}` },
-    },
-    (upstreamRes) => {
-      const chunks = [];
-      upstreamRes.on("data", (chunk) => chunks.push(chunk));
-      upstreamRes.on("end", () => {
-        const body = Buffer.concat(chunks)
-          .toString()
-          .replaceAll(`127.0.0.1:${cdpUpstream}`, req.headers.host ?? `localhost:${cdpPort}`);
-        res.writeHead(upstreamRes.statusCode ?? 502, {
-          "content-type": upstreamRes.headers["content-type"] ?? "application/json",
-        });
-        res.end(body);
-      });
-    },
-  );
-  upstream.on("error", () => res.writeHead(502).end());
-  req.pipe(upstream);
+const cdp = http.createServer(async (req, res) => {
+  if (!cdpAllowed(req) || req.method !== "GET" && req.method !== "PUT") return res.writeHead(403).end();
+  try {
+    const upstream = await cdpRequest(req.url, req.method);
+    const body = upstream.body.toString().replaceAll(`127.0.0.1:${cdpUpstream}`, () => req.headers.host);
+    res.writeHead(upstream.status, { "content-type": upstream.headers["content-type"] ?? "application/json" });
+    res.end(body);
+  } catch {
+    res.writeHead(502).end();
+  }
 });
-cdp.on("upgrade", (req, socket, head) => forward(req, socket, head, cdpUpstream, req.url));
+cdp.on("upgrade", (req, socket, head) => {
+  socket.on("error", () => socket.destroy());
+  if (!cdpAllowed(req) || !req.url.startsWith("/devtools/")) return refuse(socket, "403 Forbidden");
+  if (sessions >= maxSessions) return refuse(socket, "503 Service Unavailable");
+  cdpSessions++;
+  forward(req, socket, head, cdpUpstream, req.url, cdpClosed);
+});
 
 playwright.listen(port, "::", () => console.log(`playwright on :${port}, cap ${maxSessions}`));
 cdp.listen(cdpPort, "::", () => console.log(`cdp on :${cdpPort}`));

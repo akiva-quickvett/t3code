@@ -59,8 +59,10 @@ https://t3code-qa-bot.up.railway.app/pair#token=<Token>
 ```
 
 `railway ssh` lands as root, and root's own home is not on the volume. For
-anything but `t3 pair`, run `su t3` first, or files end up root-owned under
-`/home/t3` or lost in `/root` on the next deploy.
+anything but `t3 pair`, run `su - t3` first, or files end up root-owned under
+`/home/t3` or lost in `/root` on the next deploy. The login shell also drops
+the `RAILWAY_API_TOKEN` that `railway ssh` puts in its session, so nothing you
+start there, an agent included, holds a Railway credential.
 
 Each new browser or device needs its own `t3 pair`. Revoke sessions with
 `t3 auth session list` and `t3 auth session revoke <id>`, or in
@@ -140,6 +142,28 @@ The 50 GB volume is billed on what is used, not its size. Expect roughly
 $5-15 a month idle, more with heavy agent use. The 8 GB and 4 vCPU limits cap
 the worst case; raise them in **Settings → Resources** if agents run out of
 memory.
+
+## Railway status for agents
+
+Agents read status, deployments, logs and metrics of `brave-warmth` production
+and staging through two read-only proxies in `QA Bot`
+([railway-readonly-proxy](https://github.com/akiva-quickvett/railway-readonly-proxy)),
+so this instance never holds a Railway credential. `railway-proxy-prod` and
+`railway-proxy-stg` each hold a project token for one environment; this service
+gets their private URLs and proxy keys as reference variables:
+
+```bash
+curl -H "Authorization: Bearer $RAILWAY_PROXY_PROD_KEY" "$RAILWAY_PROXY_PROD_URL/v1/overview"
+curl -H "Authorization: Bearer $RAILWAY_PROXY_PROD_KEY" \
+  "$RAILWAY_PROXY_PROD_URL/v1/logs/steddy-backend?limit=50&filter=@level:error"
+curl -H "Authorization: Bearer $RAILWAY_PROXY_STG_KEY" \
+  "$RAILWAY_PROXY_STG_URL/v1/services/steddy-backend/metrics?minutes=60"
+```
+
+Endpoints and parameters are in the proxy's README. Never `railway login` or set
+`RAILWAY_TOKEN` in this instance. To rotate a key, set the proxy's
+`PROXY_API_KEYS` to a single new key and redeploy this service; the reference
+variable carries the whole value, so a comma-separated pair would break it.
 
 ## Limits
 

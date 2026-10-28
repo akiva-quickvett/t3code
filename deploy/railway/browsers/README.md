@@ -8,7 +8,7 @@ stand-in for a hosted browser service: swap the URL variables to move.
 | --- | --- |
 | Service | `browsers`, private host `browsers.railway.internal` |
 | Image | `mcr.microsoft.com/playwright:v1.60.0-noble`, Chromium only |
-| Playwright server | port `3000`, path `/<BROWSERS_TOKEN>`, one fresh browser per connection |
+| Playwright server | port `3000`, `/?token=<BROWSERS_TOKEN>`, one fresh browser per connection |
 | Raw CDP | port `9222`, private only, one shared browser per replica |
 | Cap | `MAX_SESSIONS` connections per replica (default 6), then 503 |
 | Idle timeout | `IDLE_TIMEOUT_SECONDS` with no traffic either way closes a session (default 300) |
@@ -19,25 +19,35 @@ stand-in for a hosted browser service: swap the URL variables to move.
 [`entrypoint.mjs`](entrypoint.mjs) starts `playwright run-server` and one
 Chromium with remote debugging, both on loopback, and fronts them:
 
-- Port `$PORT` accepts WebSocket upgrades at `/<BROWSERS_TOKEN>` only (401
-  otherwise) and serves `GET /healthz` (`{"sessions", "maxSessions"}`).
-- Port `$CDP_PORT` proxies `/json/*` and the DevTools WebSockets. Chrome only
-  accepts a loopback Host, so the front rewrites it, and puts the Host the client
+- Port `$PORT` accepts WebSocket upgrades only with `?token=<BROWSERS_TOKEN>`
+  (401 otherwise). The token is a query parameter because Playwright strips
+  query strings from the URLs it prints in errors and logs. `GET /healthz`
+  returns 503 until both browsers are listening, then
+  `{"ok", "sessions", "maxSessions"}`.
+- Port `$CDP_PORT` proxies `/json/*` and `/devtools/*` WebSockets. Chrome only
+  accepts a loopback Host, so the front rewrites it and puts the Host the client
   used into the `webSocketDebuggerUrl` it returns, so `connectOverCDP` works
-  through `browsers.railway.internal`.
+  through `browsers.railway.internal`. In Chrome's place it allows only an IP,
+  `localhost` or a `*.railway.internal` Host, and refuses any request with an
+  `Origin`, which blocks DNS rebinding from pages these browsers open. CDP
+  libraries send no `Origin`.
 - Both ports share one session count. Above `MAX_SESSIONS`, a new connection
   gets `503` with `Retry-After: 1`. The private hostname resolves to every
   replica, so a retry can land on another one.
 - If either child exits, the container exits and Railway restarts it.
 
-CDP clients share one browser per replica: close the contexts you open.
+CDP clients share one browser per replica. Use your own context
+(`browser.newContext()`) and close it; pages in the default context, and its
+cookies, are visible to the next client. When the last CDP client disconnects,
+the front closes every page it left and opens one blank page; cookies in the
+default context last until the replica restarts.
 
 ## Connect
 
 The `AI Agent Host` service has both URLs as reference variables, so the token
 never leaves Railway:
 
-- `BROWSERS_WS_URL` = `ws://${{browsers.RAILWAY_PRIVATE_DOMAIN}}:${{browsers.PORT}}/${{browsers.BROWSERS_TOKEN}}`
+- `BROWSERS_WS_URL` = `ws://${{browsers.RAILWAY_PRIVATE_DOMAIN}}:${{browsers.PORT}}/?token=${{browsers.BROWSERS_TOKEN}}`
 - `BROWSERS_CDP_URL` = `http://${{browsers.RAILWAY_PRIVATE_DOMAIN}}:${{browsers.CDP_PORT}}`
 
 Playwright protocol. The client's Playwright version must match the server's
@@ -74,8 +84,9 @@ these variables.
 
 Off by default. To reach the Playwright server from another machine, add a
 public domain for port 3000 (**Settings → Networking**); clients then use
-`wss://<domain>/<BROWSERS_TOKEN>`. The token is the only guard, so never
-publish the CDP port. Read the token with
+`wss://<domain>/?token=<BROWSERS_TOKEN>`. The token is the only guard, so never
+publish the CDP port, and an edge proxy may log query strings: rotate the token
+if the domain stays up. Read the token with
 `railway variables --service browsers --environment "QA Bot"`; rotate it by
 setting a new value and redeploying.
 
