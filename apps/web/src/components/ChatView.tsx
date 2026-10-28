@@ -206,6 +206,7 @@ import {
   timelineContentOverflowsViewport,
   readTimelinePosition,
   observeTimelineRun,
+  shouldAnimateTimelineScroll,
   type TimelineRunObservation,
   type TimelineScrollMode,
 } from "./chat/timelineScrollAnchoring";
@@ -4216,7 +4217,17 @@ export default function ChatView(props: ChatViewProps) {
     // The anchored end space must be gone before the scroll measures, or the
     // list lands short of the real end (#6519).
     requestAnimationFrame(() => {
-      void legendListRef.current?.scrollToEnd?.({ animated });
+      const list = legendListRef.current;
+      const scrollNode = list?.getScrollableNode();
+      void list?.scrollToEnd?.({
+        animated:
+          animated &&
+          scrollNode !== undefined &&
+          shouldAnimateTimelineScroll(
+            scrollNode.scrollHeight - scrollNode.clientHeight - scrollNode.scrollTop,
+            scrollNode.clientHeight,
+          ),
+      });
     });
   };
   const scrollToEndStable = useStableCallback(scrollToEnd);
