@@ -166,10 +166,8 @@ async function resetSharedBrowser() {
   const pages = targets.filter((target) => target.type === "page");
   if (cdpSessions > 0) return;
   await cdpRequest("/json/new?about:blank", "PUT");
-  for (const page of pages) {
-    if (cdpSessions > 0) return;
-    await cdpRequest(`/json/close/${page.id}`);
-  }
+  // Listed before any new client attached, so none of these are its pages.
+  for (const page of pages) await cdpRequest(`/json/close/${page.id}`);
 }
 function cdpClosed() {
   cdpSessions--;
