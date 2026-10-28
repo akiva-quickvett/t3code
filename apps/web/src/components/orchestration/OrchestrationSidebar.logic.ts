@@ -6,7 +6,12 @@ import {
   type OrchestrationStructureTree,
 } from "@t3tools/client-runtime/state/orchestration-tree";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { foldOrchestrationDots, type OrchestrationRollup } from "@t3tools/shared/orchestrationTree";
+import {
+  foldOrchestrationDots,
+  type OrchestrationClassification,
+  type OrchestrationRollup,
+  type OrchestrationRow,
+} from "@t3tools/shared/orchestrationTree";
 
 /** One environment's part of the selected tab: a meta's tree, or that environment's No meta. */
 export interface OrchestrationSection {
@@ -98,6 +103,107 @@ export function sameSections(
         section.tree === right[index]!.tree,
     )
   );
+}
+
+/**
+ * The settled rows that may hide: those with nothing live in their roll-up.
+ * Cells and other non-row children feed only their row's roll-up, so hiding a
+ * row whose child needs you or works would leave the tab's badge with nothing
+ * to click. Finished children are usually not settled, so being unsettled alone
+ * does not keep a row. The roll-up folds to its highest dot, so a working child
+ * beside a failed, limited or woke one is not seen as working.
+ */
+export function hideableSettledKeys(
+  classification: OrchestrationClassification,
+  settledKeys: ReadonlySet<string>,
+): ReadonlyArray<string> {
+  const keys: string[] = [];
+  if (settledKeys.size === 0) return keys;
+  const visit = (rows: ReadonlyArray<OrchestrationRow>) => {
+    for (const row of rows) {
+      const live = row.rollup.needsYouCount > 0 || row.rollup.dot === "working";
+      if (!live && settledKeys.has(row.key)) keys.push(row.key);
+      visit(row.pods);
+    }
+  };
+  for (const tree of [...Object.values(classification.trees), classification.noMeta]) {
+    for (const project of tree.projects) {
+      for (const branch of project.branches) visit(branch.rows);
+    }
+  }
+  return keys;
+}
+
+function withoutHiddenRows(
+  rows: ReadonlyArray<OrchestrationStructureRow>,
+  hidden: (key: string) => boolean,
+): ReadonlyArray<OrchestrationStructureRow> {
+  let changed = false;
+  const kept: OrchestrationStructureRow[] = [];
+  for (const row of rows) {
+    const pods = withoutHiddenRows(row.pods, hidden);
+    // A row still shown below keeps its ancestors, so nothing shown is orphaned.
+    if (pods.length === 0 && hidden(row.key)) {
+      changed = true;
+      continue;
+    }
+    if (pods !== row.pods) changed = true;
+    kept.push(pods === row.pods ? row : { ...row, pods });
+  }
+  return changed ? kept : rows;
+}
+
+function withoutHiddenTree(
+  tree: OrchestrationStructureTree,
+  hidden: (key: string) => boolean,
+): OrchestrationStructureTree {
+  let changed = false;
+  const projects: Array<OrchestrationStructureTree["projects"][number]> = [];
+  for (const project of tree.projects) {
+    const branches: Array<(typeof project.branches)[number]> = [];
+    let projectChanged = false;
+    for (const branch of project.branches) {
+      const rows = withoutHiddenRows(branch.rows, hidden);
+      if (rows !== branch.rows) projectChanged = true;
+      if (rows.length > 0) branches.push(rows === branch.rows ? branch : { ...branch, rows });
+    }
+    if (projectChanged || branches.length === 0) changed = true;
+    if (branches.length > 0) projects.push(projectChanged ? { ...project, branches } : project);
+  }
+  return changed ? { projects } : tree;
+}
+
+/**
+ * Leaves out the rows in `settledKeys` (from `hideableSettledKeys`), as the
+ * chat view files settled threads under its collapsed Settled shelf. Such a row
+ * stays while a row below it shows, and `keepKey` (the routed thread) always
+ * stays. Returns `sections` itself when nothing is hidden.
+ */
+export function withoutSettledRows(
+  sections: ReadonlyArray<OrchestrationSection>,
+  settledKeys: ReadonlySet<string>,
+  keepKey: string | null,
+): ReadonlyArray<OrchestrationSection> {
+  if (settledKeys.size === 0) return sections;
+  const hidden = (key: string) => key !== keepKey && settledKeys.has(key);
+  const next = sections.map((section) => {
+    const tree = withoutHiddenTree(section.tree, hidden);
+    return tree === section.tree ? section : { ...section, tree };
+  });
+  return next.every((section, index) => section === sections[index]) ? sections : next;
+}
+
+/** Thread rows in the tab, collapsed or not; the drop from hiding is the hidden count. */
+export function countThreadRows(sections: ReadonlyArray<OrchestrationSection>): number {
+  const countRows = (rows: ReadonlyArray<OrchestrationStructureRow>): number =>
+    rows.reduce((sum, row) => sum + 1 + countRows(row.pods), 0);
+  let count = 0;
+  for (const { tree } of sections) {
+    for (const project of tree.projects) {
+      for (const branch of project.branches) count += countRows(branch.rows);
+    }
+  }
+  return count;
 }
 
 /**

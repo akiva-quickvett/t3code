@@ -7,6 +7,7 @@ import {
 import { type EnvironmentId, ProjectId, type ScopedThreadRef } from "@t3tools/contracts";
 import type { OrchestrationRollup } from "@t3tools/shared/orchestrationTree";
 import { useNavigate } from "@tanstack/react-router";
+import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";
 import { ChevronRightIcon, FolderIcon, GitBranchIcon } from "lucide-react";
 import {
@@ -22,6 +23,7 @@ import {
   useState,
 } from "react";
 
+import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { useThreadRouteRef } from "../../hooks/useThreadRouteTarget";
 import { cn } from "../../lib/utils";
@@ -30,6 +32,7 @@ import { orchestrationTree } from "../../state/orchestrationTree";
 import { environmentThreadShells } from "../../state/threads";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { useUiStateStore } from "../../uiStateStore";
+import { Button } from "../ui/button";
 import { MetaTabs } from "./MetaTabs";
 import {
   createMetaTabAtoms,
@@ -40,8 +43,10 @@ import {
 import { OrchestrationDot } from "./OrchestrationDot";
 import {
   buildOrchestrationRows,
+  countThreadRows,
   expandKeys,
   foldRollups,
+  hideableSettledKeys,
   orchestrationSections,
   type OrchestrationSection,
   type OrchestrationViewRow,
@@ -50,6 +55,7 @@ import {
   setCollapsed,
   splitRowKeys,
   treeKeyAction,
+  withoutSettledRows,
 } from "./OrchestrationSidebar.logic";
 import { StaleBanner, useEnvironmentStale } from "./StaleBanner";
 import { StatsStrip, type StatsStripMeta } from "./StatsStrip";
@@ -93,6 +99,33 @@ const sectionsAtom = Atom.family((key: string) => {
     previous = next;
     return next;
   }).pipe(Atom.withLabel(`web-orchestration-sections:${key}`));
+});
+
+const SHOW_SETTLED_KEY = "t3code:orchestration:show-settled";
+
+// Keyed by `joinEnvironmentIds`: the settled rows that may hide. Keeps its
+// reference while the set is unchanged, so streaming ticks stop here.
+const hideableSettledKeysAtom = Atom.family((environmentIdsKey: string) => {
+  const environmentIds = splitEnvironmentIds(environmentIdsKey);
+  let previous: ReadonlySet<string> = new Set<string>();
+  return Atom.make((get) => {
+    const next = new Set<string>();
+    for (const environmentId of environmentIds) {
+      const settledKeys = new Set<string>();
+      for (const thread of get(environmentThreadShells.environmentThreadsAtom(environmentId))) {
+        if (thread.settledOverride === "settled") {
+          settledKeys.add(scopedThreadKey({ environmentId, threadId: thread.id }));
+        }
+      }
+      const classification = get(orchestrationTree.classificationAtom(environmentId));
+      for (const key of hideableSettledKeys(classification, settledKeys)) next.add(key);
+    }
+    if (next.size === previous.size && [...next].every((key) => previous.has(key))) {
+      return previous;
+    }
+    previous = next;
+    return next;
+  }).pipe(Atom.withLabel(`web-orchestration-hideable-settled-keys:${environmentIdsKey}`));
 });
 
 // Keyed by `JSON.stringify([environmentId, rollupRowKeys])`; read only while collapsed.
@@ -156,12 +189,19 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
   const tabKeys = useAtomValue(metaTabAtoms.tabKeysAtom(environmentIdsKey));
   const storedTabKey = useUiStateStore((state) => state.selectedMetaThreadKey);
   const tabKey = resolveSelectedTabKey(tabKeys, storedTabKey);
-  const sections = useAtomValue(sectionsAtom(JSON.stringify([tabKey, environmentIdsKey])));
+  const tabSections = useAtomValue(sectionsAtom(JSON.stringify([tabKey, environmentIdsKey])));
+  const hideableKeys = useAtomValue(hideableSettledKeysAtom(environmentIdsKey));
+  const [showSettled, setShowSettled] = useLocalStorage(SHOW_SETTLED_KEY, false, Schema.Boolean);
   const registry = useContext(RegistryContext);
   const collapsedKeys = useAtomValue(collapsedKeysAtom);
-  const rows = buildOrchestrationRows(sections, collapsedKeys);
   const routeRef = useThreadRouteRef();
   const routeKey = routeRef === null ? null : scopedThreadKey(routeRef);
+  // The routed row stays, so settling the thread you are on leaves it in place.
+  const unsettledSections = withoutSettledRows(tabSections, hideableKeys, routeKey);
+  // Counted against the hiding result whichever mode shows, so the toggle's
+  // count holds steady when pressed.
+  const hiddenCount = countThreadRows(tabSections) - countThreadRows(unsettledSections);
+  const rows = buildOrchestrationRows(showSettled ? tabSections : unsettledSections, collapsedKeys);
   const navigate = useNavigate();
   const treeRef = useRef<HTMLDivElement>(null);
   const [activeKey, setActiveKey] = useState<string | null>(null);
@@ -207,11 +247,13 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
     if (routeKey === null || tabKey === null) return;
     const target = JSON.stringify([tabKey, routeKey]);
     if (revealedFor.current === target) return;
-    const path = revealPath(sections, routeKey);
+    // Hiding settled rows keeps the routed row and its ancestors, so the whole
+    // tab gives the same path.
+    const path = revealPath(tabSections, routeKey);
     if (path === null) return;
     revealedFor.current = target;
     expandPath(routeKey, path);
-  }, [routeKey, tabKey, sections]);
+  }, [routeKey, tabKey, tabSections]);
 
   const visibleKey = (key: string | null) =>
     key !== null && rows.some((row) => row.key === key && row.type !== "banner") ? key : null;
@@ -246,7 +288,7 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
     if (document.activeElement !== null && document.activeElement !== document.body) return;
     // Prefer the nearest ancestor still shown, as when its slice was collapsed.
     const fallback =
-      revealPath(sections, lostKey)?.find((key) => visibleKey(key) !== null) ??
+      revealPath(tabSections, lostKey)?.find((key) => visibleKey(key) !== null) ??
       currentKey ??
       firstKey;
     if (fallback !== null) {
@@ -342,7 +384,7 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
       <MetaTabs environmentIds={props.environmentIds} onClear={props.onClearMeta} />
       {rows.length === 0 ? (
         <div className="min-h-0 flex-1 px-2.5 py-1 text-muted-foreground text-xs">
-          No slices or pods here yet.
+          {hiddenCount > 0 ? "Everything here is settled." : "No slices or pods here yet."}
         </div>
       ) : (
         <div
@@ -367,6 +409,18 @@ export function OrchestrationSidebar(props: OrchestrationSidebarProps) {
               onRename={rename}
             />
           ))}
+        </div>
+      )}
+      {(hiddenCount > 0 || showSettled) && (
+        <div className="flex shrink-0 px-1.5 py-1">
+          <Button
+            variant="ghost-muted"
+            size="micro"
+            aria-pressed={showSettled}
+            onClick={() => setShowSettled((value) => !value)}
+          >
+            Show settled ({hiddenCount})
+          </Button>
         </div>
       )}
       {props.environmentIds.map((environmentId) => (
