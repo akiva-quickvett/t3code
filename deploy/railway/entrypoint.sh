@@ -16,8 +16,18 @@ for file in /opt/t3-home-skel/.[!.]*; do
   [ -e "$target" ] || cp -a "$file" "$target"
 done
 
-mkdir -p "$home/.t3" "$home/.claude" "$home/.config" "$home/.local/bin" "$home/.ssh" "$home/work"
-chmod 700 "$home/.ssh"
+mkdir -p "$home/.t3" "$home/.claude" "$home/.config" "$home/.local/bin" "$home/.ssh" "$home/.tailscale" "$home/work"
+chmod 700 "$home/.ssh" "$home/.tailscale"
+
+# Through the hub, Claude Code drops to a 5 minute prompt cache unless asked
+# for 1 hour, the subscription default. Never overrides an explicit choice.
+settings=$home/.claude/settings.json
+if [ ! -s "$settings" ]; then
+  echo '{"promptCacheTtl": "1h"}' > "$settings"
+elif ! jq -e 'has("promptCacheTtl")' "$settings" >/dev/null 2>&1; then
+  jq '.promptCacheTtl = "1h"' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" \
+    || rm -f "$settings.tmp"
+fi
 
 # Fresh volumes and anything a root shell created belong to root. Only touch
 # what is mis-owned so a large ~/work does not get rewritten on every boot,
@@ -36,9 +46,67 @@ redact() {
     -e '/^[[:space:]]*[█▀▄][█▀▄[:space:]]*$/d'
 }
 
+as_user() {
+  setpriv --reuid="$user" --regid="$user" --init-groups \
+    env -u TS_AUTHKEY HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash "$@"
+}
+
+# Keeps a helper running; its exit never takes the server down.
+keep() {
+  local name=$1
+  shift
+  while :; do
+    "$@" || true
+    echo "$name exited, restarting in 10 s"
+    sleep 10
+  done
+}
+
+# Tailscale, so agents reach the CLIProxyAPI hub (README: Hub over Tailscale).
+# Userspace networking because Railway has no TUN device; the state on the
+# volume keeps the node's identity, so TS_AUTHKEY is only needed once.
+ts_join() {
+  local state="" keyfile
+  for _ in $(seq 30); do
+    state=$(tailscale status --json 2>/dev/null | jq -r '.BackendState // empty') || true
+    case "$state" in "" | NoState | Starting) sleep 1 ;; *) break ;; esac
+  done
+  if [ "$state" = NeedsLogin ] && [ -n "${TS_AUTHKEY:-}" ]; then
+    keyfile=$(mktemp)
+    printf '%s' "$TS_AUTHKEY" > "$keyfile"
+    tailscale up --auth-key="file:$keyfile" --hostname=qa-bot-t3 --accept-dns=false \
+      --accept-routes=false --shields-up --timeout=60s >/dev/null 2>&1 \
+      || echo "tailscale: up failed (expired or used auth key?)"
+    rm -f "$keyfile"
+  fi
+  echo "tailscale: $(tailscale status --json 2>/dev/null \
+    | jq -r '"\(.BackendState) \(.Self.DNSName // "")"' || echo unreachable)"
+}
+
+if [ -n "${TS_AUTHKEY:-}" ] || [ -s "$home/.tailscale/tailscaled.state" ]; then
+  install -d -o "$user" -g "$user" -m 755 /run/tailscale
+  keep tailscaled as_user tailscaled --tun=userspace-networking \
+    --state="$home/.tailscale/tailscaled.state" \
+    --socket=/run/tailscale/tailscaled.sock \
+    --outbound-http-proxy-listen=127.0.0.1:1055 --socks5-server=127.0.0.1:1056 \
+    > "$home/.tailscale/tailscaled.log" 2>&1 &
+  ts_join &
+  keep hub-forward as_user node /usr/local/lib/hub-forward.mjs &
+else
+  echo "tailscale: off (no TS_AUTHKEY and no saved state)"
+fi
+
+# Claude Code goes through the hub only once its access key is set; without
+# one it keeps its own login.
+if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+  export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8317}"
+else
+  unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
+fi
+
 cd "$home/work"
 exec setpriv --reuid="$user" --regid="$user" --init-groups \
-  env HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash \
+  env -u TS_AUTHKEY HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash \
   node /opt/t3code/apps/server/dist/bin.mjs serve \
   --host 0.0.0.0 --port "${PORT:-8080}" "$home/work" \
   > >(redact) 2>&1

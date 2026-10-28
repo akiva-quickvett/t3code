@@ -55,6 +55,18 @@ RUN UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_BIN_DIR=/usr/local/bin \
     && python3 -m venv --help >/dev/null \
     && pip --version
 
+# Tailscale's static build for the CLIProxyAPI hub (README: Hub over
+# Tailscale). Railway runs amd64; bump the version and its checksum together.
+ARG TAILSCALE_VERSION=1.104.4
+ARG TAILSCALE_SHA256=624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
+RUN curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz" \
+       -o /tmp/tailscale.tgz \
+    && echo "${TAILSCALE_SHA256}  /tmp/tailscale.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/tailscale.tgz -C /usr/local/bin --strip-components=1 \
+       "tailscale_${TAILSCALE_VERSION}_amd64/tailscale" "tailscale_${TAILSCALE_VERSION}_amd64/tailscaled" \
+    && rm /tmp/tailscale.tgz \
+    && tailscale version
+
 # The image's uid 1000 user becomes t3. Its home is the Railway volume; the
 # skeleton is copied in by the entrypoint on first boot.
 RUN usermod -l t3 -d /home/t3 node \
@@ -69,6 +81,7 @@ RUN npm install -g "$(node -p 'require("/opt/t3code/package.json").packageManage
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 COPY deploy/railway/entrypoint.sh /usr/local/bin/t3-entrypoint
+COPY deploy/railway/hub-forward.mjs /usr/local/lib/hub-forward.mjs
 
 # `railway ssh` lands as root. Running t3 as root would leave root-owned
 # files in ~/.t3, so the CLI always drops to the t3 user.

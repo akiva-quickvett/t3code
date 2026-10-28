@@ -25,8 +25,11 @@ redeploys.
   release builds.
 - [`entrypoint.sh`](entrypoint.sh) runs as root on every boot: it copies
   `.bashrc` and `.profile` into the home only if they are missing, creates the
-  home directories below, gives anything not owned by `t3` back to `t3`, and
-  starts `t3 serve --host 0.0.0.0 --port $PORT ~/work` as `t3`.
+  home directories below, adds `"promptCacheTtl": "1h"` to
+  `~/.claude/settings.json` if that key is missing, gives anything not owned by
+  `t3` back to `t3`, starts Tailscale and the hub forwarder when configured
+  ([Hub over Tailscale](#hub-over-tailscale)), and starts
+  `t3 serve --host 0.0.0.0 --port $PORT ~/work` as `t3`.
 - `t3 serve` prints a fresh admin pairing token, its URL and a QR code at every
   start. The entrypoint strips all three from stdout, so the deploy logs show
   `Token: [redacted]`. Pairing links come from `t3 pair` instead.
@@ -39,8 +42,9 @@ redeploys.
 
 Service settings (not in a config file): Dockerfile path
 `deploy/railway/Dockerfile` (also set as `RAILWAY_DOCKERFILE_PATH`), healthcheck
-`/`, restart policy always, the limits above. No other variables are set; the
-server needs none.
+`/`, restart policy always, the limits above. The server itself needs no
+variables; the others on the service are for the hub, the Railway proxies and
+the S3 proxy.
 
 ## Pair a browser
 
@@ -95,6 +99,7 @@ Everything under `/home/t3`, which is the volume:
 - `~/.t3`: T3 Code's database, settings, secrets and logs (`T3CODE_HOME`
   default)
 - `~/.claude` and `~/.claude.json`: Claude Code login and settings
+- `~/.tailscale`: the node's Tailscale identity and `tailscaled.log`
 - `~/.config` (gh, git), `~/.local` (user-installed tools, on `PATH` through
   `~/.local/bin`), `~/.ssh`, `~/.gitconfig`
 - `~/work`: repositories and the server's working directory
@@ -168,6 +173,76 @@ Endpoints and parameters are in the proxy's README. Never `railway login` or set
 `RAILWAY_TOKEN` in this instance. To rotate a key, set the proxy's
 `PROXY_API_KEYS` to a single new key and redeploy this service; the reference
 variable carries the whole value, so a comma-separated pair would break it.
+
+## Hub over Tailscale
+
+Claude Code in this instance can run on the CLIProxyAPI hub at home
+(`omarchy`), so agents use the accounts logged in there instead of signing in
+from a datacenter IP. The hub is reached over Tailscale; nothing about it is
+public.
+
+What runs, as `t3`, once the node has joined the tailnet:
+
+- `tailscaled` in userspace mode (Railway has no TUN device), with its state on
+  the volume, so the node keeps its identity across redeploys. It offers an
+  HTTP proxy on `127.0.0.1:1055` and SOCKS5 on `127.0.0.1:1056`.
+- [`hub-forward.mjs`](hub-forward.mjs) on `127.0.0.1:8317`: plain HTTP for
+  local clients, forwarded over TLS to `HUB_URL` through that proxy, so nothing
+  else needs proxy settings. When the hub cannot be reached it answers 502 with
+  the reason.
+
+Variables on `AI Agent Host`:
+
+| Variable                                     | Value                                                     |
+| -------------------------------------------- | --------------------------------------------------------- |
+| `TS_AUTHKEY`                                 | Tailscale auth key, used only for the first join (sealed) |
+| `HUB_URL`                                    | `https://omarchy.tail43a582.ts.net:8317` (the default)    |
+| `ANTHROPIC_AUTH_TOKEN`                       | The hub's access key                                      |
+| `ANTHROPIC_BASE_URL`                         | `http://127.0.0.1:8317`                                   |
+| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | `1`                                                       |
+
+The entrypoint passes the last three to the server, and so to its agents, only
+while `ANTHROPIC_AUTH_TOKEN` is set; without it Claude Code uses its own login
+as before. `TS_AUTHKEY` never reaches the server or agents. Once the node has
+joined, the key can expire or be removed.
+
+To make the auth key, in the Tailscale admin console:
+
+1. In **Access controls**, define the tag and let it reach only the hub's port.
+   Replace the hub's address and keep your other rules; a default rule that
+   lets `*` reach `*` would also cover `tag:qa-bot`, so narrow it to your
+   users (`autogroup:member`):
+
+   ```json
+   "tagOwners": { "tag:qa-bot": ["autogroup:admin"] },
+   "hosts": { "omarchy": "100.x.y.z" },
+   "grants": [
+     { "src": ["autogroup:member"], "dst": ["*"], "ip": ["*"] },
+     { "src": ["tag:qa-bot"], "dst": ["omarchy"], "ip": ["tcp:8317"] }
+   ]
+   ```
+
+2. In **Settings → Keys**, generate an auth key: reusable off, ephemeral off,
+   tag `tag:qa-bot`. Tagged nodes do not expire.
+3. Set it as `TS_AUTHKEY` on the service (sealed) and redeploy. The node joins
+   as `qa-bot-t3` with shields up, so nothing on the tailnet can connect to it.
+
+Check it from a shell in the instance (`railway ssh`, then `su - t3`):
+
+```bash
+tailscale status
+curl -s 127.0.0.1:8317/v1/models -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN"
+```
+
+`su -` starts a clean environment, so set `ANTHROPIC_AUTH_TOKEN` there by hand,
+or expect a 401 from the hub: that still proves the path. A JSON 502 names the
+broken hop. The deploy log has one `tailscale:` line per boot with the node's
+state; tailscaled's own log is `~/.tailscale/tailscaled.log`.
+
+To roll back, delete `ANTHROPIC_AUTH_TOKEN` and redeploy: Claude Code goes
+back to its own login, and the node stays on the tailnet doing nothing. To
+leave the tailnet too, also delete `TS_AUTHKEY`, remove `~/.tailscale` and
+remove the machine in the admin console.
 
 ## Limits
 
