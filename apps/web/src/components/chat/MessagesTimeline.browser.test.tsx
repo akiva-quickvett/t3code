@@ -1,4 +1,5 @@
 import { RegistryProvider } from "@effect/atom-react";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   ApprovalRequestId,
   CheckpointRef,
@@ -48,6 +49,10 @@ let threadCount = 0;
 
 function baseProps(): Omit<TimelineProps, "timelineEntries"> {
   threadCount += 1;
+  const threadRef = scopeThreadRef(
+    EnvironmentId.make("environment-local"),
+    ThreadId.make(`thread-${threadCount}`),
+  );
   return {
     isWorking: false,
     activeTurnInProgress: false,
@@ -55,7 +60,8 @@ function baseProps(): Omit<TimelineProps, "timelineEntries"> {
     latestRun: null,
     turnDiffSummaries: [],
     runs: [],
-    routeThreadKey: `environment-local:thread-${threadCount}`,
+    routeThreadKey: scopedThreadKey(threadRef),
+    threadDetailRef: threadRef,
     onOpenTurnDiff: () => {},
     onOpenThread: () => {},
     onForkFromRun: async () => {},

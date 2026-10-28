@@ -2868,6 +2868,16 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadKey,
   );
   const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
+  // A held timeline can be a draft's optimistic messages from before its thread existed.
+  const displayedThreadShell = useQuietThreadShell(
+    paintOnlyDisplayedTimeline ? displayedThreadRef : null,
+  );
+  const displayedThreadDetailRef = paintOnlyDisplayedTimeline
+    ? resolveThreadDetailRef(displayedThreadRef, {
+        shellExists: displayedThreadShell !== null,
+        waitForShell: true,
+      })
+    : routeThreadDetailRef;
   const {
     worktreeSetup,
     isPreparingWorktree,
@@ -8081,6 +8091,7 @@ export default function ChatView(props: ChatViewProps) {
                   displayedThreadRef?.environmentId ?? activeThread.environmentId
                 }
                 routeThreadKey={displayedTimelineKey}
+                threadDetailRef={displayedThreadDetailRef}
                 displayThreadKey={displayedTimelineKey}
                 paintOnly={paintOnlyDisplayedTimeline}
                 onOpenTurnDiff={
