@@ -61,10 +61,12 @@ touching IAM.
 ## Deploying on Railway
 
 1. Create an IAM user (or role) with the policy above and an access key.
-2. Deploy this directory as a service. The `Dockerfile` builds it, and
-   `railway.json` sets the `/health` healthcheck and restart policy. Give it no
-   public domain; agents in the same Railway environment reach it on its
-   private domain.
+2. Deploy this directory as a service (root directory
+   `deploy/railway/s3-proxy`); Railway builds the `Dockerfile`. In the service
+   settings, set the healthcheck path to `/health`, the restart policy to
+   Always, and the draining time to 15 seconds so downloads in flight can
+   finish on a redeploy. Give it no public domain; agents in the same Railway
+   environment reach it on its private domain.
 3. Set the service variables:
 
    | Variable                | Value                                                                |
