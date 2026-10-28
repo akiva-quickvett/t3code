@@ -8,3 +8,4 @@
 !**/.env.example
 **/node_modules
 deploy/railway/browsers
+deploy/railway/s3-proxy
