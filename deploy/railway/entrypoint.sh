@@ -81,7 +81,9 @@ ts_join() {
 
 if [ -n "${TS_AUTHKEY:-}" ] || [ -s "$home/.tailscale/tailscaled.state" ]; then
   install -d -o "$user" -g "$user" -m 755 /run/tailscale
-  keep tailscaled as_user tailscaled --tun=userspace-networking \
+  # The Railway-to-hub path drops full 1280-byte tailnet packets: small
+  # replies arrive, TLS handshakes stall. 1200 leaves room.
+  keep tailscaled as_user TS_DEBUG_MTU=1200 tailscaled --tun=userspace-networking \
     --state="$home/.tailscale/tailscaled.state" \
     --socket=/run/tailscale/tailscaled.sock \
     --outbound-http-proxy-listen=127.0.0.1:1055 --socks5-server=127.0.0.1:1056 \
