@@ -46,6 +46,7 @@ const HERDR_VISIBLE_ROWS = 34;
 const VIEWPORT = { width: 1440, height: 900 } as const;
 const SIDEBAR_WIDTH_PX = 256;
 const HEADER_HEIGHT_PX = 32;
+const SHOW_SETTLED_KEY = "t3code:orchestration:show-settled";
 
 const h = await vi.hoisted(async () => {
   const { Atom, AsyncResult, AtomRegistry } = await import("effect/reactivity");
@@ -205,6 +206,8 @@ type Placement = {
   readonly tabKey: string;
   readonly projectId: ProjectId | null;
   readonly isRow: boolean;
+  /** The group's top-level row the thread rolls up into; null under a meta itself. */
+  readonly topRow: OrchestrationV2ThreadShell | null;
 };
 
 const shellById = new Map(seed.threads.map((thread) => [thread.id, thread]));
@@ -214,12 +217,17 @@ const parentOf = (thread: OrchestrationV2ThreadShell) => {
 };
 const roleOf = (thread: OrchestrationV2ThreadShell) => thread.rolePreset?.id ?? null;
 
-function placementOf(thread: OrchestrationV2ThreadShell): Placement | null {
-  if (thread.metaAt != null) return null;
+function chainOf(thread: OrchestrationV2ThreadShell): ReadonlyArray<OrchestrationV2ThreadShell> {
   const chain: OrchestrationV2ThreadShell[] = [];
   for (let next: OrchestrationV2ThreadShell | null = thread; next !== null; next = parentOf(next)) {
     chain.push(next);
   }
+  return chain;
+}
+
+function placementOf(thread: OrchestrationV2ThreadShell): Placement | null {
+  if (thread.metaAt != null) return null;
+  const chain = chainOf(thread);
   const slice = chain.find((link) => roleOf(link) === "slice");
   if (slice !== undefined) {
     const meta = parentOf(slice);
@@ -227,15 +235,28 @@ function placementOf(thread: OrchestrationV2ThreadShell): Placement | null {
       tabKey: meta?.metaAt != null ? keyOf(meta.id) : NO_META_TAB_KEY,
       projectId: slice.projectId,
       isRow: roleOf(thread) === "slice" || roleOf(thread) === "broker",
+      topRow: slice,
     };
   }
   const pod = chain.find((link) => roleOf(link) === "broker");
   if (pod !== undefined) {
-    return { tabKey: NO_META_TAB_KEY, projectId: pod.projectId, isRow: pod === thread };
+    return {
+      tabKey: NO_META_TAB_KEY,
+      projectId: pod.projectId,
+      isRow: pod === thread,
+      topRow: pod,
+    };
   }
   const root = chain.at(-1)!;
-  if (root.metaAt != null) return { tabKey: keyOf(root.id), projectId: null, isRow: false };
-  return { tabKey: NO_META_TAB_KEY, projectId: root.projectId, isRow: root === thread };
+  if (root.metaAt != null) {
+    return { tabKey: keyOf(root.id), projectId: null, isRow: false, topRow: null };
+  }
+  return {
+    tabKey: NO_META_TAB_KEY,
+    projectId: root.projectId,
+    isRow: root === thread,
+    topRow: root,
+  };
 }
 
 function expectedDot(thread: OrchestrationV2ThreadShell): OrchestrationDotKind {
@@ -250,12 +271,42 @@ const placements = seed.threads.flatMap((thread) => {
   const placement = placementOf(thread);
   return placement === null ? [] : [{ thread, ...placement, dot: expectedDot(thread) }];
 });
+// Show settled is off and no route is set, so a settled row is hidden unless
+// something under it is live (its roll-up needs you or folds to working) or a
+// row below it shows. A hidden top-level row takes its whole roll-up with it.
+const DOT_ORDER: ReadonlyArray<OrchestrationDotKind> = [
+  "needs-you",
+  "failed",
+  "limited",
+  "woke",
+  "working",
+  "waiting",
+  "done-unread",
+  "idle",
+];
+const isSettled = (thread: OrchestrationV2ThreadShell) => thread.settledOverride === "settled";
+const under = (row: OrchestrationV2ThreadShell) =>
+  placements.filter((other) => chainOf(other.thread).includes(row));
+const isLive = (row: OrchestrationV2ThreadShell) => {
+  const dots = new Set(under(row).map((placement) => placement.dot));
+  const top = DOT_ORDER.find((dot) => dots.has(dot));
+  return top === "needs-you" || top === "working";
+};
+const settledHidden = (row: OrchestrationV2ThreadShell): boolean =>
+  isSettled(row) &&
+  !isLive(row) &&
+  under(row).every((other) => !other.isRow || other.thread === row || settledHidden(other.thread));
+const shownPlacements = placements.filter(
+  (placement) =>
+    !(placement.isRow && settledHidden(placement.thread)) &&
+    (placement.topRow === null || !settledHidden(placement.topRow)),
+);
 const metaTabKeys = seed.threads.filter((thread) => thread.metaAt != null).map((t) => keyOf(t.id));
 const tabKeys = [...metaTabKeys, NO_META_TAB_KEY];
 
 function expectedNeedsYou(tabKey: string): ReadonlyMap<string, number> {
   const counts = new Map<string, number>();
-  for (const placement of placements) {
+  for (const placement of shownPlacements) {
     if (placement.tabKey !== tabKey || placement.projectId === null) continue;
     const count = counts.get(placement.projectId) ?? 0;
     counts.set(placement.projectId, count + (placement.dot === "needs-you" ? 1 : 0));
@@ -263,6 +314,7 @@ function expectedNeedsYou(tabKey: string): ReadonlyMap<string, number> {
   return counts;
 }
 
+// Tabs count every thread in their tree, shown or not.
 function expectedUnread(tabKey: string): number {
   const meta = tabKey === NO_META_TAB_KEY ? [] : [shellById.get(seedIdOfKey(tabKey))!];
   return [
@@ -276,7 +328,7 @@ function seedIdOfKey(key: string): ThreadId {
 }
 
 const expectedRowCount = (tabKey: string) =>
-  placements.filter((p) => p.tabKey === tabKey && p.isRow).length;
+  shownPlacements.filter((p) => p.tabKey === tabKey && p.isRow).length;
 
 // ── Harness
 
@@ -381,6 +433,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  localStorage.removeItem(SHOW_SETTLED_KEY);
   registry = AtomRegistry.make();
   setThreads(seed.threads);
   useUiStateStore.getState().setSelectedMetaThreadKey(NO_META_TAB_KEY);

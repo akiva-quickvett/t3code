@@ -2,6 +2,8 @@ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   createOrchestrationTreeAtoms,
   NO_META_TAB_KEY,
+  type OrchestrationStructureRow,
+  type OrchestrationStructureTree,
 } from "@t3tools/client-runtime/state/orchestration-tree";
 import type { EnvironmentShellStatus } from "@t3tools/client-runtime/state/shell";
 import { EnvironmentId, type OrchestrationV2ThreadShell, type ThreadId } from "@t3tools/contracts";
@@ -12,6 +14,7 @@ import {
   SEED_SLICELESS_POD_ID,
   seedMetaId,
   seedPodId,
+  seedExpectedDots,
   seedSliceId,
 } from "@t3tools/shared/testing/orchestrationSeedTree";
 import { Atom, AtomRegistry } from "effect/reactivity";
@@ -19,14 +22,18 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildOrchestrationRows,
+  countThreadRows,
   expandKeys,
   foldRollups,
+  hideableSettledKeys,
+  type OrchestrationSection,
   orchestrationSections,
   type OrchestrationViewRow,
   revealPath,
   setCollapsed,
   splitRowKeys,
   treeKeyAction,
+  withoutSettledRows,
 } from "./OrchestrationSidebar.logic";
 
 const environmentId = EnvironmentId.make("environment-seed");
@@ -57,7 +64,8 @@ function makeHarness(threads: ReadonlyArray<OrchestrationV2ThreadShell>) {
           ),
         )
       : null;
-  return { registry, threadsAtom, sections, groupRollup };
+  const classification = () => registry.get(atoms.classificationAtom(environmentId));
+  return { registry, threadsAtom, sections, groupRollup, classification };
 }
 
 /** A readable outline: `<depth><type or kind> <label>[ tags]`. */
@@ -191,6 +199,185 @@ describe("buildOrchestrationRows on the seed tree (F1)", () => {
     // A cell is no row, and another tab's row is not in this one.
     expect(revealPath(meta1, keyOf("seed-cell-1-1" as ThreadId))).toBeNull();
     expect(revealPath(meta1, keyOf(seedPodId(9)))).toBeNull();
+  });
+});
+
+describe("withoutSettledRows", () => {
+  const row = (
+    id: string,
+    kind: OrchestrationStructureRow["kind"],
+    pods: ReadonlyArray<OrchestrationStructureRow> = [],
+  ): OrchestrationStructureRow => ({ key: keyOf(id as ThreadId), kind, pods });
+  const tab = (projects: OrchestrationStructureTree["projects"]) => [
+    { environmentId, tabKey: "tab", tree: { projects } } satisfies OrchestrationSection,
+  ];
+  const settled = (...ids: ReadonlyArray<string>) =>
+    new Set(ids.map((id) => keyOf(id as ThreadId)));
+  const hide = (
+    sections: ReadonlyArray<OrchestrationSection>,
+    settledKeys: ReadonlySet<string>,
+    keepKey: string | null = null,
+  ) => withoutSettledRows(sections, settledKeys, keepKey);
+
+  const sections = tab([
+    {
+      projectId: "web",
+      branches: [
+        {
+          branch: "slice-a",
+          rows: [row("slice-a", "slice", [row("pod-a1", "pod"), row("pod-a2", "pod")])],
+        },
+        { branch: "slice-b", rows: [row("slice-b", "slice", [row("pod-b1", "pod")])] },
+        { branch: null, rows: [row("chat", "ad-hoc")] },
+      ],
+    },
+    {
+      projectId: "server",
+      branches: [{ branch: "slice-c", rows: [row("slice-c", "slice", [row("pod-c1", "pod")])] }],
+    },
+  ]);
+
+  it("hides settled rows and keeps a settled row that holds an unsettled one", () => {
+    const visible = hide(sections, settled("slice-a", "pod-a2", "slice-b", "pod-b1"));
+    expect(outline(buildOrchestrationRows(visible, NONE))).toEqual([
+      "banner",
+      "0 project web",
+      "1 branch slice-a",
+      "2 slice slice-a",
+      "3 pod pod-a1",
+      "1 ad-hoc chat",
+      "0 project server",
+      "1 branch slice-c",
+      "2 slice slice-c",
+      "3 pod pod-c1",
+    ]);
+  });
+
+  it("drops groups left empty and recounts positions and roll-up keys from what shows", () => {
+    const visible = hide(sections, settled("slice-b", "pod-b1", "chat", "slice-c", "pod-c1"));
+    const rows = buildOrchestrationRows(visible, NONE);
+    expect(outline(rows)).toEqual([
+      "banner",
+      "0 project web",
+      "1 branch slice-a",
+      "2 slice slice-a",
+      "3 pod pod-a1",
+      "3 pod pod-a2",
+    ]);
+    expect(rows[1]).toMatchObject({ setSize: 1, posInSet: 1 });
+    expect(rows[2]).toMatchObject({ setSize: 1, posInSet: 1 });
+    expect(
+      rows.flatMap((r) => (r.type === "project" ? splitRowKeys(r.rollupRowKeys) : [])),
+    ).toEqual([keyOf("slice-a" as ThreadId)]);
+    // A tab with nothing left shows no banner either.
+    const all = settled(
+      "slice-a",
+      "pod-a1",
+      "pod-a2",
+      "slice-b",
+      "pod-b1",
+      "chat",
+      "slice-c",
+      "pod-c1",
+    );
+    expect(buildOrchestrationRows(hide(sections, all), NONE)).toEqual([]);
+  });
+
+  it("keeps the routed thread and its ancestors, settled or not", () => {
+    const keep = keyOf("pod-c1" as ThreadId);
+    const visible = hide(sections, settled("slice-c", "pod-c1"), keep);
+    expect(outline(buildOrchestrationRows(visible, NONE)).slice(-4)).toEqual([
+      "0 project server",
+      "1 branch slice-c",
+      "2 slice slice-c",
+      "3 pod pod-c1",
+    ]);
+    expect(revealPath(visible, keep)).not.toBeNull();
+  });
+
+  it("returns the tab itself when nothing hides, and only rebuilds what changed", () => {
+    expect(hide(sections, NONE)).toBe(sections);
+    expect(hide(sections, settled("elsewhere"))).toBe(sections);
+    // The routed thread alone is settled: nothing hides.
+    expect(hide(sections, settled("chat"), keyOf("chat" as ThreadId))).toBe(sections);
+    // Only an untouched branch, project and section keep their references.
+    const visible = hide(sections, settled("pod-c1"));
+    expect(visible).not.toBe(sections);
+    expect(visible[0]!.tree.projects[0]).toBe(sections[0]!.tree.projects[0]);
+    expect(visible[0]!.tree.projects[1]).not.toBe(sections[0]!.tree.projects[1]);
+  });
+
+  it("counts as hidden only the settled rows that actually leave the tree", () => {
+    const hiddenCount = (settledKeys: ReadonlySet<string>, keepKey: string | null = null) =>
+      countThreadRows(sections) - countThreadRows(hide(sections, settledKeys, keepKey));
+    expect(countThreadRows(sections)).toBe(8);
+    // A settled ancestor of an unsettled pod stays, so it is not hidden.
+    expect(hiddenCount(settled("slice-a", "pod-a2"))).toBe(1);
+    expect(hiddenCount(settled("slice-a"))).toBe(0);
+    // Nor is the routed thread, nor its settled slice.
+    expect(hiddenCount(settled("slice-c", "pod-c1"), keyOf("pod-c1" as ThreadId))).toBe(0);
+    expect(hiddenCount(settled("slice-b", "pod-b1", "elsewhere"))).toBe(2);
+    expect(hiddenCount(NONE)).toBe(0);
+  });
+
+  it("keeps a settled slice while a cell under it needs you or works, and hides it after", () => {
+    const threads = orchestrationSeedTree.threads;
+    const slice = threads.find(
+      (thread) => thread.settledOverride === "settled" && thread.rolePreset?.id === "slice",
+    )!;
+    const pod = threads.find(
+      (thread) => thread.settledOverride === "settled" && thread.rolePreset?.id === "broker",
+    )!;
+    const settledKeys = new Set([keyOf(slice.id), keyOf(pod.id)]);
+    const cellLike = (dot: string) =>
+      threads.find(
+        (thread) => thread.id.startsWith("seed-cell-") && seedExpectedDots[thread.id]?.dot === dot,
+      )!;
+    // A cell is no row: its dot reaches only the slice's roll-up.
+    const cellUnderSlice = (cell: OrchestrationV2ThreadShell) => ({
+      ...cell,
+      id: "seed-cell-under-settled" as ThreadId,
+      lineage: { ...cell.lineage, parentThreadId: slice.id },
+    });
+    const harness = makeHarness(threads);
+    const visibleKeys = () => {
+      const hideable = new Set(hideableSettledKeys(harness.classification(), settledKeys));
+      const meta2 = harness.sections(keyOf(seedMetaId(2)));
+      return buildOrchestrationRows(withoutSettledRows(meta2, hideable, null), NONE).map(
+        (row) => row.key,
+      );
+    };
+
+    const idle = cellLike("idle");
+    for (const live of [cellLike("working"), { ...idle, hasActionableProposedPlan: true }]) {
+      harness.registry.set(harness.threadsAtom, [...threads, cellUnderSlice(live)]);
+      expect(visibleKeys()).toContain(keyOf(slice.id));
+      // The settled pod has nothing live of its own, so it still hides.
+      expect(visibleKeys()).not.toContain(keyOf(pod.id));
+    }
+    harness.registry.set(harness.threadsAtom, [...threads, cellUnderSlice(idle)]);
+    expect(visibleKeys()).not.toContain(keyOf(slice.id));
+  });
+
+  it("hides the seed's settled slice and pod from meta 2 and keeps its other rows", () => {
+    const harness = makeHarness(orchestrationSeedTree.threads);
+    const meta2 = harness.sections(keyOf(seedMetaId(2)));
+    const settledKeys = new Set(
+      orchestrationSeedTree.threads
+        .filter((thread) => thread.settledOverride === "settled")
+        .map((thread) => keyOf(thread.id)),
+    );
+    const shown = buildOrchestrationRows(meta2, NONE);
+    const visible = buildOrchestrationRows(hide(meta2, settledKeys), NONE);
+    const hidden = shown.filter((r) => !visible.some((v) => v.key === r.key)).map((r) => r.key);
+    // The settled slice, its settled pod, and the branch they leave empty.
+    expect(countThreadRows(meta2) - countThreadRows(hide(meta2, settledKeys))).toBe(2);
+    expect(hidden.filter((key) => settledKeys.has(key))).toHaveLength(2);
+    expect(hidden.filter((key) => !settledKeys.has(key)).map((key) => JSON.parse(key)[0])).toEqual([
+      "branch",
+    ]);
+    expect(visible.some((r) => r.type === "thread" && settledKeys.has(r.key))).toBe(false);
+    expect(visible.filter((r) => r.type === "project")).toHaveLength(2);
   });
 });
 

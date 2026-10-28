@@ -171,6 +171,8 @@ function clearCounts() {
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  // Meta 1 holds no settled rows, but Show settled persists across tests.
+  localStorage.removeItem("t3code:orchestration:show-settled");
   registry = AtomRegistry.make();
   setThreads(seedThreads);
   useUiStateStore.getState().setSelectedMetaThreadKey(keyOf(seedMetaId(1)));
