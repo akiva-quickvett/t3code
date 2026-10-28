@@ -59,7 +59,7 @@ https://t3code-qa-bot.up.railway.app/pair#token=<Token>
 ```
 
 `railway ssh` lands as root, and root's own home is not on the volume. For
-anything but `t3 pair`, run `su - t3` first, or files end up root-owned under
+anything but `t3 pair`, run `su t3` first, or files end up root-owned under
 `/home/t3` or lost in `/root` on the next deploy.
 
 Each new browser or device needs its own `t3 pair`. Revoke sessions with
