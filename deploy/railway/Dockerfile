@@ -1,0 +1,72 @@
+# Hosted T3 Code for Railway: this fork built from source, served by `t3 serve`
+# with the t3 user's home on a persistent volume. Build context is the repo
+# root. Setup, pairing and operations: deploy/railway/README.md.
+
+FROM node:24-bookworm AS build
+
+# The Vite+ CLI is the repo's task runner and pins pnpm from package.json.
+# VP_NODE_MANAGER=no keeps the image's Node instead of a vp-managed one.
+ENV CI=true \
+    VP_NODE_MANAGER=no \
+    VP_BIN_DIR=/opt/vite-plus/bin \
+    VP_DATA_DIR=/opt/vite-plus \
+    PATH=/opt/vite-plus/bin:$PATH
+RUN curl -fsSL https://vite.plus -o /tmp/vite-plus.sh \
+    && bash /tmp/vite-plus.sh \
+    && rm /tmp/vite-plus.sh \
+    && test -x /opt/vite-plus/bin/vp
+
+WORKDIR /opt/t3code
+# The web build reads license files from across the tree, so copy all of it.
+# .repos is vendored reference source the build never reads.
+COPY . .
+# .env.example holds the public T3 Connect identifiers release builds embed;
+# without them the build ships with T3 Connect disabled.
+RUN rm -rf .repos .git && cp .env.example .env
+RUN vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
+RUN vp run --filter t3 build
+
+FROM node:24-bookworm-slim
+
+ARG CLAUDE_CODE_VERSION=latest
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates curl git gnupg jq less openssh-client procps python3 ripgrep \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g pnpm@11.10.0 "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force
+
+# The image's uid 1000 user becomes t3. Its home is the Railway volume; the
+# skeleton is copied in by the entrypoint on first boot.
+RUN usermod -l t3 -d /home/t3 node \
+    && groupmod -n t3 node \
+    && mkdir -p /opt/t3-home-skel \
+    && cp /etc/skel/.bashrc /etc/skel/.profile /opt/t3-home-skel/
+
+COPY --from=build /opt/t3code /opt/t3code
+COPY deploy/railway/entrypoint.sh /usr/local/bin/t3-entrypoint
+
+# `railway ssh` lands as root. Running t3 as root would leave root-owned
+# files in ~/.t3, so the CLI always drops to the t3 user.
+RUN printf '%s\n' '#!/bin/sh' \
+      'if [ "$(id -u)" = 0 ]; then' \
+      '  exec setpriv --reuid=t3 --regid=t3 --init-groups env HOME=/home/t3 USER=t3 LOGNAME=t3 SHELL=/bin/bash "$0" "$@"' \
+      'fi' \
+      'exec node /opt/t3code/apps/server/dist/bin.mjs "$@"' \
+      > /usr/local/bin/t3 \
+    && chmod 755 /usr/local/bin/t3 /usr/local/bin/t3-entrypoint
+
+# Claude Code lives in the root-owned global prefix; update it by redeploying.
+ENV PATH=/home/t3/.local/bin:$PATH \
+    DISABLE_AUTOUPDATER=1
+
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/t3-entrypoint"]
