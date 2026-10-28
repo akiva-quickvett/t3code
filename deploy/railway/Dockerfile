@@ -2,7 +2,10 @@
 # with the t3 user's home on a persistent volume. Build context is the repo
 # root. Setup, pairing and operations: deploy/railway/README.md.
 
-FROM node:24-bookworm AS build
+# Keep in step with engines.node in package.json.
+ARG NODE_VERSION=26.12.1
+
+FROM node:${NODE_VERSION}-bookworm AS build
 
 # The Vite+ CLI is the repo's task runner and pins pnpm from package.json.
 # VP_NODE_MANAGER=no keeps the image's Node instead of a vp-managed one.
@@ -26,7 +29,7 @@ RUN rm -rf .repos .git && cp .env.example .env
 RUN vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
 RUN vp run --filter t3 build
 
-FROM node:24-bookworm-slim
+FROM node:${NODE_VERSION}-bookworm-slim
 
 ARG CLAUDE_CODE_VERSION=latest
 
@@ -41,8 +44,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g pnpm@11.10.0 "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    && npm cache clean --force
 
 # The image's uid 1000 user becomes t3. Its home is the Railway volume; the
 # skeleton is copied in by the entrypoint on first boot.
@@ -52,6 +53,11 @@ RUN usermod -l t3 -d /home/t3 node \
     && cp /etc/skel/.bashrc /etc/skel/.profile /opt/t3-home-skel/
 
 COPY --from=build /opt/t3code /opt/t3code
+
+# pnpm at the version package.json pins, for working on repos in ~/work.
+RUN npm install -g "$(node -p 'require("/opt/t3code/package.json").packageManager')" \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force
 COPY deploy/railway/entrypoint.sh /usr/local/bin/t3-entrypoint
 
 # `railway ssh` lands as root. Running t3 as root would leave root-owned
