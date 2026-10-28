@@ -23,6 +23,8 @@ const server = NodeNet.createServer((client) => {
   const tunnel = NodeNet.connect(proxyPort, "127.0.0.1", () =>
     tunnel.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`),
   );
+  // A tailnet outage stalls the dial; answer while the client can still retry.
+  tunnel.setTimeout(15_000, () => tunnel.destroy(new Error("timed out")));
   client.on("error", () => {});
   client.on("close", () => tunnel.destroy());
   tunnel.on("error", (err) => {
@@ -48,6 +50,7 @@ const server = NodeNet.createServer((client) => {
     tls.once("error", (err) => refuse(client, `TLS: ${err.code || err.message}`));
     tls.once("secureConnect", () => {
       piped = true;
+      tunnel.setTimeout(0);
       tls.removeAllListeners("error");
       client.resume();
       NodeStream.pipeline(client, tls, client, () => {});

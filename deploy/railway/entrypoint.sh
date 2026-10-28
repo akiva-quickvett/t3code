@@ -19,16 +19,6 @@ done
 mkdir -p "$home/.t3" "$home/.claude" "$home/.config" "$home/.local/bin" "$home/.ssh" "$home/.tailscale" "$home/work"
 chmod 700 "$home/.ssh" "$home/.tailscale"
 
-# Through the hub, Claude Code drops to a 5 minute prompt cache unless asked
-# for 1 hour, the subscription default. Never overrides an explicit choice.
-settings=$home/.claude/settings.json
-if [ ! -s "$settings" ]; then
-  echo '{"promptCacheTtl": "1h"}' > "$settings"
-elif ! jq -e 'has("promptCacheTtl")' "$settings" >/dev/null 2>&1; then
-  jq '.promptCacheTtl = "1h"' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" \
-    || rm -f "$settings.tmp"
-fi
-
 # Fresh volumes and anything a root shell created belong to root. Only touch
 # what is mis-owned so a large ~/work does not get rewritten on every boot,
 # and skip node_modules trees, which only t3 writes, to keep boot fast.
@@ -48,7 +38,8 @@ redact() {
 
 as_user() {
   setpriv --reuid="$user" --regid="$user" --init-groups \
-    env -u TS_AUTHKEY HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash "$@"
+    env -u TS_AUTHKEY -u HUB_ACCESS_TOKEN HOME="$home" USER="$user" LOGNAME="$user" \
+    SHELL=/bin/bash "$@"
 }
 
 # Keeps a helper running; its exit never takes the server down.
@@ -90,23 +81,40 @@ if [ -n "${TS_AUTHKEY:-}" ] || [ -s "$home/.tailscale/tailscaled.state" ]; then
     --socket=/run/tailscale/tailscaled.sock \
     --outbound-http-proxy-listen=127.0.0.1:1055 --socks5-server=127.0.0.1:1056 \
     > "$home/.tailscale/tailscaled.log" 2>&1 &
-  ts_join &
   keep hub-forward as_user node /usr/local/lib/hub-forward.mjs &
+  # In the foreground (90 s at most) so the hub decision below sees the result.
+  ts_join || true
 else
   echo "tailscale: off (no TS_AUTHKEY and no saved state)"
 fi
 
-# Claude Code goes through the hub only once its access key is set; without
-# one it keeps its own login.
-if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-  export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8317}"
+# Agents use the hub only when its key is set and the node is on the tailnet
+# at boot; otherwise Claude Code keeps its own login. A bare
+# ANTHROPIC_AUTH_TOKEN would point Claude Code's own login at the wrong key.
+unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
+if [ -z "${HUB_ACCESS_TOKEN:-}" ]; then
+  echo "hub: off (no HUB_ACCESS_TOKEN)"
+elif ! tailscale status >/dev/null 2>&1; then
+  echo "hub: off (tailscale is not up)"
 else
-  unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
+  export ANTHROPIC_AUTH_TOKEN=$HUB_ACCESS_TOKEN ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
+    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+  # Through the hub, Claude Code falls back to a 5 minute prompt cache; ask
+  # for the subscription's 1 hour. Never overrides an explicit choice.
+  settings=$home/.claude/settings.json
+  if [ ! -s "$settings" ]; then
+    echo '{"promptCacheTtl": "1h"}' > "$settings"
+  elif ! jq -e 'has("promptCacheTtl")' "$settings" >/dev/null 2>&1; then
+    jq '.promptCacheTtl = "1h"' "$settings" > "$settings.tmp" && mv "$settings.tmp" "$settings" \
+      || rm -f "$settings.tmp"
+  fi
+  chown "$user:$user" "$settings"
+  echo "hub: on (${HUB_URL:-https://omarchy.tail43a582.ts.net:8317})"
 fi
 
 cd "$home/work"
 exec setpriv --reuid="$user" --regid="$user" --init-groups \
-  env -u TS_AUTHKEY HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash \
+  env -u TS_AUTHKEY -u HUB_ACCESS_TOKEN HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash \
   node /opt/t3code/apps/server/dist/bin.mjs serve \
   --host 0.0.0.0 --port "${PORT:-8080}" "$home/work" \
   > >(redact) 2>&1

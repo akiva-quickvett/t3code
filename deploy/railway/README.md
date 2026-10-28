@@ -25,9 +25,8 @@ redeploys.
   release builds.
 - [`entrypoint.sh`](entrypoint.sh) runs as root on every boot: it copies
   `.bashrc` and `.profile` into the home only if they are missing, creates the
-  home directories below, adds `"promptCacheTtl": "1h"` to
-  `~/.claude/settings.json` if that key is missing, gives anything not owned by
-  `t3` back to `t3`, starts Tailscale and the hub forwarder when configured
+  home directories below, gives anything not owned by `t3` back to `t3`,
+  starts Tailscale and the hub forwarder when configured
   ([Hub over Tailscale](#hub-over-tailscale)), and starts
   `t3 serve --host 0.0.0.0 --port $PORT ~/work` as `t3`.
 - `t3 serve` prints a fresh admin pairing token, its URL and a QR code at every
@@ -189,22 +188,31 @@ What runs, as `t3`, once the node has joined the tailnet:
 - [`hub-forward.mjs`](hub-forward.mjs) on `127.0.0.1:8317`: plain HTTP for
   local clients, forwarded over TLS to `HUB_URL` through that proxy, so nothing
   else needs proxy settings. When the hub cannot be reached it answers 502 with
-  the reason.
+  the reason, after at most 15 seconds.
 
 Variables on `AI Agent Host`:
 
-| Variable                                     | Value                                                     |
-| -------------------------------------------- | --------------------------------------------------------- |
-| `TS_AUTHKEY`                                 | Tailscale auth key, used only for the first join (sealed) |
-| `HUB_URL`                                    | `https://omarchy.tail43a582.ts.net:8317` (the default)    |
-| `ANTHROPIC_AUTH_TOKEN`                       | The hub's access key                                      |
-| `ANTHROPIC_BASE_URL`                         | `http://127.0.0.1:8317`                                   |
-| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | `1`                                                       |
+| Variable           | Value                                                     |
+| ------------------ | --------------------------------------------------------- |
+| `TS_AUTHKEY`       | Tailscale auth key, used only for the first join (sealed) |
+| `HUB_URL`          | `https://omarchy.tail43a582.ts.net:8317` (the default)    |
+| `HUB_ACCESS_TOKEN` | The hub's access key (sealed)                             |
 
-The entrypoint passes the last three to the server, and so to its agents, only
-while `ANTHROPIC_AUTH_TOKEN` is set; without it Claude Code uses its own login
-as before. `TS_AUTHKEY` never reaches the server or agents. Once the node has
-joined, the key can expire or be removed.
+At boot the entrypoint waits up to about 90 seconds for the node to come up.
+If `HUB_ACCESS_TOKEN` is set and the node is up, it gives the server, and so
+every agent, `ANTHROPIC_AUTH_TOKEN` (the access key),
+`ANTHROPIC_BASE_URL=http://127.0.0.1:8317` and
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, and adds
+`"promptCacheTtl": "1h"` to `~/.claude/settings.json` unless that key is
+already set (through the hub, Claude Code would otherwise fall back to a 5
+minute cache). Otherwise it leaves all three unset, so Claude Code uses its
+own login as before. The deploy log says which: `hub: on` or `hub: off (...)`
+with the reason. The choice holds until the next boot; a hub or tailnet outage
+after that shows up in agents as a 502 from the forwarder. Never set
+`ANTHROPIC_AUTH_TOKEN` on the service itself: Claude Code would send it to
+Anthropic. `TS_AUTHKEY` and `HUB_ACCESS_TOKEN` never reach the server or
+agents under their own names. Once the node has joined, the auth key can
+expire or be removed.
 
 To make the auth key, in the Tailscale admin console:
 
@@ -237,12 +245,15 @@ curl -s 127.0.0.1:8317/v1/models -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN
 `su -` starts a clean environment, so set `ANTHROPIC_AUTH_TOKEN` there by hand,
 or expect a 401 from the hub: that still proves the path. A JSON 502 names the
 broken hop. The deploy log has one `tailscale:` line per boot with the node's
-state; tailscaled's own log is `~/.tailscale/tailscaled.log`.
+state; tailscaled's own log is `~/.tailscale/tailscaled.log`. `NeedsLogin` in
+that line means the auth key was missing, used or expired: set a fresh one and
+redeploy.
 
-To roll back, delete `ANTHROPIC_AUTH_TOKEN` and redeploy: Claude Code goes
-back to its own login, and the node stays on the tailnet doing nothing. To
-leave the tailnet too, also delete `TS_AUTHKEY`, remove `~/.tailscale` and
-remove the machine in the admin console.
+To roll back, delete `HUB_ACCESS_TOKEN` and redeploy: Claude Code goes back to
+its own login, and the node stays on the tailnet doing nothing. The
+`promptCacheTtl` setting stays; on a Claude subscription 1 hour is the default
+anyway. To leave the tailnet too, also delete `TS_AUTHKEY`, remove
+`~/.tailscale` and remove the machine in the admin console.
 
 ## Limits
 
