@@ -2,11 +2,47 @@ import * as NodeTest from "node:test";
 import * as NodeAssert from "node:assert/strict";
 import * as NodeHttp from "node:http";
 import { createApp, createS3Client, parseListXml, s3Target } from "../server.mjs";
+import { signRequest } from "../sigv4.mjs";
 
 const KEY = "k".repeat(40);
 const requests = [];
 let releaseStream;
 const streamReleased = new Promise((resolve) => (releaseStream = resolve));
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+};
+const slow = {
+  arrived: deferred(),
+  release: deferred(),
+  clientGone: deferred(),
+  upstreamClosed: deferred(),
+};
+
+// Re-signs the request as received, so a test fails if what goes on the wire
+// (path, query string, Host with port, Range) differs from what was signed.
+function signatureMatches(req) {
+  const [path, qs = ""] = req.url.split("?");
+  const query = qs ? qs.split("&").map((pair) => pair.split("=").map(decodeURIComponent)) : [];
+  const d = req.headers["x-amz-date"];
+  const date = new Date(
+    `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}T${d.slice(9, 11)}:${d.slice(11, 13)}:${d.slice(13, 15)}Z`,
+  );
+  const expected = signRequest({
+    method: req.method,
+    host: req.headers.host,
+    path,
+    query,
+    headers: req.headers.range ? { range: req.headers.range } : {},
+    payloadHash: req.headers["x-amz-content-sha256"],
+    region: "us-east-1",
+    accessKeyId: "AKIDEXAMPLE",
+    secretAccessKey: "secret",
+    date,
+  });
+  return expected.authorization === req.headers.authorization;
+}
 
 const LIST_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult><Name>bkt</Name><EncodingType>url</EncodingType><IsTruncated>true</IsTruncated>
@@ -16,7 +52,12 @@ const LIST_XML = `<?xml version="1.0" encoding="UTF-8"?>
 
 // Stands in for S3 behind S3_ENDPOINT (path-style), recording what it was sent.
 const fakeS3 = NodeHttp.createServer((req, res) => {
-  requests.push({ method: req.method, url: req.url, headers: req.headers });
+  requests.push({
+    method: req.method,
+    url: req.url,
+    headers: req.headers,
+    signed: signatureMatches(req),
+  });
   const path = req.url.split("?")[0];
   if (path === "/bkt") {
     res.writeHead(200, { "content-type": "application/xml" });
@@ -48,6 +89,14 @@ const fakeS3 = NodeHttp.createServer((req, res) => {
     res.write("first-");
     return streamReleased.then(() => res.end("second"));
   }
+  if (path === "/bkt/reports/slow") {
+    slow.arrived.resolve();
+    return slow.release.promise.then(() => {
+      res.on("close", slow.upstreamClosed.resolve);
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      res.write("x".repeat(65536));
+    });
+  }
   if (path === "/bkt/reports/denied") {
     res.writeHead(403, { "content-type": "application/xml" });
     return res.end(
@@ -74,6 +123,9 @@ NodeTest.before(async () => {
     endpoint: `http://127.0.0.1:${fakeS3.address().port}`,
   });
   proxy = NodeHttp.createServer(createApp({ s3, apiKeys: [KEY], allowedPrefixes: ["reports/"] }));
+  proxy.on("request", (req, res) => {
+    if (req.url === "/v1/objects/reports/slow") res.on("close", slow.clientGone.resolve);
+  });
   await new Promise((r) => proxy.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${proxy.address().port}`;
 });
@@ -82,9 +134,10 @@ NodeTest.after(() => {
   fakeS3.close();
 });
 
-const call = (path, { key = KEY, method = "GET", headers = {} } = {}) =>
+const call = (path, { key = KEY, method = "GET", headers = {}, signal } = {}) =>
   fetch(base + path, {
     method,
+    signal,
     headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), ...headers },
   });
 const lastRequest = () => requests.at(-1);
@@ -125,7 +178,8 @@ NodeTest.test("allows only GET and HEAD, before touching S3", async () => {
 });
 
 NodeTest.test("lists objects trimmed to key, size, lastModified and etag", async () => {
-  const res = await call("/v1/objects?prefix=reports/&limit=2&token=prev%2Btok");
+  // A token pasted back unencoded: its "+" must not become a space.
+  const res = await call("/v1/objects?prefix=reports/&limit=2&token=prev+tok");
   NodeAssert.equal(res.status, 200);
   NodeAssert.deepEqual(await res.json(), {
     objects: [
@@ -143,10 +197,7 @@ NodeTest.test("lists objects trimmed to key, size, lastModified and etag", async
     lastRequest().url,
     "/bkt?continuation-token=prev%2Btok&encoding-type=url&list-type=2&max-keys=2&prefix=reports%2F",
   );
-  NodeAssert.match(
-    lastRequest().headers.authorization,
-    /^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\/\d{8}\/us-east-1\/s3\/aws4_request, /,
-  );
+  NodeAssert.ok(lastRequest().signed);
 });
 
 NodeTest.test("validates list parameters", async () => {
@@ -164,6 +215,7 @@ NodeTest.test("streams an object with only safe headers, encoding the key once",
   NodeAssert.equal(res.status, 200);
   NodeAssert.equal(await res.text(), "0123456789");
   NodeAssert.equal(lastRequest().url, "/bkt/reports/a%20b%2Bc%20%C3%BC.pdf");
+  NodeAssert.ok(lastRequest().signed);
   NodeAssert.equal(res.headers.get("content-type"), "application/pdf");
   NodeAssert.equal(res.headers.get("content-length"), "10");
   NodeAssert.equal(res.headers.get("etag"), '"abc123"');
@@ -171,6 +223,17 @@ NodeTest.test("streams an object with only safe headers, encoding the key once",
   NodeAssert.equal(res.headers.get("x-content-type-options"), "nosniff");
   for (const name of ["x-amz-meta-owner", "content-disposition", "set-cookie"])
     NodeAssert.equal(res.headers.get(name), null, name);
+});
+
+NodeTest.test("drops the S3 response when the caller left before it arrived", async () => {
+  const controller = new AbortController();
+  const pending = call("/v1/objects/reports/slow", { signal: controller.signal }).catch(() => {});
+  await slow.arrived.promise;
+  controller.abort();
+  await slow.clientGone.promise;
+  slow.release.resolve();
+  await slow.upstreamClosed.promise;
+  await pending;
 });
 
 NodeTest.test("drops non-ASCII header values from object metadata", async () => {
@@ -187,6 +250,7 @@ NodeTest.test("passes Range through and keeps 206", async () => {
   NodeAssert.equal(res.headers.get("content-range"), "bytes 0-3/10");
   NodeAssert.equal(await res.text(), "0123");
   NodeAssert.equal(lastRequest().headers.range, "bytes=0-3");
+  NodeAssert.ok(lastRequest().signed);
   NodeAssert.match(
     lastRequest().headers.authorization,
     /SignedHeaders=host;range;x-amz-content-sha256;x-amz-date,/,

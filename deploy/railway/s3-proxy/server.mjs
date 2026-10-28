@@ -205,7 +205,8 @@ export function createApp({ s3, apiKeys, allowedPrefixes = [] }) {
     checkKey(prefix, "prefix");
     if (!allowed(prefix)) throw new HttpError(403, "prefix is outside the allowed prefixes");
     const limit = intParam(params, "limit", { def: 100, min: 1, max: 1000 });
-    const token = params.get("token") ?? undefined;
+    // Tokens are base64 and never hold a space: a "+" pasted unencoded comes back.
+    const token = params.get("token")?.replaceAll(" ", "+");
     if (token && token.length > 2048) throw new HttpError(400, "token too long");
     return s3.list({ prefix, limit, token });
   }
@@ -225,6 +226,8 @@ export function createApp({ s3, apiKeys, allowedPrefixes = [] }) {
       throw new HttpError(400, "Range must be a single bytes=start-end, start- or -suffix");
     }
     const upstream = await s3.object(req.method, key, range);
+    // The caller left while S3 answered; nothing would ever drain this response.
+    if (res.destroyed) return upstream.destroy();
     const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
     for (const name of PASSED_HEADERS) {
       const value = upstream.headers[name];
@@ -319,7 +322,11 @@ async function main() {
   const port = Number(process.env.PORT ?? 8080);
   const server = NodeHttp.createServer(createApp({ s3, apiKeys, allowedPrefixes }));
   server.listen(port, "::", () => console.log(`Listening on :${port}`));
-  process.on("SIGTERM", () => process.exit(0));
+  // Let downloads in flight finish, within Railway's stop window.
+  process.on("SIGTERM", () => {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 10_000).unref();
+  });
 }
 
 if (import.meta.url === NodeURL.pathToFileURL(process.argv[1]).href) {

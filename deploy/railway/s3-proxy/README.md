@@ -46,7 +46,8 @@ touching IAM.
 - **What reaches agents.** Object bytes, plus only `Content-Type`,
   `Content-Length`, `ETag`, `Last-Modified`, `Content-Range` and `Accept-Ranges`,
   and only as printable ASCII. User metadata (`x-amz-meta-*`) and
-  `Content-Disposition` are dropped. S3 error bodies are reduced to their error
+  `Content-Disposition` are dropped, and so is `Content-Encoding`: an object
+  stored gzip-encoded arrives as its stored gzip bytes. S3 error bodies are reduced to their error
   code (`{"error":"S3 NoSuchKey"}`), because some of them echo the request and
   the access key id.
 - **Streaming.** Objects are piped through, never buffered, so size has no
@@ -96,7 +97,8 @@ key, then remove the old one. Rotate the AWS key in IAM, then update the two
 
 Send `Authorization: Bearer <proxy key>` on every request except `/health`.
 Object keys go in the path, percent-encoded (`a%20b.txt`; a literal `+` may stay
-as is). Query values are form-encoded, so write a `+` in a prefix as `%2B`.
+as is). Query values are form-encoded, so write a `+` in a prefix as `%2B`;
+`token` may be passed as returned.
 Errors are JSON: `{"error": "..."}`.
 
 | Endpoint                 | Notes                                                                              |
