@@ -322,7 +322,7 @@ async function main() {
   const port = Number(process.env.PORT ?? 8080);
   const server = NodeHttp.createServer(createApp({ s3, apiKeys, allowedPrefixes }));
   server.listen(port, "::", () => console.log(`Listening on :${port}`));
-  // Let downloads in flight finish, within Railway's stop window.
+  // Let downloads in flight finish; railway.json's drainingSeconds delays SIGKILL past this.
   process.on("SIGTERM", () => {
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 10_000).unref();

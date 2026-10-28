@@ -3,6 +3,7 @@
   "build": { "builder": "DOCKERFILE", "dockerfilePath": "Dockerfile" },
   "deploy": {
     "healthcheckPath": "/health",
-    "restartPolicyType": "ALWAYS"
+    "restartPolicyType": "ALWAYS",
+    "drainingSeconds": 15
   }
 }
