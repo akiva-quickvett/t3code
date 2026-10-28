@@ -1,7 +1,7 @@
 import * as NodeTest from "node:test";
 import * as NodeAssert from "node:assert/strict";
 import * as NodeHttp from "node:http";
-import { createApp, createS3Client } from "../server.mjs";
+import { createApp, createS3Client, parseListXml, s3Target } from "../server.mjs";
 
 const KEY = "k".repeat(40);
 const requests = [];
@@ -257,4 +257,35 @@ NodeTest.test("S3 errors keep the code and drop the body", async () => {
   const missing = await call("/v1/objects/reports/missing");
   NodeAssert.equal(missing.status, 404);
   NodeAssert.deepEqual(await missing.json(), { error: "S3 NoSuchKey" });
+});
+
+NodeTest.test("leaves keys raw when the store ignored encoding-type=url", () => {
+  const xml =
+    "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>r/a+b 100%</Key><Size>1</Size></Contents></ListBucketResult>";
+  NodeAssert.equal(parseListXml(xml).objects[0].key, "r/a+b 100%");
+});
+
+NodeTest.test("targets virtual-hosted AWS, path-style for dotted buckets, and S3_ENDPOINT", () => {
+  const rows = [
+    [
+      { region: "us-east-1", bucket: "media" },
+      { protocol: "https:", host: "media.s3.us-east-1.amazonaws.com", base: "" },
+    ],
+    [
+      { region: "eu-west-2", bucket: "my.media" },
+      { protocol: "https:", host: "s3.eu-west-2.amazonaws.com", base: "/my.media" },
+    ],
+    [
+      { region: "auto", bucket: "media", endpoint: "http://minio.internal:9000" },
+      { protocol: "http:", host: "minio.internal:9000", base: "/media" },
+    ],
+  ];
+  for (const [input, want] of rows) {
+    const { protocol, host, base } = s3Target(input);
+    NodeAssert.deepEqual({ protocol, host, base }, want, input.bucket);
+  }
+  NodeAssert.throws(
+    () => s3Target({ region: "x", bucket: "b", endpoint: "https://host/path" }),
+    /must be an origin/,
+  );
 });

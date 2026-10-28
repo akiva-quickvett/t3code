@@ -39,8 +39,10 @@ touching IAM.
   SigV4 in `sigv4.mjs`, using `node:crypto` only.
 - **Prefixes.** With `S3_ALLOWED_PREFIXES`, listing and reading anything outside
   them returns 403. Matching is plain string prefix matching, so end each prefix
-  with `/` (`reports/`, not `reports`). Keys starting with `/` or containing a
-  `.` or `..` segment are refused with 400, so a key cannot climb out of a prefix.
+  with `/` (`reports/`, not `reports`); the proxy refuses to start otherwise.
+  Keys starting with `/` or containing a `.` or `..` segment are refused with
+  400, so a key cannot climb out of a prefix. Such keys still show up in
+  listings, but cannot be fetched.
 - **What reaches agents.** Object bytes, plus only `Content-Type`,
   `Content-Length`, `ETag`, `Last-Modified`, `Content-Range` and `Accept-Ranges`,
   and only as printable ASCII. User metadata (`x-amz-meta-*`) and

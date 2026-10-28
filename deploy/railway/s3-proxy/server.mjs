@@ -56,8 +56,10 @@ const tag = (xml, name) => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(xm
 const decodeKey = (s) => decodeURIComponent(s.replace(/\+/g, " "));
 
 export function parseListXml(xml) {
+  // Stores behind S3_ENDPOINT may ignore encoding-type=url and send raw keys.
+  const urlEncoded = tag(xml, "EncodingType") === "url";
   const objects = (xml.match(/<Contents>[\s\S]*?<\/Contents>/g) ?? []).map((block) => ({
-    key: decodeKey(decodeXml(tag(block, "Key") ?? "")),
+    key: (urlEncoded ? decodeKey : (k) => k)(decodeXml(tag(block, "Key") ?? "")),
     size: Number(tag(block, "Size")),
     lastModified: tag(block, "LastModified") ?? null,
     etag: decodeXml(tag(block, "ETag") ?? ""),
@@ -67,31 +69,31 @@ export function parseListXml(xml) {
   return { objects, nextToken: truncated && next ? decodeXml(next) : null };
 }
 
-export function createS3Client({ accessKeyId, secretAccessKey, region, bucket, endpoint }) {
-  let target;
+// Where requests go: base is the path prefix before the key ("" for
+// virtual-hosted style), so a bucket listing is `base || "/"`.
+export function s3Target({ region, bucket, endpoint }) {
   if (endpoint) {
     const url = new URL(endpoint);
     if (url.pathname !== "/" || url.search)
       throw new Error("S3_ENDPOINT must be an origin, like https://host:port");
-    target = {
-      client: url.protocol === "http:" ? NodeHttp : NodeHttps,
-      hostname: url.hostname,
-      port: url.port,
-      host: url.host,
-      base: `/${uriEncode(bucket)}`,
-    };
-  } else {
-    // Virtual-hosted style, except for dotted names, whose host fails TLS.
-    const virtual = !bucket.includes(".");
-    const host = virtual ? `${bucket}.s3.${region}.amazonaws.com` : `s3.${region}.amazonaws.com`;
-    target = {
-      client: NodeHttps,
-      hostname: host,
-      port: "",
-      host,
-      base: virtual ? "" : `/${uriEncode(bucket)}`,
-    };
+    const { protocol, hostname, port, host } = url;
+    return { protocol, hostname, port, host, base: `/${uriEncode(bucket)}` };
   }
+  // Virtual-hosted style, except for dotted names, whose host fails TLS.
+  const virtual = !bucket.includes(".");
+  const host = virtual ? `${bucket}.s3.${region}.amazonaws.com` : `s3.${region}.amazonaws.com`;
+  return {
+    protocol: "https:",
+    hostname: host,
+    port: "",
+    host,
+    base: virtual ? "" : `/${uriEncode(bucket)}`,
+  };
+}
+
+export function createS3Client({ accessKeyId, secretAccessKey, region, bucket, endpoint }) {
+  const target = s3Target({ region, bucket, endpoint });
+  target.client = target.protocol === "http:" ? NodeHttp : NodeHttps;
 
   function request(method, key, query = [], headers = {}) {
     const path = key === undefined ? target.base || "/" : target.base + encodeKeyPath(key);
@@ -294,6 +296,8 @@ async function main() {
     .split(",")
     .map((p) => p.trim())
     .filter(Boolean);
+  if (allowedPrefixes.some((p) => !p.endsWith("/")))
+    throw new Error("Each S3_ALLOWED_PREFIXES entry must end with /");
   const s3 = createS3Client({
     accessKeyId: required("AWS_ACCESS_KEY_ID"),
     secretAccessKey: required("AWS_SECRET_ACCESS_KEY"),
