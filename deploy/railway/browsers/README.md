@@ -4,15 +4,15 @@ Headless Chromium on demand for the T3 Code instance and other services in
 `brave-warmth` / `QA Bot`, reached over Railway's private network. A
 stand-in for a hosted browser service: swap the URL variables to move.
 
-| | |
-| --- | --- |
-| Service | `browsers`, private host `browsers.railway.internal` |
-| Image | `mcr.microsoft.com/playwright:v1.60.0-noble`, Chromium only |
-| Playwright server | port `3000`, `/?token=<BROWSERS_TOKEN>`, one fresh browser per connection |
-| Raw CDP | port `9222`, private only, one shared browser per replica |
-| Cap | `MAX_SESSIONS` connections per replica (default 6), then 503 |
-| Idle timeout | `IDLE_TIMEOUT_SECONDS` with no traffic either way closes a session (default 300) |
-| Replicas | 2, 4 GB memory and 2 vCPU each, restart always, healthcheck `/healthz` |
+|                   |                                                                                  |
+| ----------------- | -------------------------------------------------------------------------------- |
+| Service           | `browsers`, private host `browsers.railway.internal`                             |
+| Image             | `mcr.microsoft.com/playwright:v1.60.0-noble`, Chromium only                      |
+| Playwright server | port `3000`, `/?token=<BROWSERS_TOKEN>`, one fresh browser per connection        |
+| Raw CDP           | port `9222`, private only, one shared browser per replica                        |
+| Cap               | `MAX_SESSIONS` connections per replica (default 6), then 503                     |
+| Idle timeout      | `IDLE_TIMEOUT_SECONDS` with no traffic either way closes a session (default 300) |
+| Replicas          | 2, 4 GB memory and 2 vCPU each, restart always, healthcheck `/healthz`           |
 
 ## How it works
 

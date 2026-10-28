@@ -5,14 +5,14 @@ browser at its Railway domain. The server user's home lives on a volume, so the
 T3 database, provider logins, SSH keys and checked-out repositories survive
 redeploys.
 
-| | |
-| --- | --- |
-| Project / environment | `brave-warmth` / `QA Bot` |
-| Service | `AI Agent Host` (private host `t3code.railway.internal`) |
-| URL | https://t3code-qa-bot.up.railway.app |
-| Volume | `t3code-volume`, 50 GB, mounted at `/home/t3` |
-| Limits | 8 GB memory, 4 vCPU (ceilings; billing is by actual use) |
-| Restart policy | always |
+|                       |                                                          |
+| --------------------- | -------------------------------------------------------- |
+| Project / environment | `brave-warmth` / `QA Bot`                                |
+| Service               | `AI Agent Host` (private host `t3code.railway.internal`) |
+| URL                   | https://t3code-qa-bot.up.railway.app                     |
+| Volume                | `t3code-volume`, 50 GB, mounted at `/home/t3`            |
+| Limits                | 8 GB memory, 4 vCPU (ceilings; billing is by actual use) |
+| Restart policy        | always                                                   |
 
 ## How it works
 

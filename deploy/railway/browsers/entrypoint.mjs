@@ -2,11 +2,11 @@
 // Chromium per connection) and one shared headless Chromium for raw CDP, both
 // on loopback, and fronts them on all interfaces with a session cap, an idle
 // timeout and, for Playwright, a token. Setup and clients: README.md.
-import { spawn } from "node:child_process";
-import { timingSafeEqual } from "node:crypto";
-import http from "node:http";
-import net from "node:net";
-import { fileURLToPath } from "node:url";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
+import * as NodeHttp from "node:http";
+import * as NodeNet from "node:net";
+import * as NodeURL from "node:url";
 import { chromium } from "playwright";
 
 const token = Buffer.from(process.env.BROWSERS_TOKEN ?? "");
@@ -34,7 +34,7 @@ let cdpSessions = 0;
 
 const children = [];
 function start(command, args) {
-  const child = spawn(command, args, { stdio: ["ignore", "inherit", "inherit"] });
+  const child = NodeChildProcess.spawn(command, args, { stdio: ["ignore", "inherit", "inherit"] });
   child.on("exit", (code, signal) => {
     console.error(`${command} exited (${code ?? signal}); stopping so Railway restarts us`);
     stop(1);
@@ -47,7 +47,7 @@ function stop(code) {
 }
 process.on("SIGTERM", () => stop(0));
 
-start(fileURLToPath(new URL("node_modules/.bin/playwright", import.meta.url)), [
+start(NodeURL.fileURLToPath(new URL("node_modules/.bin/playwright", import.meta.url)), [
   "run-server",
   "--host",
   "127.0.0.1",
@@ -68,7 +68,9 @@ start(chromium.executablePath(), [
 ]);
 
 function refuse(socket, status) {
-  socket.end(`HTTP/1.1 ${status}\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
+  socket.end(
+    `HTTP/1.1 ${status}\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`,
+  );
 }
 
 // Pipes an upgraded WebSocket to a loopback upstream. Chrome only accepts a
@@ -79,7 +81,7 @@ function forward(req, socket, head, upstreamPort, path, onClose) {
   sessions++;
   let released = false;
   let timer;
-  const upstream = net.connect(upstreamPort, "127.0.0.1");
+  const upstream = NodeNet.connect(upstreamPort, "127.0.0.1");
   const close = () => {
     clearTimeout(timer);
     socket.destroy();
@@ -98,7 +100,8 @@ function forward(req, socket, head, upstreamPort, path, onClose) {
     let raw = `${req.method} ${path} HTTP/1.1\r\n`;
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
       const name = req.rawHeaders[i];
-      const value = name.toLowerCase() === "host" ? `127.0.0.1:${upstreamPort}` : req.rawHeaders[i + 1];
+      const value =
+        name.toLowerCase() === "host" ? `127.0.0.1:${upstreamPort}` : req.rawHeaders[i + 1];
       raw += `${name}: ${value}\r\n`;
     }
     upstream.write(`${raw}\r\n`);
@@ -117,15 +120,18 @@ function forward(req, socket, head, upstreamPort, path, onClose) {
 // the URLs it prints in errors and logs.
 function tokenMatches(url) {
   const given = Buffer.from(new URLSearchParams(url.split("?")[1] ?? "").get("token") ?? "");
-  return given.length === token.length && timingSafeEqual(given, token);
+  return given.length === token.length && NodeCrypto.timingSafeEqual(given, token);
 }
 
 // Chrome's own DNS-rebinding guard: only an IP, localhost, or a Railway private
 // hostname, and no browser Origin (CDP libraries send none).
 function cdpAllowed(req) {
   const host = req.headers.host ?? "";
-  const name = host.startsWith("[") ? host.slice(1, host.indexOf("]")) : host.replace(/:[0-9]+$/, "");
-  const nameAllowed = net.isIP(name) !== 0 || name === "localhost" || name.endsWith(".railway.internal");
+  const name = host.startsWith("[")
+    ? host.slice(1, host.indexOf("]"))
+    : host.replace(/:[0-9]+$/, "");
+  const nameAllowed =
+    NodeNet.isIP(name) !== 0 || name === "localhost" || name.endsWith(".railway.internal");
   return nameAllowed && req.headers.origin === undefined;
 }
 
@@ -134,23 +140,31 @@ function upstreamsReady() {
   if (ready) return Promise.resolve(true);
   const probe = (upstreamPort) =>
     new Promise((resolve) => {
-      const socket = net.connect(upstreamPort, "127.0.0.1", () => {
+      const socket = NodeNet.connect(upstreamPort, "127.0.0.1", () => {
         socket.destroy();
         resolve(true);
       });
       socket.on("error", () => resolve(false));
     });
-  return Promise.all([probe(playwrightUpstream), probe(cdpUpstream)]).then((ok) => (ready = ok.every(Boolean)));
+  return Promise.all([probe(playwrightUpstream), probe(cdpUpstream)]).then(
+    (ok) => (ready = ok.every(Boolean)),
+  );
 }
 
 function cdpRequest(path, method = "GET") {
   return new Promise((resolve, reject) => {
-    const req = http.request(
+    const req = NodeHttp.request(
       { host: "127.0.0.1", port: cdpUpstream, path, method, timeout: 10_000 },
       (res) => {
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () => resolve({ status: res.statusCode ?? 502, headers: res.headers, body: Buffer.concat(chunks) }));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 502,
+            headers: res.headers,
+            body: Buffer.concat(chunks),
+          }),
+        );
       },
     );
     req.on("timeout", () => req.destroy(new Error("CDP upstream timed out")));
@@ -171,10 +185,11 @@ async function resetSharedBrowser() {
 }
 function cdpClosed() {
   cdpSessions--;
-  if (cdpSessions === 0) resetSharedBrowser().catch((error) => console.error(`CDP reset failed: ${error.message}`));
+  if (cdpSessions === 0)
+    resetSharedBrowser().catch((error) => console.error(`CDP reset failed: ${error.message}`));
 }
 
-const playwright = http.createServer(async (req, res) => {
+const playwright = NodeHttp.createServer(async (req, res) => {
   if (req.url === "/healthz") {
     const ok = await upstreamsReady();
     res.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
@@ -190,12 +205,17 @@ playwright.on("upgrade", (req, socket, head) => {
 
 // CDP clients read /json/version first and connect to the URL in it; Chrome
 // writes its own loopback address there, so swap in the Host the client used.
-const cdp = http.createServer(async (req, res) => {
-  if (!cdpAllowed(req) || req.method !== "GET" && req.method !== "PUT") return res.writeHead(403).end();
+const cdp = NodeHttp.createServer(async (req, res) => {
+  if (!cdpAllowed(req) || (req.method !== "GET" && req.method !== "PUT"))
+    return res.writeHead(403).end();
   try {
     const upstream = await cdpRequest(req.url, req.method);
-    const body = upstream.body.toString().replaceAll(`127.0.0.1:${cdpUpstream}`, () => req.headers.host);
-    res.writeHead(upstream.status, { "content-type": upstream.headers["content-type"] ?? "application/json" });
+    const body = upstream.body
+      .toString()
+      .replaceAll(`127.0.0.1:${cdpUpstream}`, () => req.headers.host);
+    res.writeHead(upstream.status, {
+      "content-type": upstream.headers["content-type"] ?? "application/json",
+    });
     res.end(body);
   } catch {
     res.writeHead(502).end();
