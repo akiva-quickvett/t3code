@@ -8,7 +8,7 @@ redeploys.
 | | |
 | --- | --- |
 | Project / environment | `brave-warmth` / `QA Bot` |
-| Service | `t3code` |
+| Service | `AI Agent Host` (private host `t3code.railway.internal`) |
 | URL | https://t3code-qa-bot.up.railway.app |
 | Volume | `t3code-volume`, 50 GB, mounted at `/home/t3` |
 | Limits | 8 GB memory, 4 vCPU (ceilings; billing is by actual use) |
@@ -47,7 +47,7 @@ Pairing tokens are one-time, expire after five minutes, and are passwords: keep
 them out of chat, tickets and screenshots.
 
 ```bash
-railway ssh --project brave-warmth --environment "QA Bot" --service t3code
+railway ssh --project brave-warmth --environment "QA Bot" --service "AI Agent Host"
 t3 pair
 ```
 
@@ -80,7 +80,7 @@ t3 connect                 # optional: T3 Connect sign-in
 ```
 
 After `t3 connect`, restart the server so it picks up the link:
-`railway restart --service t3code --environment "QA Bot"`.
+`railway restart --service "AI Agent Host" --environment "QA Bot"`.
 
 To work on this repo in the instance, install the Vite+ CLI into your home,
 where it persists: `curl -fsSL https://vite.plus | bash`.
@@ -112,7 +112,7 @@ To deploy an unpushed tree by hand, upload the committed files only:
 ```bash
 git archive HEAD | tar -x -C /path/to/empty-dir --exclude=.repos
 railway up /path/to/empty-dir --path-as-root \
-  --project brave-warmth --environment "QA Bot" --service t3code
+  --project brave-warmth --environment "QA Bot" --service "AI Agent Host"
 ```
 
 Claude Code installs at image build time. Railway caches that layer, so to pick
