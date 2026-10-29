@@ -19,7 +19,7 @@ import { startTailnet } from "./tailnet.mjs";
 const [tokenLine = "", authKey = ""] = NodeFs.readFileSync(0, "utf8").split("\n");
 const token = Buffer.from(tokenLine);
 if (token.length < 16) {
-  console.error("BROWSERS_TOKEN must be set to at least 16 characters");
+  console.error("BROWSERS_TOKEN must be set to at least 16 characters (start.sh passes it on stdin)");
   process.exit(1);
 }
 function positiveInt(name, fallback) {

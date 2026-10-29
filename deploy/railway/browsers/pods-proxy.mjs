@@ -21,6 +21,7 @@ function isPodsTarget(hostname, port) {
 }
 
 // SOCKS5 CONNECT, no auth, to an IPv4 address (tailscaled's SOCKS5 server).
+// Resolves a paused socket; the caller resumes it once it reads.
 export function socks5Dial(socksHost, socksPort) {
   return (ip, port) =>
     new Promise((resolve, reject) => {
