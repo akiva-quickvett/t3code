@@ -40,46 +40,40 @@ const idleMs = positiveInt("IDLE_TIMEOUT_SECONDS", 300) * 1000;
 const internalHost = "127.0.0.2";
 const playwrightUpstream = { host: internalHost, port: port + 1 };
 const cdpUpstream = { host: "127.0.0.1", port: cdpPort + 1 };
-const socksAddress = `${internalHost}:1055`;
-const podsProxyPort = 1056;
+const socks = { host: internalHost, port: 1055 };
+const podsProxy = { host: internalHost, port: 1056 };
 
-const podsHostIp = process.env.PODS_HOST_IP ?? "";
-if (podsHostIp && !NodeNet.isIPv4(podsHostIp)) {
-  console.error("PODS_HOST_IP must be an IPv4 address");
-  process.exit(1);
-}
+// The tailnet and pods routing are optional: a bad setting logs and turns
+// them off, never stops the browsers.
 const tailnet = authKey
-  ? startTailnet({ authKey, hostname: "railway-browser", socksAddress })
+  ? startTailnet({ authKey, hostname: "railway-browser", socksAddress: `${socks.host}:${socks.port}` })
   : undefined;
-const podsRouting = Boolean(tailnet && podsHostIp);
+const podsHostIp = process.env.PODS_HOST_IP ?? "";
+if (podsHostIp && !NodeNet.isIPv4(podsHostIp))
+  console.error("PODS_HOST_IP is not an IPv4 address; *.pods.internal stays off");
+const podsRouting = Boolean(tailnet && NodeNet.isIPv4(podsHostIp));
 
 // Chrome reads its trusted roots from the user's NSS database.
 function trustPodsCa(pem) {
-  const db = `sql:${NodePath.join(NodeOs.homedir(), ".pki/nssdb")}`;
-  NodeFs.mkdirSync(NodePath.join(NodeOs.homedir(), ".pki/nssdb"), { recursive: true });
-  const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "ca-"));
-  const file = NodePath.join(dir, "pods-ca.pem");
-  NodeFs.writeFileSync(file, pem.replaceAll("\\n", "\n"));
+  const dir = NodePath.join(NodeOs.homedir(), ".pki/nssdb");
+  NodeFs.mkdirSync(dir, { recursive: true });
+  const certutil = (args, input) =>
+    NodeChildProcess.execFileSync("certutil", ["-d", `sql:${dir}`, ...args], { input, stdio: "pipe" });
   try {
-    if (!NodeFs.existsSync(NodePath.join(NodeOs.homedir(), ".pki/nssdb/cert9.db")))
-      NodeChildProcess.execFileSync("certutil", ["-d", db, "-N", "--empty-password"]);
-    NodeChildProcess.execFileSync("certutil", ["-d", db, "-A", "-t", "C,,", "-n", "pods-internal", "-i", file]);
-  } finally {
-    NodeFs.rmSync(dir, { recursive: true, force: true });
+    if (!NodeFs.existsSync(NodePath.join(dir, "cert9.db"))) certutil(["-N", "--empty-password"]);
+    certutil(["-A", "-t", "C,,", "-n", "pods-internal"], pem.replaceAll("\\n", "\n"));
+  } catch (error) {
+    const reason = error.stderr?.toString().split("\n")[0] || error.message;
+    console.error(`PODS_CA_PEM not trusted (${reason}); pods HTTPS will fail`);
   }
 }
 if (podsRouting) {
-  try {
-    if (process.env.PODS_CA_PEM) trustPodsCa(process.env.PODS_CA_PEM);
-  } catch {
-    console.error("PODS_CA_PEM not trusted (certutil failed); pods HTTPS will fail");
-  }
+  if (process.env.PODS_CA_PEM) trustPodsCa(process.env.PODS_CA_PEM);
   // Chromium on Linux reads a PAC URL from auto_proxy; both browsers inherit it.
-  process.env.auto_proxy = pacUrl(`${internalHost}:${podsProxyPort}`);
-  const [socksHost, socksPort] = socksAddress.split(":");
-  createPodsProxy({ targetIp: podsHostIp, dial: socks5Dial(socksHost, Number(socksPort)) }).listen(
-    podsProxyPort,
-    internalHost,
+  process.env.auto_proxy = pacUrl(`${podsProxy.host}:${podsProxy.port}`);
+  createPodsProxy({ targetIp: podsHostIp, dial: socks5Dial(socks.host, socks.port) }).listen(
+    podsProxy.port,
+    podsProxy.host,
     () => console.log(`*.pods.internal -> ${podsHostIp} via the tailnet`),
   );
 }
@@ -93,9 +87,8 @@ function start(command, args) {
   });
   children.push(child);
 }
-async function stop(code) {
+function stop(code) {
   for (const child of children) child.kill("SIGTERM");
-  await tailnet?.logout();
   process.exit(code);
 }
 process.on("SIGTERM", () => stop(0));

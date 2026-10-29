@@ -116,6 +116,8 @@ export function createPodsProxy({ targetIp, dial }) {
     } catch {
       return client.end("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
     }
+    // Chrome may have dropped a preconnect while the dial was in flight.
+    if (client.destroyed) return socket.destroy();
     socket.on("error", () => client.destroy());
     client.on("close", () => socket.destroy());
     client.write("HTTP/1.1 200 Connection Established\r\n\r\n");

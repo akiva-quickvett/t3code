@@ -99,9 +99,10 @@ What runs, as `pwuser`, from [`tailnet.mjs`](tailnet.mjs) and
 
 - `tailscaled` in userspace mode (Railway has no TUN device) with its state in
   memory: replicas cannot share a volume, so every boot joins afresh. Use a
-  reusable, ephemeral, tagged key; offline nodes then drop off on their own, and
-  a replica logs out when Railway stops it. `TS_DEBUG_MTU=1200`, since the
-  Railway path drops full 1280-byte packets and TLS handshakes stall.
+  reusable, ephemeral, tagged key; offline nodes then drop off on their own.
+  Until they do, a new replica takes the next free name (`railway-browser-2`).
+  `TS_DEBUG_MTU=1200`, since the Railway path drops full 1280-byte packets and
+  TLS handshakes stall.
 - Chrome, the shared CDP browser and every Playwright browser, gets a PAC that
   sends `*.pods.internal` to a proxy on `127.0.0.2:1056` and everything else
   direct. The proxy dials `PODS_HOST_IP` on the same port, 80 or 443 only,

@@ -4,24 +4,24 @@
 // the ACL the node needs: README.md.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFs from "node:fs";
-import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 
 const socket = "/tmp/tailscale/tailscaled.sock";
 
-function tailscale(args, timeout = 90_000) {
-  return new Promise((resolve) =>
-    NodeChildProcess.execFile(
+function tailscale(args, { timeout = 90_000, input } = {}) {
+  return new Promise((resolve) => {
+    const child = NodeChildProcess.execFile(
       "tailscale",
       [`--socket=${socket}`, ...args],
       { timeout },
       (error, stdout) => resolve({ ok: !error, stdout }),
-    ),
-  );
+    );
+    child.stdin.end(input);
+  });
 }
 
 async function readStatus() {
-  const { ok, stdout } = await tailscale(["status", "--json"], 5000);
+  const { ok, stdout } = await tailscale(["status", "--json"], { timeout: 5000 });
   let status;
   try {
     status = ok && JSON.parse(stdout);
@@ -43,18 +43,18 @@ async function join(authKey, hostname) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   if (status.state !== "NeedsLogin") return;
-  const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "ts-"));
-  const keyFile = NodePath.join(dir, "key");
-  NodeFs.writeFileSync(keyFile, authKey, { mode: 0o600 });
-  const { ok } = await tailscale([
-    "up",
-    `--auth-key=file:${keyFile}`,
-    `--hostname=${hostname}`,
-    "--accept-dns=false",
-    "--accept-routes=false",
-    "--timeout=60s",
-  ]);
-  NodeFs.rmSync(dir, { recursive: true, force: true });
+  // On stdin, never on disk: Chrome runs as the same user and can read files.
+  const { ok } = await tailscale(
+    [
+      "up",
+      "--auth-key=file:/dev/stdin",
+      `--hostname=${hostname}`,
+      "--accept-dns=false",
+      "--accept-routes=false",
+      "--timeout=60s",
+    ],
+    { input: authKey },
+  );
   if (!ok) console.error("tailscale: up failed (expired, used or untagged auth key?)");
 }
 
@@ -91,9 +91,5 @@ export function startTailnet({ authKey, hostname, socksAddress }) {
   };
   run();
   setInterval(refresh, 30_000).unref();
-  return {
-    status: () => current,
-    // Removes the node at once instead of leaving an offline ephemeral one.
-    logout: () => tailscale(["logout"], 5000),
-  };
+  return { status: () => current };
 }
