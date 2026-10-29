@@ -8,11 +8,13 @@ import * as NodePath from "node:path";
 
 const socket = "/tmp/tailscale/tailscaled.sock";
 
+// Node's stdin pipe is a socket, which `file:/dev/stdin` cannot open; `cat`
+// turns it into a real pipe.
 function tailscale(args, { timeout = 90_000, input } = {}) {
   return new Promise((resolve) => {
     const child = NodeChildProcess.execFile(
-      "tailscale",
-      [`--socket=${socket}`, ...args],
+      "sh",
+      ["-c", 'cat | exec tailscale "$@"', "tailscale", `--socket=${socket}`, ...args],
       { timeout },
       (error, stdout) => resolve({ ok: !error, stdout }),
     );
