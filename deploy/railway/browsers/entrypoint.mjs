@@ -1,16 +1,23 @@
 // Browser pool front for Railway. Runs `playwright run-server` (a fresh
 // Chromium per connection) and one shared headless Chromium for raw CDP, both
 // on loopback, and fronts them on all interfaces with a session cap, an idle
-// timeout and, for Playwright, a token. Setup and clients: README.md.
+// timeout and a token. With TS_AUTHKEY it also joins the tailnet and routes
+// *.pods.internal there. Setup and clients: README.md.
 import * as NodeChildProcess from "node:child_process";
-import * as NodeCrypto from "node:crypto";
-import * as NodeHttp from "node:http";
+import * as NodeFs from "node:fs";
 import * as NodeNet from "node:net";
+import * as NodeOs from "node:os";
+import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import { chromium } from "playwright";
+import { createFront } from "./front.mjs";
+import { createPodsProxy, pacUrl, socks5Dial } from "./pods-proxy.mjs";
+import { startTailnet } from "./tailnet.mjs";
 
 const token = Buffer.from(process.env.BROWSERS_TOKEN ?? "");
+const authKey = process.env.TS_AUTHKEY ?? "";
 delete process.env.BROWSERS_TOKEN;
+delete process.env.TS_AUTHKEY;
 if (token.length < 16) {
   console.error("BROWSERS_TOKEN must be set to at least 16 characters");
   process.exit(1);
@@ -27,10 +34,51 @@ const port = positiveInt("PORT", 3000);
 const cdpPort = positiveInt("CDP_PORT", 9222);
 const maxSessions = positiveInt("MAX_SESSIONS", 6);
 const idleMs = positiveInt("IDLE_TIMEOUT_SECONDS", 300) * 1000;
-const playwrightUpstream = port + 1;
-const cdpUpstream = cdpPort + 1;
-let sessions = 0;
-let cdpSessions = 0;
+// Userspace tailscaled delivers tailnet connections to 127.0.0.1, so internal
+// listeners that can bind elsewhere stay off it. Chrome's debugging port
+// cannot: it always binds 127.0.0.1 (README: Tailnet).
+const internalHost = "127.0.0.2";
+const playwrightUpstream = { host: internalHost, port: port + 1 };
+const cdpUpstream = { host: "127.0.0.1", port: cdpPort + 1 };
+const socksAddress = `${internalHost}:1055`;
+const podsProxyPort = 1056;
+
+const podsHostIp = process.env.PODS_HOST_IP ?? "";
+if (podsHostIp && !NodeNet.isIPv4(podsHostIp)) {
+  console.error("PODS_HOST_IP must be an IPv4 address");
+  process.exit(1);
+}
+const tailnet = authKey
+  ? startTailnet({ authKey, hostname: "railway-browser", socksAddress })
+  : undefined;
+const podsRouting = Boolean(tailnet && podsHostIp);
+
+// Chrome reads its trusted roots from the user's NSS database.
+function trustPodsCa(pem) {
+  const db = `sql:${NodePath.join(NodeOs.homedir(), ".pki/nssdb")}`;
+  NodeFs.mkdirSync(NodePath.join(NodeOs.homedir(), ".pki/nssdb"), { recursive: true });
+  const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "ca-"));
+  const file = NodePath.join(dir, "pods-ca.pem");
+  NodeFs.writeFileSync(file, pem.replaceAll("\\n", "\n"));
+  try {
+    if (!NodeFs.existsSync(NodePath.join(NodeOs.homedir(), ".pki/nssdb/cert9.db")))
+      NodeChildProcess.execFileSync("certutil", ["-d", db, "-N", "--empty-password"]);
+    NodeChildProcess.execFileSync("certutil", ["-d", db, "-A", "-t", "C,,", "-n", "pods-internal", "-i", file]);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+if (podsRouting) {
+  if (process.env.PODS_CA_PEM) trustPodsCa(process.env.PODS_CA_PEM);
+  // Chromium on Linux reads a PAC URL from auto_proxy; both browsers inherit it.
+  process.env.auto_proxy = pacUrl(`${internalHost}:${podsProxyPort}`);
+  const [socksHost, socksPort] = socksAddress.split(":");
+  createPodsProxy({ targetIp: podsHostIp, dial: socks5Dial(socksHost, Number(socksPort)) }).listen(
+    podsProxyPort,
+    internalHost,
+    () => console.log(`*.pods.internal -> ${podsHostIp} via the tailnet`),
+  );
+}
 
 const children = [];
 function start(command, args) {
@@ -41,8 +89,9 @@ function start(command, args) {
   });
   children.push(child);
 }
-function stop(code) {
+async function stop(code) {
   for (const child of children) child.kill("SIGTERM");
+  await tailnet?.logout();
   process.exit(code);
 }
 process.on("SIGTERM", () => stop(0));
@@ -50,15 +99,15 @@ process.on("SIGTERM", () => stop(0));
 start(NodeURL.fileURLToPath(new URL("node_modules/.bin/playwright", import.meta.url)), [
   "run-server",
   "--host",
-  "127.0.0.1",
+  playwrightUpstream.host,
   "--port",
-  String(playwrightUpstream),
+  String(playwrightUpstream.port),
   "--path",
   "/pw",
 ]);
 start(chromium.executablePath(), [
   "--headless=new",
-  `--remote-debugging-port=${cdpUpstream}`,
+  `--remote-debugging-port=${cdpUpstream.port}`,
   "--no-sandbox",
   "--disable-gpu",
   "--disable-dev-shm-usage",
@@ -67,80 +116,12 @@ start(chromium.executablePath(), [
   "about:blank",
 ]);
 
-function refuse(socket, status) {
-  socket.end(
-    `HTTP/1.1 ${status}\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`,
-  );
-}
-
-// Pipes an upgraded WebSocket to a loopback upstream. Chrome only accepts a
-// loopback or IP Host, so the Host header is rewritten. Traffic in either
-// direction resets the idle timer.
-function forward(req, socket, head, upstreamPort, path, onClose) {
-  if (sessions >= maxSessions) return refuse(socket, "503 Service Unavailable");
-  sessions++;
-  let released = false;
-  let timer;
-  const upstream = NodeNet.connect(upstreamPort, "127.0.0.1");
-  const close = () => {
-    clearTimeout(timer);
-    socket.destroy();
-    upstream.destroy();
-    if (!released) {
-      released = true;
-      sessions--;
-      onClose?.();
-    }
-  };
-  const touch = () => {
-    clearTimeout(timer);
-    timer = setTimeout(close, idleMs);
-  };
-  upstream.on("connect", () => {
-    let raw = `${req.method} ${path} HTTP/1.1\r\n`;
-    for (let i = 0; i < req.rawHeaders.length; i += 2) {
-      const name = req.rawHeaders[i];
-      const value =
-        name.toLowerCase() === "host" ? `127.0.0.1:${upstreamPort}` : req.rawHeaders[i + 1];
-      raw += `${name}: ${value}\r\n`;
-    }
-    upstream.write(`${raw}\r\n`);
-    upstream.write(head);
-    socket.pipe(upstream).pipe(socket);
-  });
-  for (const side of [socket, upstream]) {
-    side.on("data", touch);
-    side.on("close", close);
-    side.on("error", close);
-  }
-  touch();
-}
-
-// The token travels as ?token= because Playwright strips query strings from
-// the URLs it prints in errors and logs.
-function tokenMatches(url) {
-  const given = Buffer.from(new URLSearchParams(url.split("?")[1] ?? "").get("token") ?? "");
-  return given.length === token.length && NodeCrypto.timingSafeEqual(given, token);
-}
-
-// Chrome's own DNS-rebinding guard: only an IP, localhost, or a Railway private
-// hostname, and no browser Origin (CDP libraries send none).
-function cdpAllowed(req) {
-  const host = req.headers.host ?? "";
-  const name = host.startsWith("[")
-    ? host.slice(1, host.indexOf("]"))
-    : host.replace(/:[0-9]+$/, "");
-  const nameAllowed =
-    NodeNet.isIP(name) !== 0 || name === "localhost" || name.endsWith(".railway.internal");
-  return nameAllowed && req.headers.origin === undefined;
-}
-
 let ready = false;
 function upstreamsReady() {
   if (ready) return Promise.resolve(true);
-  const probe = (upstreamPort) =>
+  const probe = ({ host, port }) =>
     new Promise((resolve) => {
-      const socket = NodeNet.connect(upstreamPort, "127.0.0.1", () => {
+      const socket = NodeNet.connect(port, host, () => {
         socket.destroy();
         resolve(true);
       });
@@ -151,83 +132,15 @@ function upstreamsReady() {
   );
 }
 
-function cdpRequest(path, method = "GET") {
-  return new Promise((resolve, reject) => {
-    const req = NodeHttp.request(
-      { host: "127.0.0.1", port: cdpUpstream, path, method, timeout: 10_000 },
-      (res) => {
-        const chunks = [];
-        res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () =>
-          resolve({
-            status: res.statusCode ?? 502,
-            headers: res.headers,
-            body: Buffer.concat(chunks),
-          }),
-        );
-      },
-    );
-    req.on("timeout", () => req.destroy(new Error("CDP upstream timed out")));
-    req.on("error", reject);
-    req.end();
-  });
-}
-
-// Pages a CDP client opened in the shared browser's default context outlive
-// the client. Once no CDP client is left, replace them with one blank page.
-async function resetSharedBrowser() {
-  const targets = JSON.parse((await cdpRequest("/json/list")).body.toString());
-  const pages = targets.filter((target) => target.type === "page");
-  if (cdpSessions > 0) return;
-  await cdpRequest("/json/new?about:blank", "PUT");
-  // Listed before any new client attached, so none of these are its pages.
-  for (const page of pages) await cdpRequest(`/json/close/${page.id}`);
-}
-function cdpClosed() {
-  cdpSessions--;
-  if (cdpSessions === 0)
-    resetSharedBrowser().catch((error) => console.error(`CDP reset failed: ${error.message}`));
-}
-
-const playwright = NodeHttp.createServer(async (req, res) => {
-  if (req.url === "/healthz") {
-    const ok = await upstreamsReady();
-    res.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
-    return res.end(JSON.stringify({ ok, sessions, maxSessions }));
-  }
-  res.writeHead(404).end();
+const { playwright, cdp } = createFront({
+  token,
+  maxSessions,
+  idleMs,
+  playwrightUpstream,
+  cdpUpstream,
+  ready: upstreamsReady,
+  tailnet: tailnet?.status,
+  playwrightChannel: podsRouting ? "chromium" : undefined,
 });
-playwright.on("upgrade", (req, socket, head) => {
-  socket.on("error", () => socket.destroy());
-  if (!tokenMatches(req.url)) return refuse(socket, "401 Unauthorized");
-  forward(req, socket, head, playwrightUpstream, "/pw");
-});
-
-// CDP clients read /json/version first and connect to the URL in it; Chrome
-// writes its own loopback address there, so swap in the Host the client used.
-const cdp = NodeHttp.createServer(async (req, res) => {
-  if (!cdpAllowed(req) || (req.method !== "GET" && req.method !== "PUT"))
-    return res.writeHead(403).end();
-  try {
-    const upstream = await cdpRequest(req.url, req.method);
-    const body = upstream.body
-      .toString()
-      .replaceAll(`127.0.0.1:${cdpUpstream}`, () => req.headers.host);
-    res.writeHead(upstream.status, {
-      "content-type": upstream.headers["content-type"] ?? "application/json",
-    });
-    res.end(body);
-  } catch {
-    res.writeHead(502).end();
-  }
-});
-cdp.on("upgrade", (req, socket, head) => {
-  socket.on("error", () => socket.destroy());
-  if (!cdpAllowed(req) || !req.url.startsWith("/devtools/")) return refuse(socket, "403 Forbidden");
-  if (sessions >= maxSessions) return refuse(socket, "503 Service Unavailable");
-  cdpSessions++;
-  forward(req, socket, head, cdpUpstream, req.url, cdpClosed);
-});
-
 playwright.listen(port, "::", () => console.log(`playwright on :${port}, cap ${maxSessions}`));
 cdp.listen(cdpPort, "::", () => console.log(`cdp on :${cdpPort}`));
