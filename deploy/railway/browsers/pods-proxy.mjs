@@ -13,8 +13,11 @@ export function pacUrl(proxyAddress) {
   return `data:application/x-ns-proxy-autoconfig;base64,${Buffer.from(script).toString("base64")}`;
 }
 
-function isPodsHost(hostname) {
-  return hostname.endsWith(podsDomain) && hostname.length > podsDomain.length;
+// Only the pods proxy's ports, so a page cannot reach the rest of its host.
+const podsPorts = new Set([80, 443]);
+
+function isPodsTarget(hostname, port) {
+  return hostname.endsWith(podsDomain) && hostname.length > podsDomain.length && podsPorts.has(port);
 }
 
 // SOCKS5 CONNECT, no auth, to an IPv4 address (tailscaled's SOCKS5 server).
@@ -67,11 +70,12 @@ export function createPodsProxy({ targetIp, dial }) {
     } catch {
       return res.writeHead(400).end();
     }
-    if (target.protocol !== "http:" || !isPodsHost(target.hostname))
+    const port = Number(target.port || 80);
+    if (target.protocol !== "http:" || !isPodsTarget(target.hostname, port))
       return res.writeHead(403).end();
     let socket;
     try {
-      socket = await dial(targetIp, Number(target.port || 80));
+      socket = await dial(targetIp, port);
     } catch {
       return res.writeHead(502).end();
     }
@@ -96,12 +100,19 @@ export function createPodsProxy({ targetIp, dial }) {
   });
   server.on("connect", async (req, client, head) => {
     client.on("error", () => client.destroy());
-    const { hostname, port } = new URL(`http://${req.url}`);
-    if (!isPodsHost(hostname))
+    let hostname, port;
+    try {
+      const target = new URL(`http://${req.url}`);
+      hostname = target.hostname;
+      port = Number(target.port || 443);
+    } catch {
+      return client.end("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+    }
+    if (!isPodsTarget(hostname, port))
       return client.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
     let socket;
     try {
-      socket = await dial(targetIp, Number(port || 443));
+      socket = await dial(targetIp, port);
     } catch {
       return client.end("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
     }

@@ -14,10 +14,10 @@ import { createFront } from "./front.mjs";
 import { createPodsProxy, pacUrl, socks5Dial } from "./pods-proxy.mjs";
 import { startTailnet } from "./tailnet.mjs";
 
-const token = Buffer.from(process.env.BROWSERS_TOKEN ?? "");
-const authKey = process.env.TS_AUTHKEY ?? "";
-delete process.env.BROWSERS_TOKEN;
-delete process.env.TS_AUTHKEY;
+// start.sh hands the secrets over on stdin, one per line, and keeps them out
+// of every process's environment.
+const [tokenLine = "", authKey = ""] = NodeFs.readFileSync(0, "utf8").split("\n");
+const token = Buffer.from(tokenLine);
 if (token.length < 16) {
   console.error("BROWSERS_TOKEN must be set to at least 16 characters");
   process.exit(1);
@@ -69,7 +69,11 @@ function trustPodsCa(pem) {
   }
 }
 if (podsRouting) {
-  if (process.env.PODS_CA_PEM) trustPodsCa(process.env.PODS_CA_PEM);
+  try {
+    if (process.env.PODS_CA_PEM) trustPodsCa(process.env.PODS_CA_PEM);
+  } catch {
+    console.error("PODS_CA_PEM not trusted (certutil failed); pods HTTPS will fail");
+  }
   // Chromium on Linux reads a PAC URL from auto_proxy; both browsers inherit it.
   process.env.auto_proxy = pacUrl(`${internalHost}:${podsProxyPort}`);
   const [socksHost, socksPort] = socksAddress.split(":");

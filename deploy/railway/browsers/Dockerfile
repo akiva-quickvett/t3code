@@ -24,10 +24,10 @@ WORKDIR /app
 # The image ships the browsers but not the package.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN npm install --no-fund --no-audit playwright@1.60.0 && npm cache clean --force
-COPY entrypoint.mjs front.mjs pods-proxy.mjs tailnet.mjs ./
+COPY start.sh entrypoint.mjs front.mjs pods-proxy.mjs tailnet.mjs ./
 
 USER pwuser
 ENV PORT=3000 \
     CDP_PORT=9222
 EXPOSE 3000 9222
-ENTRYPOINT ["/usr/bin/tini", "--", "node", "/app/entrypoint.mjs"]
+ENTRYPOINT ["/app/start.sh"]

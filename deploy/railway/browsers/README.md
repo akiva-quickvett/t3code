@@ -17,8 +17,10 @@ stand-in for a hosted browser service: swap the URL variables to move.
 
 ## How it works
 
-[`entrypoint.mjs`](entrypoint.mjs) starts `playwright run-server` and one
-Chromium with remote debugging, both on loopback, and fronts them
+[`start.sh`](start.sh) passes `BROWSERS_TOKEN` and `TS_AUTHKEY` to
+[`entrypoint.mjs`](entrypoint.mjs) on stdin, so no process, browsers included,
+has them in its environment. The entrypoint starts `playwright run-server` and
+one Chromium with remote debugging, both on loopback, and fronts them
 ([`front.mjs`](front.mjs)):
 
 - Port `$PORT` accepts WebSocket upgrades only with `?token=<BROWSERS_TOKEN>`
@@ -102,8 +104,9 @@ What runs, as `pwuser`, from [`tailnet.mjs`](tailnet.mjs) and
   Railway path drops full 1280-byte packets and TLS handshakes stall.
 - Chrome, the shared CDP browser and every Playwright browser, gets a PAC that
   sends `*.pods.internal` to a proxy on `127.0.0.2:1056` and everything else
-  direct. The proxy dials `PODS_HOST_IP` on the same port through tailscaled's
-  SOCKS5 (`127.0.0.2:1055`); the hostname stays in the Host header and TLS SNI.
+  direct. The proxy dials `PODS_HOST_IP` on the same port, 80 or 443 only,
+  through tailscaled's SOCKS5 (`127.0.0.2:1055`); the hostname stays in the
+  Host header and TLS SNI.
   `PODS_CA_PEM` goes into `pwuser`'s NSS database, so Chrome trusts the pods
   proxy's certificates. Chromium's headless shell ignores a PAC, so Playwright
   launches use full Chromium (`channel: "chromium"`), about twice the memory
@@ -114,13 +117,15 @@ From the tailnet, with `<ip>` from `tailscale status`:
 
 - Playwright: `ws://<ip>:3000/?token=<BROWSERS_TOKEN>`, as above.
 - CDP: `http://<ip>:9222/t/<BROWSERS_TOKEN>/`, for any CDP client:
-  `chromium.connectOverCDP("http://<ip>:9222/t/<token>/")`.
+  `chromium.connectOverCDP("http://<ip>:9222/t/<token>/")`. Playwright strips
+  only query strings from the URLs in its errors, so this one shows the token:
+  keep such errors out of shared logs.
 
 Variables on `browsers`:
 
 | Variable       | Value                                                                  |
 | -------------- | ---------------------------------------------------------------------- |
-| `TS_AUTHKEY`   | Tailscale auth key, reusable, ephemeral, tagged (sealed); never logged |
+| `TS_AUTHKEY`   | Tailscale auth key, reusable, ephemeral, tagged (sealed)               |
 | `PODS_HOST_IP` | Tailnet IPv4 of the pods proxy host                                    |
 | `PODS_CA_PEM`  | The pods proxy's root certificate, PEM                                 |
 
