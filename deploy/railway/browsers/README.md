@@ -146,8 +146,9 @@ to ports 3000 and 9222, and let the node reach only the pods proxy:
 ]
 ```
 
-A rule that lets members reach `*` on every port also covers the tag; narrow it
-so the tag gets only the grant above.
+Grants only add access, so these bind only once no broader grant covers the
+tag: while the policy keeps a `*` to `*` grant, any tailnet device still reaches
+every port on the node, Chrome's included. Narrow that grant first.
 
 ## Public access
 
