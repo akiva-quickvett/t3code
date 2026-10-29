@@ -9,7 +9,7 @@ stand-in for a hosted browser service: swap the URL variables to move.
 | Service           | `browsers`, private host `browsers.railway.internal`                             |
 | Image             | `mcr.microsoft.com/playwright:v1.60.0-noble`, Chromium only                      |
 | Playwright server | port `3000`, `/?token=<BROWSERS_TOKEN>`, one fresh browser per connection        |
-| Raw CDP           | port `9222`, one shared browser per replica; tokenless only over Railway's network |
+| Raw CDP           | port `9222`, a shared browser per replica; tokenless only on Railway's network   |
 | Tailnet           | optional, `railway-browser[-N]`, also loads `https://*.pods.internal`            |
 | Cap               | `MAX_SESSIONS` connections per replica (default 6), then 503                     |
 | Idle timeout      | `IDLE_TIMEOUT_SECONDS` with no traffic either way closes a session (default 300) |
