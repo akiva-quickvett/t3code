@@ -31,8 +31,10 @@ export function socks5Dial(socksHost, socksPort) {
         socket.destroy();
         reject(error);
       };
+      const closed = () => fail(new Error("SOCKS5 closed during handshake"));
       socket.setTimeout(15_000, () => fail(new Error("SOCKS5 dial timed out")));
       socket.on("error", fail);
+      socket.on("close", closed);
       socket.on("connect", () => socket.write(Buffer.from([5, 1, 0])));
       const onData = (chunk) => {
         buffered = Buffer.concat([buffered, chunk]);
@@ -52,6 +54,9 @@ export function socks5Dial(socksHost, socksPort) {
           if (buffered[1] !== 0) return fail(new Error(`SOCKS5 connect failed (${buffered[1]})`));
           socket.off("data", onData);
           socket.off("error", fail);
+          socket.off("close", closed);
+          // Holds any bytes behind the reply until the caller reads.
+          socket.pause();
           socket.setTimeout(0);
           if (buffered.length > 10) socket.unshift(buffered.subarray(10));
           resolve(socket);
@@ -95,6 +100,8 @@ export function createPodsProxy({ targetIp, dial }) {
         upstreamRes.pipe(res);
       },
     );
+    // socks5Dial hands the socket over paused; http's parser is attached by now.
+    upstream.on("socket", (s) => s.resume());
     upstream.on("error", () => (res.headersSent ? res.destroy() : res.writeHead(502).end()));
     req.pipe(upstream);
   });
@@ -102,7 +109,8 @@ export function createPodsProxy({ targetIp, dial }) {
     client.on("error", () => client.destroy());
     let hostname, port;
     try {
-      const target = new URL(`http://${req.url}`);
+      // https, so an explicit :80 survives: URL drops only the scheme's default.
+      const target = new URL(`https://${req.url}`);
       hostname = target.hostname;
       port = Number(target.port || 443);
     } catch {
